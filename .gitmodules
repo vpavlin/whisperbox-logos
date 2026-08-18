@@ -1,0 +1,6 @@
+[submodule "third_party/loam-sync"]
+	path = third_party/loam-sync
+	url = https://github.com/vpavlin/loam-sync.git
+[submodule "third_party/loam-transport"]
+	path = third_party/loam-transport
+	url = https://github.com/vpavlin/loam-transport.git
