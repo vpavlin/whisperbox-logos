@@ -1,0 +1,34 @@
+{
+ "v": 1,
+ "identity": {
+  "address": "0x0123456789abcdef0123456789abcdef01234567",
+  "pubHex": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4"
+ },
+ "deviceId": "crib",
+ "nodeReady": false,
+ "state": {
+  "v": 1,
+  "forms": {},
+  "feed": [],
+  "responses": [],
+  "closeHlc": {},
+  "creator": null,
+  "pending": {
+   "count": 0,
+   "events": []
+  },
+  "dropped": {}
+ },
+ "creatorView": null,
+ "watched": [],
+ "mySubmissions": [],
+ "diagnostics": {
+  "rxRaw": 0,
+  "rxSeen": 0,
+  "rxNew": 0,
+  "rxDup": 0,
+  "txTotal": 0,
+  "admDropSig": 0,
+  "admDropType": 0
+ }
+}

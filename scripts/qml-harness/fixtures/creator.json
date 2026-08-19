@@ -1,0 +1,218 @@
+{
+ "v": 1,
+ "identity": {
+  "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+  "pubHex": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4"
+ },
+ "deviceId": "bosgame-A",
+ "nodeReady": true,
+ "state": {
+  "v": 1,
+  "forms": {
+   "form-cafef00d": {
+    "id": "form-cafef00d",
+    "title": "Coffee Preference Survey",
+    "description": "Anonymous-ish: answers are sealed to the creator only.",
+    "creator": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "publicKey": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4",
+    "createdAt": 1755580000000,
+    "expiresAt": null,
+    "questions": [
+     {
+      "id": "question_1",
+      "type": "text",
+      "text": "What do you take in your coffee?",
+      "required": true
+     },
+     {
+      "id": "question_2",
+      "type": "radioButtons",
+      "text": "How many cups a day?",
+      "required": true,
+      "options": [
+       "1",
+       "2",
+       "3+"
+      ]
+     },
+     {
+      "id": "question_3",
+      "type": "checkbox",
+      "text": "Toppings you like",
+      "required": false,
+      "options": [
+       "sugar",
+       "milk",
+       "honey",
+       "nothing"
+      ]
+     }
+    ],
+    "whitelist": {
+     "type": "none",
+     "value": ""
+    },
+    "status": "open",
+    "confirmations": [
+     "deadbeefcafe0001"
+    ]
+   },
+   "form-deadbeef": {
+    "id": "form-deadbeef",
+    "title": "Old Poll (closed)",
+    "description": "",
+    "creator": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "publicKey": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4",
+    "createdAt": 1755493600000,
+    "expiresAt": null,
+    "questions": [
+     {
+      "id": "question_1",
+      "type": "text",
+      "text": "Ship it?",
+      "required": true
+     }
+    ],
+    "whitelist": {
+     "type": "none",
+     "value": ""
+    },
+    "status": "closed",
+    "confirmations": []
+   }
+  },
+  "feed": [
+   "form-cafef00d"
+  ],
+  "responses": [
+   {
+    "id": "resp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "hlc": {
+     "wall": 1755580100000,
+     "ctr": 1,
+     "dev": "bosgame-B"
+    },
+    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+   },
+   {
+    "id": "resp:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "hlc": {
+     "wall": 1755580200000,
+     "ctr": 2,
+     "dev": "pi5"
+    },
+    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+   },
+   {
+    "id": "resp:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "hlc": {
+     "wall": 1755580300000,
+     "ctr": 3,
+     "dev": "crib"
+    },
+    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+   }
+  ],
+  "closeHlc": {
+   "form-deadbeef": {
+    "wall": 1755494000000,
+    "ctr": 9,
+    "dev": "bosgame-A"
+   }
+  },
+  "creator": {
+   "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+   "forms": [
+    "form-cafef00d",
+    "form-deadbeef"
+   ]
+  },
+  "pending": {
+   "count": 0,
+   "events": []
+  },
+  "dropped": {}
+ },
+ "creatorView": {
+  "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+  "forms": [
+   "form-cafef00d",
+   "form-deadbeef"
+  ],
+  "responses": {
+   "form-cafef00d": [
+    {
+     "respondent": "0xaabbccddeeff00112233445566778899aabbccdd",
+     "submittedAt": 1755580100000,
+     "answers": [
+      {
+       "questionId": "question_1",
+       "value": "black, no sugar"
+      },
+      {
+       "questionId": "question_2",
+       "value": 2
+      },
+      {
+       "questionId": "question_3",
+       "value": [
+        0,
+        2
+       ]
+      }
+     ],
+     "signature": null,
+     "hlc": {
+      "wall": 1755580100000,
+      "ctr": 1,
+      "dev": "bosgame-B"
+     },
+     "confirmed": true
+    },
+    {
+     "respondent": "0x0123456789abcdef0123456789abcdef01234567",
+     "submittedAt": 1755580200000,
+     "answers": [
+      {
+       "questionId": "question_1",
+       "value": "oat milk latte"
+      },
+      {
+       "questionId": "question_2",
+       "value": 0
+      }
+     ],
+     "signature": null,
+     "hlc": {
+      "wall": 1755580200000,
+      "ctr": 2,
+      "dev": "pi5"
+     },
+     "confirmed": false
+    }
+   ],
+   "form-deadbeef": []
+  },
+  "confirmations": {
+   "form-cafef00d": [
+    "deadbeefcafe0001"
+   ],
+   "form-deadbeef": []
+  },
+  "undecrypted": 0,
+  "dropped": {}
+ },
+ "watched": [
+  "form-cafef00d"
+ ],
+ "mySubmissions": [],
+ "diagnostics": {
+  "rxRaw": 42,
+  "rxSeen": 40,
+  "rxNew": 38,
+  "rxDup": 2,
+  "txTotal": 7,
+  "admDropSig": 0,
+  "admDropType": 1
+ }
+}

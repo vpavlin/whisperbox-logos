@@ -90,6 +90,8 @@ private:
     void saveLog();
     void loadWatched();
     void saveWatched();
+    void loadMySubmissions();
+    void saveMySubmissions();
     std::string randomHex(int bytes);
 
     // --- delivery (all calls async / fire-and-forget) ---
@@ -105,6 +107,7 @@ private:
     std::string m_deviceId = "whisperbox-core";
     std::string m_dataDir;                // ~/.whisperbox-core or $WHISPERBOX_CORE_DATA
     std::set<std::string> m_watched;      // locally joined form ids
+    std::set<std::string> m_mySubmissions; // form ids this device has responded to (local, private)
     std::string m_snapshot = "{}";
     std::string m_status = "Starting...";
     bool m_nodeReady = false;

@@ -1,0 +1,26 @@
+{
+  "name": "whisperbox",
+  "display_name": "WhisperBox - Encrypted Forms",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "category": "social",
+  "description": "Privacy-first encrypted forms over Waku. Create forms, share a URI/QR, respondents answer end-to-end sealed to the creator only; the creator decrypts, confirms and exports CSV. Pure-QML view over the whisperbox_core module.",
+  "view": "Main.qml",
+  "icon": "icon.png",
+  "dependencies": [
+    "whisperbox_core"
+  ],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

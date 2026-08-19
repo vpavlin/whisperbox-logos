@@ -65,6 +65,7 @@ void WhisperboxCoreImpl::onContextReady() {
     fprintf(stderr, "WHISPERBOX log events=%zu\n", m_log.size());
     m_clock.primeFrom(m_log);
     loadWatched();
+    loadMySubmissions();
     bootstrapDelivery();
     fprintf(stderr, "WHISPERBOX delivery bootstrapped nodeReady=%d\n", (int)m_nodeReady);
     // Hub tick: retry node start until ready, then a rate-limited periodic seed so
@@ -158,6 +159,18 @@ void WhisperboxCoreImpl::loadWatched() {
 void WhisperboxCoreImpl::saveWatched() {
     json a = json::array(); for (auto& id : m_watched) a.push_back(id);
     std::ofstream f(m_dataDir + "/watched.json", std::ios::trunc); if (f) f << a.dump();
+}
+void WhisperboxCoreImpl::loadMySubmissions() {
+    m_mySubmissions.clear();
+    std::ifstream f(m_dataDir + "/my_submissions.json"); if (!f) return;
+    try {
+        json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
+        if (a.is_array()) for (auto& x : a) if (x.is_string()) m_mySubmissions.insert(lc(x.get<std::string>()));
+    } catch (...) { /* ignore */ }
+}
+void WhisperboxCoreImpl::saveMySubmissions() {
+    json a = json::array(); for (auto& id : m_mySubmissions) a.push_back(id);
+    std::ofstream f(m_dataDir + "/my_submissions.json", std::ios::trunc); if (f) f << a.dump();
 }
 
 // ── delivery bootstrap (mirrors qaku: logos.test fleet pinned, async only) ───────
@@ -425,6 +438,29 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
             return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
         };
         creatorViewJson = whisperbox::creatorView(state, me, open, verifyResponse);
+
+        // Module-layer post-process (NOT the engine — keeps byte-parity intact):
+        // mark each decrypted response confirmed/not by matching the deterministic
+        // confirmationId = hex(sha256(formId|respondent))[0:16] against the public
+        // confirmations set. The view can't hash, so we surface it here.
+        if (creatorViewJson.contains("responses") && creatorViewJson.contains("confirmations")) {
+            const json& confs = creatorViewJson["confirmations"];
+            for (auto it = creatorViewJson["responses"].begin(); it != creatorViewJson["responses"].end(); ++it) {
+                std::string fid = it.key();
+                if (!confs.contains(fid)) continue;
+                const json& cids = confs[fid];
+                for (auto& r : it.value()) {
+                    if (!r.is_object() || !r.contains("respondent")) continue;
+                    std::string respAddr = lc(r["respondent"].get<std::string>());
+                    whisperbox::Bytes h = whisperbox::sha256(
+                        whisperbox::Bytes((fid + "|" + respAddr).begin(), (fid + "|" + respAddr).end()));
+                    std::string cid = whisperbox::toHex(h.data(), 8);
+                    bool confirmed = false;
+                    for (auto& c : cids) if (c.is_string() && c.get<std::string>() == cid) { confirmed = true; break; }
+                    r["confirmed"] = confirmed;
+                }
+            }
+        }
     }
 
     OrderedJson snap = OrderedJson::object();
@@ -437,6 +473,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["creatorView"] = creatorViewJson.is_null() ? nullptr : creatorViewJson;
     json watchedArr = json::array(); for (auto& id : m_watched) watchedArr.push_back(id);
     snap["watched"] = watchedArr;
+    json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
+    snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType},
@@ -590,6 +628,8 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         adoptLocal(e);
         broadcastEvent(e);
         publishState();
+        m_mySubmissions.insert(formId);   // local, private: "I already answered this"
+        saveMySubmissions();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
     } catch (const std::exception& ex) {
         fprintf(stderr, "WHISPERBOX submit EXCEPTION (%s): %s\n", typeid(ex).name(), ex.what());
@@ -650,6 +690,8 @@ std::string WhisperboxCoreImpl::deleteLocalForm(std::string formId) {
     formId = lc(formId);
     m_watched.erase(formId);
     saveWatched();
+    m_mySubmissions.erase(formId);
+    saveMySubmissions();
     publishState();
     json out = {{"ok", true}, {"formId", formId}};
     return out.dump();
