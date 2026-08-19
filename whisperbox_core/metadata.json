@@ -1,0 +1,29 @@
+{
+  "name": "whisperbox_core",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "category": "social",
+  "description": "WhisperBox privacy-first forms core: append-only event log over one shared delivery topic, secp256k1 identity + ECIES response sealing to form creators, HLC-ordered CRDT merge with creator-view decryption. Runs headless under logoscore and behind the whisperbox ui_qml view.",
+  "main": "whisperbox_core_plugin",
+  "dependencies": [
+    "delivery_module"
+  ],
+  "nix": {
+    "packages": {
+      "build": [
+        "openssl"
+      ],
+      "runtime": [
+        "openssl"
+      ]
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

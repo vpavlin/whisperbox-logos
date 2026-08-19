@@ -101,6 +101,22 @@ int main(int argc, char** argv) {
     }
     CHECK(nSeal == 5, "five sealed blobs present");
 
+    // ── 5. Random-ephemeral seal/open round-trip (the submitResponse path) ────
+    std::printf("random eph round-trip:\n");
+    {
+        const Bytes pt = strBytes(R"({"formId":"form-x","respondent":"0xabc","answers":[]})");
+        bool rtOk = false;
+        try {
+            const Bytes sealed = eciesSeal(byName[1].pub, pt); // random eph + nonce
+            CHECK(sealed.size() == 1 + 33 + 12 + pt.size() + 16, "sealed length sane");
+            const Bytes opened = eciesOpen(byName[1].priv, sealed);
+            rtOk = (opened == pt);
+        } catch (const std::exception& ex) {
+            std::printf("  random-eph threw: %s\n", ex.what());
+        }
+        CHECK(rtOk, "random-eph seal→open round-trip");
+    }
+
     std::printf(failures == 0 ? "\nPARITY GREEN\n" : "\nPARITY FAILED (%d)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -1,37 +1,21 @@
-# whisperbox_core dev flake — P2 parity test (TS↔C++ crypto byte-parity).
-# Build:   nix build whisperbox_core            (from repo root)
-# Run:     result/bin/parity-test <repo-root>
-# (The module build itself comes in P3 via logos-module-builder; this flake only
-#  compiles the header-only core against nixpkgs OpenSSL + nlohmann_json. Fixtures
-#  are read from the live repo tree at runtime — no store bundling.)
 {
-  description = "whisperbox_core dev tools";
+  description = "WhisperBox privacy-first forms CORE module (event log + ECIES sealing + delivery sync); headless AND the desktop ui backend.";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-
-  outputs = { self, nixpkgs }: let
-    pkgs = nixpkgs.legacyPackages.x86_64-linux;
-    parityTest = pkgs.stdenv.mkDerivation {
-      pname = "whisperbox-parity";
-      version = "0.1.0";
-      src = ./.; # whisperbox_core/ only (headers + test)
-      buildInputs = [ pkgs.openssl.dev pkgs.nlohmann_json ];
-      dontConfigure = true;
-      buildPhase = ''
-        runHook preBuild
-        $CXX -std=c++17 -O1 \
-          -I . \
-          -I ${pkgs.nlohmann_json}/include \
-          test/parity_test.cpp \
-          -o parity-test -lssl -lcrypto
-      '';
-      installPhase = ''
-        runHook preInstall
-        mkdir -p $out/bin
-        cp parity-test $out/bin/
-      '';
-    };
-  in {
-    packages.x86_64-linux = { inherit parityTest; parity-test = parityTest; default = parityTest; };
+  inputs = {
+    # Same pinned SDK rev + channel-capable delivery_module as qaku-logos, so both
+    # modules build against ONE SDK (avoids cross-module IPC skew). Re-pin to the
+    # rev your installed Basecamp was built on.
+    delivery_module.url = "github:logos-co/logos-delivery-module/0fb3a7427b29c98ab0fa2465bcd1e90cbfdf50a3";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/afe4430ee6eb7ba45c08a516a43e18500720c715";
+    delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
   };
+
+  # mkLogosModule (not mkLogosQmlModule): a headless core module — no QML view,
+  # the plugin glue is generated from src/whisperbox_core_impl.h (universal authoring).
+  outputs = inputs@{ logos-module-builder, ... }:
+    logos-module-builder.lib.mkLogosModule {
+      src = ./.;
+      configFile = ./metadata.json;
+      flakeInputs = inputs;
+    };
 }

@@ -189,4 +189,42 @@ inline bool verifyEvent(const Event& e) {
     return ecdsaVerify(pub, digest, sig);
 }
 
+// JSON-based convenience (the module layer passes events as nlohmann json).
+// Never throws.
+inline bool verifyEventJson(const json& e) {
+    Event ev;
+    ev.v = e.value("v", 1);
+    ev.id = e.value("id", "");
+    ev.type = e.value("type", "");
+    if (e.contains("hlc") && e["hlc"].is_object()) {
+        ev.hlc.wall = e["hlc"].value("wall", 0LL);
+        ev.hlc.ctr = e["hlc"].value("ctr", 0LL);
+        ev.hlc.dev = e["hlc"].value("dev", "");
+    }
+    ev.dev = e.value("dev", "");
+    if (e.contains("payload") && e["payload"].is_object()) ev.payload = e["payload"];
+    ev.pub = e.value("pub", "");   // null/absent → "" (unsigned)
+    ev.sig = e.value("sig", "");
+    return verifyEvent(ev);
+}
+
+// JSON-based signing (the module layer passes events as nlohmann json):
+// adds pub/sig to the envelope in place. Never throws for a valid identity.
+inline void signEventJson(json& e, const SignId& id) {
+    Event ev;
+    ev.v = e.value("v", 1);
+    ev.id = e.value("id", "");
+    ev.type = e.value("type", "");
+    if (e.contains("hlc") && e["hlc"].is_object()) {
+        ev.hlc.wall = e["hlc"].value("wall", 0LL);
+        ev.hlc.ctr = e["hlc"].value("ctr", 0LL);
+        ev.hlc.dev = e["hlc"].value("dev", "");
+    }
+    ev.dev = e.value("dev", "");
+    if (e.contains("payload") && e["payload"].is_object()) ev.payload = e["payload"];
+    signEvent(id, ev);
+    e["pub"] = ev.pub;
+    e["sig"] = ev.sig;
+}
+
 } // namespace whisperbox
