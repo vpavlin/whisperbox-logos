@@ -96,6 +96,7 @@ private:
     void bootstrapDelivery();
     void joinTransport();
     void seedBroadcast();
+    void requestSync();
 
     // --- state ---
     std::vector<whisperbox::json> m_log;              // merged, HLC-ordered (single shared log)
@@ -117,6 +118,9 @@ private:
 
     int64_t m_lastSyncReserveMs = 0;      // SYNC_REQ-driven re-serve throttle (3s)
     int64_t m_lastSeedMs = 0;             // periodic seed throttle (60s)
+    int64_t m_lastSyncReqMs = 0;          // last outgoing SYNC_REQ
+    int m_syncReqTries = 0;               // outgoing SYNC_REQ attempts (backoff schedule)
+    int64_t m_lastStatMs = 0;             // 30s counter dump throttle
 
     std::recursive_mutex m_mtx;
     QTimer* m_hubTimer = nullptr;

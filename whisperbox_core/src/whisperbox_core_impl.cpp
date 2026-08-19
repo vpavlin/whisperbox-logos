@@ -73,7 +73,22 @@ void WhisperboxCoreImpl::onContextReady() {
     QObject::connect(m_hubTimer, &QTimer::timeout, [this] {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
         if (!m_nodeReady) bootstrapDelivery();
-        else if (nowMs() - m_lastSeedMs >= 60000 && !m_log.empty()) seedBroadcast();
+        else {
+            if (nowMs() - m_lastSeedMs >= 60000 && !m_log.empty()) seedBroadcast();
+            // Catchup retries while the log is still empty: 3s, 10s, 25s after the
+            // node-up request, then every 60s (self-heals late joiners on a sparse mesh).
+            if (m_log.empty() && m_nodeReady) {
+                static const long long kBackoffMs[] = {3000, 10000, 25000};
+                long long delay = m_syncReqTries <= 3 ? kBackoffMs[m_syncReqTries - 1] : 60000;
+                if (nowMs() - m_lastSyncReqMs >= delay) requestSync();
+            }
+            // Distributed-debugging: counters on stderr every 30s ("watch counters").
+            if (nowMs() - m_lastStatMs >= 30000) {
+                m_lastStatMs = nowMs();
+                fprintf(stderr, "WHISPERBOX stat node=%d log=%zu rxRaw=%ld rxSeen=%ld rxNew=%ld rxDup=%ld tx=%ld\n",
+                        (int)m_nodeReady, m_log.size(), m_rxRaw, m_rxSeen, m_rxNew, m_rxDup, m_txTotal);
+            }
+        }
     });
     m_hubTimer->start(1000);
     publishState();
@@ -95,8 +110,10 @@ void WhisperboxCoreImpl::setupDataDir() {
     system(("mkdir -p '" + m_dataDir + "' 2>/dev/null").c_str());
 }
 std::string WhisperboxCoreImpl::randomHex(int bytes) {
+    // CSPRNG — never rand(): an unseeded rand() is deterministic per process,
+    // which minted byte-identical "fresh" identities in two separate runs.
     whisperbox::Bytes b(bytes);
-    for (int i = 0; i < bytes; i++) b[i] = (uint8_t)(rand() & 0xFF);
+    for (int tries = 0; tries < 10 && bytes > 0 && RAND_bytes(b.data(), bytes) != 1; ++tries) {}
     return whisperbox::toHex(b);
 }
 void WhisperboxCoreImpl::loadIdentity() {
@@ -157,20 +174,23 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
         if (v.is_object() && v.contains("_bytes") && v["_bytes"].is_string()) return v["_bytes"].get<std::string>();
         return std::string();
     };
-    modules().delivery_module.onMessageReceived(
+    bool subMsg = modules().delivery_module.onMessageReceived(
         [this, toWire](const std::string&, const std::string& contentTopic, const LogosMap& payload, int64_t) {
+            fprintf(stderr, "WHISPERBOX onMessageReceived topic=%s size=%zu\n", contentTopic.c_str(), payload.size());
             if (contentTopic != TOPIC) return;
             std::string p = toWire(payload);
             if (p.empty() && payload.is_object() && payload.contains("payload")) p = toWire(payload["payload"]);
             if (!p.empty()) ingestEnvelopeText(p, /*channelPath=*/false);
         });
-    modules().delivery_module.onChannelMessageReceived(
+    bool subCh = modules().delivery_module.onChannelMessageReceived(
         [this, toWire](const std::string& channelId, const std::string&, const LogosMap& payload, int64_t) {
+            fprintf(stderr, "WHISPERBOX onChannelMessageReceived channel=%s size=%zu\n", channelId.c_str(), payload.size());
             if (channelId != TOPIC) return;
             std::string p = toWire(payload);
             if (p.empty() && payload.is_object() && payload.contains("payload")) p = toWire(payload["payload"]);
             if (!p.empty()) ingestEnvelopeText(p, /*channelPath=*/true);
         });
+    fprintf(stderr, "WHISPERBOX event subs msg=%d ch=%d\n", (int)subMsg, (int)subCh);
     setStatus("Connecting...");
     // RELAY node with the logos.test fleet entry nodes PINNED (qaku lesson: bare
     // {mode:Core,preset} gives ZERO bootstrap nodes — "Connected" but meshes with
@@ -200,7 +220,8 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
                 std::lock_guard<std::recursive_mutex> lk(m_mtx);
                 m_nodeReady = true;
                 joinTransport();
-                seedBroadcast();   // one full-log seed on node-up (joiners pull via SYNC_REQ)
+                seedBroadcast();   // serve our log if we have one
+                requestSync();     // AND pull: cold start with empty log needs history
                 setStatus("Connected");
                 publishState();
             });
@@ -222,6 +243,17 @@ void WhisperboxCoreImpl::seedBroadcast() {
     if (!m_nodeReady || m_log.empty()) return;
     for (const auto& e : m_log) broadcastEvent(e);
     m_lastSeedMs = nowMs();
+}
+
+// Ask peers for the full log (cold-start catchup). Peers answer with a full-log
+// seedBroadcast (rate-limited 3s on their side); idempotent — everyone dedups by id.
+void WhisperboxCoreImpl::requestSync() {
+    if (!m_nodeReady) return;
+    std::string text = whisperbox::eventToJsonText(whisperbox::envSyncReq(m_deviceId));
+    deliverySend(TOPIC, whisperbox::b64encode(text));
+    m_lastSyncReqMs = nowMs();
+    m_syncReqTries++;
+    fprintf(stderr, "WHISPERBOX requestSync try=%d\n", m_syncReqTries);
 }
 
 bool WhisperboxCoreImpl::deliverySend(const std::string& topic, const std::string& b64Text) {
@@ -268,8 +300,22 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
 }
 
 void WhisperboxCoreImpl::broadcastEvent(const json& e) {
+    // Guarded: calling delivery methods BEFORE the node is up fails with
+    // "no provider registered" and can wedge the FFI result plumbing so the
+    // createNode/start callbacks never fire (observed live — node up, module stuck).
+    // The event stays in the local log; reseed/SYNC_REQ delivers it later.
+    if (!m_nodeReady) return;
     std::string text = whisperbox::eventToJsonText(whisperbox::envEvent(e));
-    if (deliverySend(TOPIC, whisperbox::b64encode(text))) m_txTotal++;
+    const std::string b64 = whisperbox::b64encode(text);
+    // PRIMARY: relay publish — reaches every subscriber of the topic via the relay
+    // infrastructure; needs NO direct peer discovery (the original whisperbox Waku
+    // model). Channel send alone only works once peers have discovered each other.
+    try {
+        std::vector<uint8_t> raw(b64.begin(), b64.end());
+        modules().delivery_module.sendAsync(TOPIC, raw, [](StdLogosResult){});
+    } catch (...) { /* relay path best-effort; channel path + reseed still converge */ }
+    // SECONDARY: SDS channel send — fast path when a direct connection exists.
+    if (deliverySend(TOPIC, b64)) m_txTotal++;
 }
 
 // ── ingest (receive path) ────────────────────────────────────────────────────────
