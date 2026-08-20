@@ -113,7 +113,15 @@ Item {
         return null;
     }
 
-    Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
+    Timer { interval: 2500; running: true; repeat: true;
+             onTriggered: {
+                 root.refresh();
+                 // Self-healing share build: onSelectedIdChanged can be missed
+                 // (e.g. selection set before handler active, or multi-instance
+                 // races) - retry from the poll until it succeeds.
+                 if (root.selectedForm && root.isCreator(root.selectedForm) && !root.shareUriText)
+                     Qt.callLater(root.buildShare);
+             } }
     Component.onCompleted: {
         if (typeof logos !== "undefined" && logos.onModuleEvent) logos.onModuleEvent("whisperbox_core", "stateChanged");
         root.refresh();
@@ -225,14 +233,15 @@ Item {
     property var qrData: null
     property string lastQrFormId: ""
     function buildShare() {
-        if (!root.selectedForm || !root.isCreator(root.selectedForm)) {
-            root.shareUriText = ""; root.qrData = null; return;
-        }
+        if (!root.selectedForm) { root.shareUriText = ""; root.qrData = null; return; }
+        if (!root.isCreator(root.selectedForm)) { root.shareUriText = ""; root.qrData = null; return; }
         var fid = root.selectedForm.id;
         try {
-            var res = callCore("shareUri", [fid]);
+            var raw = callCore("shareUri", [fid]);
+            var res = raw;
             for (var k = 0; k < 2 && typeof res === "string"; k++) { try { res = JSON.parse(res); } catch (e) { break; } }
             if (res && res.ok && res.uri) root.shareUriText = String(res.uri);
+            else root.shareUriText = "";
         } catch (e) {}
         try {
             var q = callCore("shareQr", [fid]);
@@ -423,9 +432,10 @@ Item {
         }
 
         // ══ MAIN PANE ══════════════════════════════════════════════════════════
-        Item {
+        Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            color: Theme.palette.surface  // opaque bg: Basecamp host is white; bare Item let it show through (vision UI review 2026-08-19)
 
             // empty state
             ColumnLayout {
@@ -552,7 +562,7 @@ Item {
                                         implicitHeight: 34
                                         readOnly: true
                                         selectByMouse: true
-                                        text: root.shareUriText || "building..."
+                                        text: root.shareUriText
                                     }
                                     RowLayout {
                                         spacing: Theme.spacing.tiny
