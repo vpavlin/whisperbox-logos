@@ -107,7 +107,6 @@ private:
     std::string m_deviceId = "whisperbox-core";
     std::string m_dataDir;                // ~/.whisperbox-core or $WHISPERBOX_CORE_DATA
     std::set<std::string> m_watched;      // locally joined form ids
-    std::set<std::string> m_mySubmissions; // form ids this device has responded to (local, private)
     std::string m_snapshot = "{}";
     std::string m_status = "Starting...";
     bool m_nodeReady = false;
@@ -127,4 +126,5 @@ private:
 
     std::recursive_mutex m_mtx;
     QTimer* m_hubTimer = nullptr;
+    std::set<std::string> m_mySubmissions; // NOTE: appended at end of class on purpose — see commit message (host SDK layout mismatch clobbers shifted offsets)
 };
