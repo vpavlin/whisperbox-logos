@@ -932,9 +932,9 @@ Item {
                                     var p = m.indexOf(normType(root.draftQuestions[index]));
                                     return p >= 0 ? p : 0;
                                 }
-                                onActivated: function (int chosen) {
+                                onActivated: {
                                     var m = ["text", "textarea", "radioButtons", "checkbox"];
-                                    root.setDraftQuestion(index, "type", m[chosen]);
+                                    root.setDraftQuestion(index, "type", m[currentIndex]);
                                 }
                             }
                             AppField {
