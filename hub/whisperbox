@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""whisperbox — command-line client for a headless WhisperBox hub.
+
+Drives whisperbox_core through logos-hub (a thin wrapper over the logoscore
+daemon): create forms, join, answer, read decrypted responses — no Basecamp UI,
+no click magic. See hub/README.md for setup (logoscore build + modules dir).
+
+Env:
+  WHISPERBOX_HUB      path to the logos-hub script (default ~/whisperbox-hub/logos-hub)
+  WHISPERBOX_PROFILE  logos-hub profile name (default "whisperbox")
+  WHISPERBOX_HUB_HOME hub home dir with modules/ (default ~/whisperbox-hub)
+"""
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+from pathlib import Path
+
+HUB = os.environ.get("WHISPERBOX_HUB", str(Path.home() / "whisperbox-hub" / "logos-hub"))
+PROFILE = os.environ.get("WHISPERBOX_PROFILE", "whisperbox")
+MODULE = "whisperbox_core"
+
+
+def die(msg, code=1):
+    print(f"whisperbox: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def hub(*args, capture=True):
+    if not Path(HUB).exists():
+        die(f"logos-hub not found at {HUB} (set WHISPERBOX_HUB)")
+    return subprocess.run([HUB, *args], capture_output=capture, text=True)
+
+
+def call(method, *args):
+    """Call a whisperbox_core method. All module args are std::string — pass
+    verbatim via the str: prefix so logoscore never re-types them."""
+    full = [f"str:{a}" for a in args]
+    r = hub("call", PROFILE, MODULE, method, *full)
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 and not out:
+        die(f"{method} failed: {(r.stderr or '').strip()}")
+    try:
+        obj = json.loads(out)
+    except Exception:
+        return out  # non-JSON passthrough (e.g. CSV export)
+    if isinstance(obj, dict) and "result" in obj:
+        res = obj["result"]
+        if isinstance(res, str):
+            try:
+                return json.loads(res)
+            except Exception:
+                return res
+        return res
+    return obj
+
+
+def snapshot():
+    s = call("snapshot")
+    if not isinstance(s, dict):
+        die(f"bad snapshot from module: {str(s)[:200]}")
+    return s
+
+
+# ── lifecycle ────────────────────────────────────────────────────────────────────
+def write_profile():
+    """Render the profile into ~/.logos-hub/profiles/ so logos-hub finds it."""
+    home = Path(os.environ.get("WHISPERBOX_HUB_HOME", str(Path.home() / "whisperbox-hub")))
+    modules = home / "modules"
+    if not (modules / "whisperbox_core").exists():
+        die(f"{modules}/whisperbox_core missing — set up the hub first (hub/README.md)")
+    prof = {
+        "name": PROFILE,
+        "description": "WhisperBox headless hub: whisperbox_core -> delivery_module",
+        "modulesDir": str(modules),
+        "load": ["whisperbox_core"],
+        "env": {
+            "QT_QPA_PLATFORM": "offscreen",
+            "EMIT_FROM_THREAD": "1",
+            "WHISPERBOX_CORE_DATA": "{data}",
+        },
+    }
+    d = Path.home() / ".logos-hub" / "profiles"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{PROFILE}.json").write_text(json.dumps(prof, indent=2))
+    print(f"[profile] wrote {d / f'{PROFILE}.json'}")
+
+
+def cmd_up(_a):
+    write_profile()
+    r = hub("up", PROFILE, capture=False)
+    sys.exit(r.returncode)
+
+
+def cmd_down(_a):
+    sys.exit(hub("down", PROFILE).returncode)
+
+
+# ── identity ─────────────────────────────────────────────────────────────────────
+def cmd_identity(a):
+    if a.what == "show":
+        s = snapshot()
+        ident = s.get("identity")
+        if not ident:
+            print("(no identity — run `whisperbox identity new`)")
+            return
+        print(f"address  {ident['address']}")
+        print(f"pub      {ident['pubHex']}")
+        print(f"deviceId {s.get('deviceId')}")
+        print(f"nodeReady {s.get('nodeReady')}")
+    else:  # new
+        for _ in range(3):
+            priv = secrets.token_hex(32)
+            r = call("importIdentity", priv)
+            if isinstance(r, dict) and r.get("ok"):
+                print(f"identity  {r['address']}")
+                print("(stored in the hub's WHISPERBOX_CORE_DATA dir)")
+                return
+            die(f"importIdentity failed: {r}")
+
+
+# ── create / join / list ─────────────────────────────────────────────────────────
+QTYPE_MAP = {"text": "text", "textarea": "textarea", "radio": "radioButtons", "checkbox": "checkbox"}
+
+
+def parse_question(spec):
+    """'TYPE:TEXT[?OPT|OPT|...]' — leading '-' on the type means optional."""
+    required = True
+    if spec.startswith("-"):
+        required = False
+        spec = spec[1:]
+    if ":" not in spec:
+        die(f"bad question spec {spec!r} — want TYPE:TEXT[?OPT|OPT|...] (text|textarea|radio|checkbox)")
+    qtype, rest = spec.split(":", 1)
+    qtype = QTYPE_MAP.get(qtype.strip())
+    if not qtype:
+        die(f"unknown question type {qtype!r} — text|textarea|radio|checkbox")
+    options = None
+    if "?" in rest:
+        text, optstr = rest.split("?", 1)
+        options = [o.strip() for o in optstr.split("|") if o.strip()]
+        if len(options) < 2:
+            die(f"choice questions need at least 2 options (got {options})")
+    else:
+        text = rest
+    q = {"type": qtype, "text": text.strip(), "required": required}
+    if options:
+        q["options"] = options
+    return q
+
+
+def cmd_create(a):
+    if a.def_file:
+        defjson = Path(a.def_file).read_text()
+        json.loads(defjson)  # validate
+        questions = None
+    else:
+        if not a.title:
+            die("create needs --title (or --def FILE.json)")
+        if not a.question:
+            die("create needs at least one --question SPEC")
+        defobj = {"title": a.title}
+        if a.desc:
+            defobj["description"] = a.desc
+        qs = [parse_question(s) for s in a.question]
+        for i, q in enumerate(qs):
+            q = dict(q, id=f"question_{i + 1}")
+            qs[i] = q
+        defobj["questions"] = qs
+        defjson = json.dumps(defobj, separators=(",", ":"))
+    r = call("createForm", defjson)
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"createForm failed: {r}")
+    form_id = r["formId"]
+    print(f"form  {form_id}")
+    u = call("shareUri", form_id)
+    if isinstance(u, dict) and u.get("uri"):
+        print(f"uri   {u['uri']}")
+        print("(hand the URI to respondents — or `whisperbox join` it from another hub)")
+
+
+def cmd_join(a):
+    target = a.uri_or_id.strip()
+    if "id=" in target:
+        target = target.split("id=", 1)[1]
+    r = call("joinForm", target)
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"joinForm failed: {r}")
+    print(f"joined {target} — it will appear in `whisperbox list` once its publish event lands")
+
+
+def cmd_list(_a):
+    s = snapshot()
+    forms = (s.get("state") or {}).get("forms") or {}
+    if not forms:
+        print("(no known forms yet)")
+        return
+    me = (s.get("identity") or {}).get("address", "")
+    watched = set(s.get("watched") or [])
+    mine_sub = set(s.get("mySubmissions") or [])
+    for fid in sorted(forms):
+        f = forms[fid]
+        badges = []
+        if f.get("creator") == me:
+            badges.append("mine")
+        if fid in watched:
+            badges.append("watched")
+        if fid in mine_sub:
+            badges.append("answered")
+        nq = len(f.get("questions") or [])
+        print(f"{fid}  {f.get('status','?'):6}  q={nq}  {f.get('title','')}"
+              + (f"   [{', '.join(badges)}]" if badges else ""))
+
+
+# ── answer / responses ───────────────────────────────────────────────────────────
+def coerce_answer(q, raw):
+    t = q.get("type")
+    if t == "radioButtons":
+        try:
+            v = int(raw)
+        except ValueError:
+            die(f"radio answer must be an option index (got {raw!r}) — options: {q.get('options')}")
+        opts = q.get("options") or []
+        if not 0 <= v < len(opts):
+            die(f"option index {v} out of range 0..{len(opts) - 1}")
+        return v
+    if t == "checkbox":
+        try:
+            vals = [int(x) for x in raw.split(",") if x.strip() != ""]
+        except ValueError:
+            die(f"checkbox answer must be comma-separated option indices (got {raw!r})")
+        opts = q.get("options") or []
+        if any(not 0 <= v < len(opts) for v in vals):
+            die(f"option index out of range 0..{len(opts) - 1}")
+        return vals
+    return raw
+
+
+def cmd_answer(a):
+    s = snapshot()
+    forms = (s.get("state") or {}).get("forms") or {}
+    form = forms.get(a.form_id)
+    if not form:
+        die(f"unknown form {a.form_id} — `whisperbox list` (join it first if it's remote)")
+    if form.get("status") != "open":
+        die(f"form is {form.get('status')}")
+    qmap = {q.get("id"): q for q in form.get("questions") or []}
+    answers = []
+    if a.answers_file:
+        answers = json.loads(Path(a.answers_file).read_text())
+        if not isinstance(answers, list):
+            die("--answers file must contain a JSON array of {questionId,value}")
+    else:
+        for spec in a.q or []:
+            if "=" not in spec:
+                die(f"bad -q spec {spec!r} — want QID=VALUE")
+            qid, raw = spec.split("=", 1)
+            q = qmap.get(qid)
+            if not q:
+                die(f"unknown questionId {qid} — known: {sorted(qmap)}")
+            answers.append({"questionId": qid, "value": coerce_answer(q, raw)})
+    if not answers:
+        die("nothing to answer (give -q QID=VALUE pairs or --answers FILE.json)")
+    r = call("submitResponse", a.form_id, json.dumps(answers, separators=(",", ":")))
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"submitResponse failed: {r}")
+    print(f"submitted {len(answers)} answer(s) to {a.form_id} (ECIES-sealed to the creator)")
+
+
+def cmd_responses(a):
+    r = call("getDecryptedResponses", a.form_id)
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"getDecryptedResponses failed: {r}  (creator identity only)")
+    s = snapshot()
+    form = ((s.get("state") or {}).get("forms") or {}).get(a.form_id) or {}
+    qmap = {q.get("id"): q for q in form.get("questions") or []}
+
+    def show_value(qid, v):
+        q = qmap.get(qid) or {}
+        opts = q.get("options") or []
+        if q.get("type") == "radioButtons" and isinstance(v, int):
+            return opts[v] if 0 <= v < len(opts) else str(v)
+        if q.get("type") == "checkbox" and isinstance(v, list):
+            return ", ".join(opts[i] if 0 <= i < len(opts) else str(i) for i in v)
+        return str(v)
+
+    resps = r.get("responses") or []
+    if not resps:
+        print("(no responses yet)")
+        return
+    for i, resp in enumerate(resps, 1):
+        conf = " [confirmed]" if resp.get("confirmed") else ""
+        print(f"--- response {i}  from {resp.get('respondent','?')}{conf}")
+        for ans in resp.get("answers") or []:
+            qid = ans.get("questionId", "?")
+            label = (qmap.get(qid) or {}).get("text", qid)
+            print(f"    {label}: {show_value(qid, ans.get('value'))}")
+
+
+# ── misc ─────────────────────────────────────────────────────────────────────────
+def cmd_uri(a):
+    r = call("shareUri", a.form_id)
+    if not isinstance(r, dict) or not r.get("uri"):
+        die(f"shareUri failed: {r}")
+    print(r["uri"])
+
+
+def cmd_close(a):
+    r = call("closeForm", a.form_id)
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"closeForm failed: {r}")
+    print(f"closed {a.form_id}")
+
+
+def cmd_status(_a):
+    s = snapshot()
+    ident = s.get("identity") or {}
+    diag = s.get("diagnostics") or {}
+    forms = (s.get("state") or {}).get("forms") or {}
+    print(f"identity   {ident.get('address', '(none)')}")
+    print(f"deviceId   {s.get('deviceId')}")
+    print(f"nodeReady  {s.get('nodeReady')}")
+    print(f"forms      {len(forms)}")
+    print(f"diagnostics rxRaw={diag.get('rxRaw')} rxSeen={diag.get('rxSeen')} "
+          f"rxNew={diag.get('rxNew')} rxDup={diag.get('rxDup')} tx={diag.get('txTotal')}")
+
+
+def cmd_raw(a):
+    out = call(a.method, *a.args)
+    if isinstance(out, str):
+        print(out)
+    else:
+        print(json.dumps(out, indent=2, sort_keys=True))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="whisperbox", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("up", help="start the hub daemon (writes the profile first)")
+    sub.add_parser("down", help="stop the hub daemon")
+    sp = sub.add_parser("identity", help="manage the hub identity")
+    sp.add_argument("what", choices=["new", "show"])
+    sp = sub.add_parser("create", help="create + broadcast a form")
+    sp.add_argument("--title")
+    sp.add_argument("--desc")
+    sp.add_argument("--question", action="append",
+                    help='TYPE:TEXT[?OPT|OPT|...] — text|textarea|radio|checkbox; leading "-" = optional')
+    sp.add_argument("--def", dest="def_file", help="full form definition JSON file (instead of flags)")
+    sp = sub.add_parser("join", help="follow a form by URI or id")
+    sp.add_argument("uri_or_id")
+    sub.add_parser("list", help="known forms from the local event log")
+    sp = sub.add_parser("answer", help="submit answers (ECIES-sealed)")
+    sp.add_argument("form_id")
+    sp.add_argument("-q", action="append", help="QID=VALUE (radio: option index; checkbox: 0,2,...)")
+    sp.add_argument("--answers", dest="answers_file", help="JSON file: array of {questionId,value}")
+    sp = sub.add_parser("responses", help="decrypt responses (creator only)")
+    sp.add_argument("form_id")
+    sp = sub.add_parser("uri", help="print the share URI for a form")
+    sp.add_argument("form_id")
+    sp = sub.add_parser("close", help="close a form (creator only)")
+    sp.add_argument("form_id")
+    sub.add_parser("status", help="identity + node + counters at a glance")
+    sp = sub.add_parser("raw", help="passthrough: raw <method> [args...]")
+    sp.add_argument("method")
+    sp.add_argument("args", nargs="*")
+
+    a = ap.parse_args()
+    {"up": cmd_up, "down": cmd_down, "identity": cmd_identity, "create": cmd_create,
+     "join": cmd_join, "list": cmd_list, "answer": cmd_answer, "responses": cmd_responses,
+     "uri": cmd_uri, "close": cmd_close, "status": cmd_status, "raw": cmd_raw}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()
