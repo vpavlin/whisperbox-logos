@@ -530,7 +530,7 @@ Item {
 
                                 Canvas {
                                     id: qrCanvas
-                                    width: 132; height: 132
+                                    width: 160; height: 160
                                     visible: !!root.qrData
                                     onPaint: {
                                         var ctx = getContext("2d");
@@ -728,6 +728,15 @@ Item {
                             spacing: Theme.spacing.medium
                             visible: !root.hasResponded(root.selectedId)
 
+                            LogosText {
+                                Layout.fillWidth: true
+                                visible: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length === 0 : false
+                                text: "Waiting for form data — it arrives over the mesh shortly after you scan."
+                                wrapMode: Text.WordWrap
+                                color: Theme.palette.textTertiary
+                                font.pixelSize: Theme.typography.secondaryText
+                            }
+
                             Repeater {
                                 model: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length : 0
                                 ColumnLayout {
@@ -842,19 +851,27 @@ Item {
 
         Rectangle {
             width: Math.min(560, parent.width - 48)
-            height: Math.min(parent.height - 48, createCard.implicitHeight + 2 * Theme.spacing.large)
+            height: Math.min(parent.height - 96, createFlick.contentHeight + 2 * Theme.spacing.large)
             anchors.centerIn: parent
             radius: Theme.spacing.radiusMedium
             color: Theme.palette.surfaceRaised
             border.color: Theme.palette.border
             border.width: 1
 
-            ColumnLayout {
-                id: createCard
-                width: parent.width - 2 * Theme.spacing.large
-                x: Theme.spacing.large
-                y: Theme.spacing.large
-                spacing: Theme.spacing.small
+            Flickable {
+                id: createFlick
+                anchors.fill: parent
+                contentWidth: width
+                contentHeight: createCard.implicitHeight + 2 * Theme.spacing.large
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ColumnLayout {
+                    id: createCard
+                    x: Theme.spacing.large
+                    y: Theme.spacing.large
+                    width: parent.width - 2 * Theme.spacing.large
+                    spacing: Theme.spacing.small
 
                 LogosText {
                     text: "New form"
@@ -902,7 +919,16 @@ Item {
                             AppField {
                                 Layout.fillWidth: true
                                 implicitHeight: 36
+                                visible: root.draftQuestions[index].type !== "textarea"
                                 placeholderText: "Question text"
+                                text: String(root.draftQuestions[index].text || "")
+                                onTextChanged: root.setDraftQuestion(index, "text", text)
+                            }
+                            AppArea {
+                                Layout.fillWidth: true
+                                implicitHeight: 64
+                                visible: root.draftQuestions[index].type === "textarea"
+                                placeholderText: "Question text (multi-line)"
                                 text: String(root.draftQuestions[index].text || "")
                                 onTextChanged: root.setDraftQuestion(index, "text", text)
                             }
@@ -926,8 +952,9 @@ Item {
                                 }
                             }
                             LogosButton {
-                                implicitHeight: 30
-                                text: "x"
+                                width: 36
+                                implicitHeight: 36
+                                text: "✕"
                                 onClicked: root.removeDraftQuestion(index)
                             }
                         }
@@ -963,7 +990,8 @@ Item {
                         onClicked: root.doCreate()
                     }
                 }
-            }
+                }   // createCard
+            }       // createFlick
         }
     }
 

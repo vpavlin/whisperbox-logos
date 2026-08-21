@@ -737,7 +737,11 @@ std::string WhisperboxCoreImpl::shareUri(std::string formId) {
     def["expiresAt"] = f["expiresAt"];
     def["questions"] = f["questions"];
     def["whitelist"] = f["whitelist"];
-    std::string uri = "whisperbox://form?" + whisperbox::b64encode(def.dump());
+    // Short share URI: form id only. The canonical signed FORM_PUBLISH event
+    // carries the full def over Waku (public topic, re-broadcast + catchup); the
+    // importer adopts by id optimistically and fills in when sync lands. Keeps
+    // the QR at version 1-2 (scannable) instead of embedding the whole def.
+    std::string uri = "whisperbox://form?id=" + formId;
     out["ok"] = true; out["uri"] = uri;
     return out.dump();
 }
@@ -767,22 +771,28 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     json def;
-    try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
-    if (!def.is_object() || !def.contains("id") || !def.contains("publicKey")) {
-        out["ok"] = false; out["error"] = "def must include id and publicKey (use shareUri output)"; return out.dump();
-    }
-    // Accept a raw def object OR a whisperbox://form?<b64> URI.
-    std::string uriText = trim(defJson);
-    if (uriText.rfind("whisperbox://", 0) == 0) {
-        size_t q = uriText.find('?');
-        if (q != std::string::npos) {
-            try { def = json::parse(whisperbox::b64decode(uriText.substr(q + 1))); }
+    std::string input = trim(defJson);
+    if (input.rfind("whisperbox://", 0) == 0) {
+        // URI forms: short "whisperbox://form?id=<id>" (def arrives via Waku sync)
+        // or legacy "whisperbox://form?<b64-def>" (full def embedded). Legacy b64
+        // of a JSON object always starts with 'e', so the "id=" prefix is unambiguous.
+        size_t q = input.find('?');
+        std::string query = (q != std::string::npos) ? input.substr(q + 1) : "";
+        if (query.rfind("id=", 0) == 0) {
+            def = json::object();
+            def["id"] = trim(query.substr(3));
+        } else {
+            try { def = json::parse(whisperbox::b64decode(query)); }
             catch (...) { out["ok"] = false; out["error"] = "bad URI payload"; return out.dump(); }
         }
+    } else {
+        try { def = json::parse(input); }
+        catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     }
-    if (!def.is_object() || !def.contains("id") || !def.contains("publicKey")) {
-        out["ok"] = false; out["error"] = "def must include id and publicKey"; return out.dump();
+    if (!def.is_object() || !def.contains("id")) {
+        out["ok"] = false; out["error"] = "def must include id (use shareUri output)"; return out.dump();
     }
+    // publicKey is optional: short-URI imports get it from the canonical event.
     std::string formId = lc(def.value("id", ""));
     if (formId.empty()) { out["ok"] = false; out["error"] = "missing id"; return out.dump(); }
 
