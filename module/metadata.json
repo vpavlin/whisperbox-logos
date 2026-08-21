@@ -1,7 +1,7 @@
 {
   "name": "whisperbox",
   "display_name": "WhisperBox - Encrypted Forms",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "ui_qml",
   "category": "social",
   "description": "Privacy-first encrypted forms over Waku. Create forms, share a URI/QR, respondents answer end-to-end sealed to the creator only; the creator decrypts, confirms and exports CSV. Pure-QML view over the whisperbox_core module.",

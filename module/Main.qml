@@ -184,6 +184,25 @@ Item {
     function removeDraftQuestion(idx) {
         var arr = root.draftQuestions.slice(); arr.splice(idx, 1); root.draftQuestions = arr;
     }
+    // Normalize question type — legacy builds could persist the raw combo index
+    // (a number) instead of the type string; unknown values fall back to text.
+    function normType(q) {
+        if (!q) return "text";
+        var t = q.type;
+        if (t === "textarea" || t === "radioButtons" || t === "checkbox") return t;
+        if (typeof t === "number") {
+            var m = ["text", "textarea", "radioButtons", "checkbox"];
+            if (t >= 0 && t < 4) return m[t];
+        }
+        return "text";
+    }
+    // Answer-widget kind: choice questions without usable options degrade to text
+    // so the form stays answerable.
+    function answerWidget(q) {
+        var t = normType(q);
+        if ((t === "radioButtons" || t === "checkbox") && (!q.options || q.options.length < 2)) return "text";
+        return t;
+    }
     function setDraftQuestion(idx, prop, value) {
         var arr = root.draftQuestions.slice();
         var q = Object.assign({}, arr[idx]);
@@ -753,7 +772,7 @@ Item {
                                     AppField {
                                         Layout.fillWidth: true
                                         implicitHeight: 38
-                                        visible: qdef && qdef.type === "text"
+                                        visible: answerWidget(qdef) === "text"
                                         placeholderText: "Your answer"
                                         text: String(root.answerValue(qdef ? qdef.id : "") || "")
                                         onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
@@ -761,7 +780,7 @@ Item {
                                     AppArea {
                                         Layout.fillWidth: true
                                         implicitHeight: 90
-                                        visible: qdef && qdef.type === "textarea"
+                                        visible: answerWidget(qdef) === "textarea"
                                         placeholderText: "Your answer"
                                         text: String(root.answerValue(qdef ? qdef.id : "") || "")
                                         onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
@@ -770,7 +789,7 @@ Item {
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 2
-                                        visible: qdef && (qdef.type === "radioButtons" || qdef.type === "checkbox")
+                                        visible: (answerWidget(qdef) === "radioButtons" || answerWidget(qdef) === "checkbox")
 
                                         Repeater {
                                             model: (qdef && qdef.options) ? qdef.options.length : 0
@@ -909,12 +928,14 @@ Item {
                                 width: 132
                                 model: ["text", "textarea", "radioButtons", "checkbox"]
                                 currentIndex: {
-                                    var t = root.draftQuestions[index].type;
                                     var m = ["text", "textarea", "radioButtons", "checkbox"];
-                                    var p = m.indexOf(t);
+                                    var p = m.indexOf(normType(root.draftQuestions[index]));
                                     return p >= 0 ? p : 0;
                                 }
-                                onActivated: root.setDraftQuestion(index, "type", modelData)
+                                onActivated: function (int chosen) {
+                                    var m = ["text", "textarea", "radioButtons", "checkbox"];
+                                    root.setDraftQuestion(index, "type", m[chosen]);
+                                }
                             }
                             AppField {
                                 Layout.fillWidth: true
