@@ -2,6 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+import Logos.Theme
+import Logos.Controls
+
 // WhisperBox v0.2 — privacy-first encrypted forms over Waku.
 // Desktop layout: sidebar (320px) + main pane. Matches approved web mockup v2.
 // All logic in whisperbox_core. This view polls snapshot() and renders JSON.
