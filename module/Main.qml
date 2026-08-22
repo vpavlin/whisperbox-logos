@@ -5,84 +5,64 @@ import QtQuick.Layouts
 import Logos.Theme
 import Logos.Controls
 
-// WhisperBox pure-QML view — privacy-first encrypted forms over Waku.
-// It NEVER folds, merges or decrypts: all logic is in whisperbox_core. It polls
-// the core's snapshot() action on a Timer (events are not reliably delivered to
-// QML across Basecamp versions) and renders the returned JSON. Mutations call
-// the core and re-render from the call's own fresh return.
+// WhisperBox — privacy-first encrypted forms over Waku.
+// v0.2 design: single-column, mobile-first, dark. No sidebar.
+// All logic in whisperbox_core. This view polls snapshot() and renders JSON.
 //
-// Layout: LEFT SIDEBAR (header, + New Form, join-by-URI/id, form list, sync
-// status footer) + MAIN PANE (form detail: creator view with share card / QR /
-// decrypted response table / CSV export / close, or the respondent answer flow).
+// Screens (property-driven, no StackView — safest for Basecamp):
+//   - Home: form list + join + new
+//   - Detail: form (creator or respondent)
+//   - Create: full-screen overlay
+//   - Share: overlay (QR + URI)
+//   - CSV: overlay
 //
-// Styling uses the official Logos design system (Logos.Theme + Logos.Controls).
-// Only LogosText + LogosButton are used as Logos* types (the proven-safe 0.2.x
-// baseline); inputs are plain QtQuick controls styled with Theme tokens.
+// QML constraints (learned the hard way):
+//   - NO typed handler params (onActivated: function(int x) → silent compile fail)
+//   - Use untyped handlers + currentIndex
+//   - LogosText + LogosButton only as Logos* types
+//   - Append-only member order in C++ (mutex layout)
+//   - No Clipboard type — TextEdit hack
 
 Item {
     id: root
     anchors.fill: parent
 
-    // ── state plumbing (read-state rule: snapshot() action + poll + event) ─────
+    // ── DESIGN TOKENS (from approved mockup) ──────────────────────────────────
+    readonly property color wbPrimary: "#7c6ff7"
+    readonly property color wbPrimaryHover: "#9187f9"
+    readonly property color wbPrimarySubtle: "#1e1b3a"
+    readonly property color wbAccent: "#f7a44c"
+    readonly property color wbBg: "#0b0b10"
+    readonly property color wbSurface: "#14141e"
+    readonly property color wbSurfaceRaised: "#1c1c2a"
+    readonly property color wbBorder: "#2a2a3e"
+    readonly property color wbBorderSubtle: "#1e1e30"
+    readonly property color wbText: "#f0f0f8"
+    readonly property color wbTextSec: "#a0a0b8"
+    readonly property color wbTextTert: "#6b6b82"
+    readonly property color wbSuccess: "#4ade80"
+    readonly property color wbWarning: "#fbbf24"
+    readonly property color wbError: "#f87171"
+    readonly property int wbRadiusSm: 8
+    readonly property int wbRadiusMd: 12
+    readonly property int wbRadiusLg: 16
+    readonly property int wbRadiusXl: 24
+    readonly property int wbSpace1: 4
+    readonly property int wbSpace2: 8
+    readonly property int wbSpace3: 12
+    readonly property int wbSpace4: 16
+    readonly property int wbSpace5: 24
+    readonly property int wbSpace6: 32
+    readonly property int wbSpace7: 48
+
+    // ── STATE PLUMBING (unchanged from v0.1) ──────────────────────────────────
     property string stateJson: "{}"
     property var st: ({})
-
-    // Token-styled text input (safe on every Basecamp version).
-    component AppField: TextField {
-        color: Theme.palette.text
-        placeholderTextColor: Theme.palette.textTertiary
-        selectByMouse: true
-        leftPadding: Theme.spacing.small
-        rightPadding: Theme.spacing.small
-        background: Rectangle {
-            radius: Theme.spacing.radiusSmall
-            color: Theme.palette.surface
-            border.color: Theme.palette.border
-            border.width: 1
-        }
-    }
-    // Token-styled multi-line input.
-    component AppArea: TextArea {
-        color: Theme.palette.text
-        placeholderTextColor: Theme.palette.textTertiary
-        selectByMouse: true
-        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-        leftPadding: Theme.spacing.small
-        rightPadding: Theme.spacing.small
-        topPadding: Theme.spacing.small
-        bottomPadding: Theme.spacing.small
-        background: Rectangle {
-            radius: Theme.spacing.radiusSmall
-            color: Theme.palette.surface
-            border.color: Theme.palette.border
-            border.width: 1
-        }
-    }
-    // Token-styled combo (light styling only — core QtQuick.Controls).
-    component AppCombo: ComboBox {
-        implicitHeight: 36
-        contentItem: Text {
-            leftPadding: Theme.spacing.small
-            text: displayText
-            font: parent.font
-            color: Theme.palette.text
-            verticalAlignment: Qt.AlignVCenter
-        }
-        background: Rectangle {
-            radius: Theme.spacing.radiusSmall
-            color: Theme.palette.surface
-            border.color: Theme.palette.border
-            border.width: 1
-        }
-    }
-    // Off-screen helper for Copy buttons (base QML has no Clipboard type).
-    TextEdit { id: clip; visible: false }
 
     function callCore(m, a) {
         if (typeof logos === "undefined" || !logos.callModule) return "";
         return String(logos.callModule("whisperbox_core", m, a || []));
     }
-    // Bridge may return raw JSON or a quoted/escaped JSON string — accept both.
     function asState(raw) {
         var s = String(raw || "").trim();
         for (var i = 0; i < 2 && s.charAt(0) === '"'; i++) { try { s = String(JSON.parse(s)).trim(); } catch (e) { return null; } }
@@ -90,7 +70,6 @@ Item {
         var o; try { o = JSON.parse(s); } catch (e) { return null; }
         return (o && o.error === undefined) ? o : null;
     }
-    // Multi-instance guard: never let an empty-state poll blank a populated view.
     function formCountOf(o) {
         if (!o || !o.state || !o.state.forms) return 0;
         return Object.keys(o.state.forms).length;
@@ -101,7 +80,6 @@ Item {
         root.st = o; root.stateJson = JSON.stringify(o);
         root.autoSelect();
     }
-    // Keep the pane useful: if nothing valid is selected, show the first open form.
     function autoSelect() {
         if (root.selectedId && root.formsObj[root.selectedId]) return;
         if (root.feed.length > 0) root.selectedId = String(root.feed[0]).toLowerCase();
@@ -116,9 +94,6 @@ Item {
     Timer { interval: 2500; running: true; repeat: true;
              onTriggered: {
                  root.refresh();
-                 // Self-healing share build: onSelectedIdChanged can be missed
-                 // (e.g. selection set before handler active, or multi-instance
-                 // races) - retry from the poll until it succeeds.
                  if (root.selectedForm && root.isCreator(root.selectedForm) && !root.shareUriText)
                      Qt.callLater(root.buildShare);
              } }
@@ -134,7 +109,7 @@ Item {
         }
     }
 
-    // ── derived state ───────────────────────────────────────────────────────────
+    // ── DERIVED STATE ─────────────────────────────────────────────────────────
     readonly property var formsObj: st.state && st.state.forms ? st.state.forms : ({})
     readonly property var feed: st.state && st.state.feed ? st.state.feed : []
     readonly property var creatorView: st.creatorView || null
@@ -155,13 +130,12 @@ Item {
     function hasResponded(fid) { return mySubsArr.indexOf(fid) >= 0; }
     function shortAddr(a) {
         if (!a) return "-";
-        return a.length > 14 ? a.substr(0, 6) + "..." + a.substr(-4) : a;
+        return a.length > 14 ? a.substr(0, 6) + "…" + a.substr(-4) : a;
     }
     function fmtTime(ms) {
         if (!ms) return "-";
         try { return new Date(Number(ms)).toLocaleString(); } catch (e) { return String(ms); }
     }
-    // Form list order: open forms in feed (HLC publish) order, then the rest.
     readonly property var formList: {
         var ids = [];
         for (var i = 0; i < feed.length; i++) ids.push(feed[i]);
@@ -175,17 +149,15 @@ Item {
     function toast(msg) { root.toastMsg = String(msg); toastTimer.restart(); }
     Timer { id: toastTimer; interval: 3500; onTriggered: root.toastMsg = "" }
 
-    // ── create-form draft state ─────────────────────────────────────────────────
+    // ── CREATE FORM DRAFT ─────────────────────────────────────────────────────
     property bool showCreate: false
-    property var draftQuestions: []   // [{type, text, required, optionsText}]
+    property var draftQuestions: []
     function addDraftQuestion() {
         root.draftQuestions = root.draftQuestions.concat([{ type: "text", text: "", required: true, optionsText: "" }]);
     }
     function removeDraftQuestion(idx) {
         var arr = root.draftQuestions.slice(); arr.splice(idx, 1); root.draftQuestions = arr;
     }
-    // Normalize question type — legacy builds could persist the raw combo index
-    // (a number) instead of the type string; unknown values fall back to text.
     function normType(q) {
         if (!q) return "text";
         var t = q.type;
@@ -196,8 +168,6 @@ Item {
         }
         return "text";
     }
-    // Answer-widget kind: choice questions without usable options degrade to text
-    // so the form stays answerable.
     function answerWidget(q) {
         var t = normType(q);
         if ((t === "radioButtons" || t === "checkbox") && (!q.options || q.options.length < 2)) return "text";
@@ -235,7 +205,7 @@ Item {
         } else root.toast(r && r.error ? r.error : "Could not create form");
     }
 
-    // ── join ────────────────────────────────────────────────────────────────────
+    // ── JOIN ──────────────────────────────────────────────────────────────────
     function doJoin() {
         var t = String(joinField.text || "").trim();
         if (!t) return;
@@ -247,10 +217,11 @@ Item {
         } else root.toast(r && r.error ? r.error : "Could not join form");
     }
 
-    // ── share / QR (creator only, deferred — never during load/bindings) ────────
+    // ── SHARE / QR ────────────────────────────────────────────────────────────
     property string shareUriText: ""
     property var qrData: null
     property string lastQrFormId: ""
+    property bool showShare: false
     function buildShare() {
         if (!root.selectedForm) { root.shareUriText = ""; root.qrData = null; return; }
         if (!root.isCreator(root.selectedForm)) { root.shareUriText = ""; root.qrData = null; return; }
@@ -274,12 +245,13 @@ Item {
     }
     onSelectedIdChanged: {
         root.draftAnswers = ({});
+        root.showShare = false;
         if (root.selectedForm && root.isCreator(root.selectedForm)) Qt.callLater(root.buildShare);
         else { root.shareUriText = ""; root.qrData = null; }
     }
 
-    // ── respondent answer draft ─────────────────────────────────────────────────
-    property var draftAnswers: ({})   // questionId -> string | int | int[]
+    // ── RESPONDENT ANSWER DRAFT ───────────────────────────────────────────────
+    property var draftAnswers: ({})
     function setAnswer(qid, v) {
         var a = Object.assign({}, root.draftAnswers);
         a[qid] = v;
@@ -304,7 +276,7 @@ Item {
         else root.toast(r && r.error ? r.error : "Could not submit response");
     }
 
-    // ── CSV popup ───────────────────────────────────────────────────────────────
+    // ── CSV ───────────────────────────────────────────────────────────────────
     property bool showCsv: false
     property string csvText: ""
     function doExportCsv() {
@@ -314,411 +286,727 @@ Item {
         else root.toast(r && r.error ? r.error : "Export failed");
     }
 
-    // ── layout ──────────────────────────────────────────────────────────────────
-    RowLayout {
-        anchors.fill: parent
-        spacing: 0
+    // ── CLIPBOARD HACK ────────────────────────────────────────────────────────
+    TextEdit { id: clip; visible: false }
 
-        // ══ SIDEBAR ════════════════════════════════════════════════════════════
-        Rectangle {
-            Layout.preferredWidth: 320
-            Layout.fillHeight: true
-            color: Theme.palette.surface
-            border.color: Theme.palette.borderHairline
-            border.width: 1
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LAYOUT — single column, no sidebar
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    Rectangle {
+        anchors.fill: parent
+        color: root.wbBg
+
+        // ── HOME SCREEN ───────────────────────────────────────────────────────
+        Flickable {
+            id: homeScreen
+            anchors.fill: parent
+            visible: !root.selectedForm
+            clip: true
+            contentWidth: width
+            contentHeight: homeCol.height + root.wbSpace7
+            boundsBehavior: Flickable.StopAtBounds
 
             ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: Theme.spacing.medium
-                spacing: Theme.spacing.small
+                id: homeCol
+                width: parent.width - 2 * root.wbSpace5
+                x: root.wbSpace5
+                y: root.wbSpace6
+                spacing: root.wbSpace4
 
-                LogosText {
-                    text: "WhisperBox"
-                    font.pixelSize: Theme.typography.panelTitleText
-                    font.weight: Theme.typography.weightBold
-                }
-                LogosText {
-                    text: "encrypted forms over Waku"
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
-                }
-
-                LogosButton {
-                    Layout.fillWidth: true
-                    implicitHeight: 42
-                    text: "+ New Form"
-                    onClicked: root.showCreate = true
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spacing.tiny
-                    LogosText {
-                        text: "JOIN A FORM"
-                        color: Theme.palette.textTertiary
-                        font.pixelSize: Theme.typography.secondaryText
-                    }
-                    AppField {
-                        id: joinField
-                        Layout.fillWidth: true
-                        implicitHeight: 36
-                        placeholderText: "whisperbox:// URI or form id"
-                    }
-                    LogosButton {
-                        Layout.fillWidth: true
-                        implicitHeight: 34
-                        text: "Join"
-                        enabled: String(joinField.text || "").trim().length > 0
-                        onClicked: root.doJoin()
-                    }
-                }
-
-                Item { Layout.preferredHeight: 1 }
-
-                LogosText {
-                    text: "FORMS"
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
-                }
-
-                ListView {
-                    id: formListVw
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: root.formList
-                    delegate: Rectangle {
-                        width: formListVw.width
-                        height: 58
-                        radius: Theme.spacing.radiusSmall
-                        color: modelData === root.selectedId ? Theme.palette.surfaceRaised : "transparent"
-                        LogosText {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.right: parent.right
-                            anchors.margins: Theme.spacing.small
-                            text: (root.formsObj[modelData] && root.formsObj[modelData].title) ? root.formsObj[modelData].title : modelData
-                            elide: Text.ElideRight
-                            font.pixelSize: Theme.typography.secondaryText
-                        }
-                        RowLayout {
-                            anchors.left: parent.left
-                            anchors.bottom: parent.bottom
-                            anchors.margins: Theme.spacing.small
-                            spacing: 6
-                            LogosText {
-                                text: (root.formsObj[modelData] && root.formsObj[modelData].status === "closed") ? "closed" : "open"
-                                color: (root.formsObj[modelData] && root.formsObj[modelData].status === "closed")
-                                    ? Theme.palette.textTertiary : Theme.palette.success
-                                font.pixelSize: Theme.typography.secondaryText
-                            }
-                            LogosText {
-                                visible: root.isCreator(root.formsObj[modelData])
-                                text: "mine"
-                                color: Theme.palette.primary
-                                font.pixelSize: Theme.typography.secondaryText
-                            }
-                        }
-                        MouseArea { anchors.fill: parent; onClicked: root.selectedId = modelData }
-                    }
-                }
-
-                // sync status footer
+                // Header
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: Theme.spacing.tiny
+                    spacing: root.wbSpace3
+                    // Logo
+                    Canvas {
+                        width: 32; height: 32
+                        onPaint: {
+                            var ctx = getContext("2d");
+                            ctx.clearRect(0, 0, 32, 32);
+                            ctx.strokeStyle = root.wbPrimary;
+                            ctx.lineWidth = 2;
+                            ctx.lineCap = "round";
+                            // Box
+                            ctx.beginPath();
+                            ctx.roundRect(4, 8, 24, 18, 4);
+                            ctx.stroke();
+                            // Handle
+                            ctx.beginPath();
+                            ctx.moveTo(8, 8); ctx.lineTo(8, 6);
+                            ctx.quadraticCurveTo(8, 4, 10, 4);
+                            ctx.lineTo(22, 4);
+                            ctx.quadraticCurveTo(24, 4, 24, 6);
+                            ctx.lineTo(24, 8);
+                            ctx.stroke();
+                            // Speech curve
+                            ctx.beginPath();
+                            ctx.moveTo(12, 14);
+                            ctx.quadraticCurveTo(12, 12, 14, 12);
+                            ctx.lineTo(18, 12);
+                            ctx.quadraticCurveTo(20, 12, 20, 14);
+                            ctx.lineTo(20, 16);
+                            ctx.quadraticCurveTo(20, 18, 18, 18);
+                            ctx.lineTo(17, 18);
+                            ctx.stroke();
+                        }
+                    }
+                    ColumnLayout {
+                        spacing: 0
+                        Text {
+                            text: "WhisperBox"
+                            font.pixelSize: 20
+                            font.weight: Font.Bold
+                            color: root.wbText
+                        }
+                        Text {
+                            text: "encrypted forms over Waku"
+                            font.pixelSize: 11
+                            color: root.wbTextTert
+                        }
+                    }
+                    Item { Layout.fillWidth: true }
+                    // New form button
+                    Rectangle {
+                        width: newFormBtn.implicitWidth + 24
+                        height: 36
+                        radius: root.wbRadiusMd
+                        color: root.wbPrimary
+                        Text {
+                            id: newFormBtn
+                            anchors.centerIn: parent
+                            text: "+ New"
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showCreate = true
+                        }
+                    }
+                }
+
+                // Join input
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: root.wbSpace2
+                    Text {
+                        text: "JOIN A FORM"
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        color: root.wbTextTert
+                        letterSpacing: 0.5
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 42
+                        radius: root.wbRadiusMd
+                        color: root.wbSurfaceRaised
+                        border.color: root.wbBorder
+                        border.width: 1
+                        TextField {
+                            id: joinField
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 14
+                            color: root.wbText
+                            placeholderTextColor: root.wbTextTert
+                            font.pixelSize: 13
+                            background: null
+                            selectByMouse: true
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 34
+                        radius: root.wbRadiusMd
+                        color: String(joinField.text || "").trim().length > 0 ? root.wbSurfaceRaised : "transparent"
+                        border.color: String(joinField.text || "").trim().length > 0 ? root.wbBorder : "transparent"
+                        border.width: 1
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Join"
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            color: String(joinField.text || "").trim().length > 0 ? root.wbText : root.wbTextTert
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            enabled: String(joinField.text || "").trim().length > 0
+                            onClicked: root.doJoin()
+                        }
+                    }
+                }
+
+                // Form list
+                Text {
+                    text: "FORMS"
+                    font.pixelSize: 11
+                    font.weight: Font.DemiBold
+                    color: root.wbTextTert
+                    letterSpacing: 0.5
+                }
+
+                Repeater {
+                    model: root.formList
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 64
+                        radius: root.wbRadiusMd
+                        color: root.wbSurfaceRaised
+                        border.color: root.wbBorderSubtle
+                        border.width: 1
+
+                        property var f: root.formsObj[modelData]
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: root.wbSpace3
+                            spacing: root.wbSpace3
+
+                            // Icon
+                            Rectangle {
+                                width: 40; height: 40
+                                radius: root.wbRadiusSm
+                                color: root.wbPrimarySubtle
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "📋"
+                                    font.pixelSize: 18
+                                }
+                            }
+
+                            // Body
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text {
+                                    text: (f && f.title) ? f.title : modelData
+                                    font.pixelSize: 14
+                                    font.weight: Font.DemiBold
+                                    color: root.wbText
+                                    elide: Text.ElideRight
+                                    width: parent.width
+                                }
+                                Text {
+                                    text: {
+                                        var nq = (f && f.questions) ? f.questions.length : 0;
+                                        var nr = root.responsesFor(modelData).length;
+                                        return nq + " question" + (nq !== 1 ? "s" : "") + (nr > 0 ? " · " + nr + " response" + (nr !== 1 ? "s" : "") : "");
+                                    }
+                                    font.pixelSize: 12
+                                    color: root.wbTextTert
+                                }
+                            }
+
+                            // Badges
+                            RowLayout {
+                                spacing: 6
+                                Rectangle {
+                                    visible: f && f.status === "open"
+                                    width: openBadge.implicitWidth + 16
+                                    height: 22
+                                    radius: 11
+                                    color: "#1a3d2a"
+                                    Text {
+                                        id: openBadge
+                                        anchors.centerIn: parent
+                                        text: "Open"
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                        color: root.wbSuccess
+                                    }
+                                }
+                                Rectangle {
+                                    visible: f && f.status === "closed"
+                                    width: closedBadge.implicitWidth + 16
+                                    height: 22
+                                    radius: 11
+                                    color: "#1e1e30"
+                                    Text {
+                                        id: closedBadge
+                                        anchors.centerIn: parent
+                                        text: "Closed"
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                        color: root.wbTextTert
+                                    }
+                                }
+                                Rectangle {
+                                    visible: root.isCreator(f)
+                                    width: mineBadge.implicitWidth + 16
+                                    height: 22
+                                    radius: 11
+                                    color: root.wbPrimarySubtle
+                                    Text {
+                                        id: mineBadge
+                                        anchors.centerIn: parent
+                                        text: "Mine"
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                        color: root.wbPrimary
+                                    }
+                                }
+                                Rectangle {
+                                    visible: root.hasResponded(modelData) && !root.isCreator(f)
+                                    width: ansBadge.implicitWidth + 16
+                                    height: 22
+                                    radius: 11
+                                    color: "#1a2a3d"
+                                    Text {
+                                        id: ansBadge
+                                        anchors.centerIn: parent
+                                        text: "Answered"
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                        color: "#60a5fa"
+                                    }
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.selectedId = modelData
+                        }
+                    }
+                }
+
+                // Empty state
+                ColumnLayout {
+                    visible: root.formList.length === 0
+                    Layout.fillWidth: true
+                    Layout.topMargin: root.wbSpace7
+                    spacing: root.wbSpace3
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "No forms yet"
+                        font.pixelSize: 18
+                        font.weight: Font.DemiBold
+                        color: root.wbTextSec
+                    }
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Create a form or paste a link above to join one."
+                        font.pixelSize: 13
+                        color: root.wbTextTert
+                    }
+                }
+
+                // Sync status footer
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: root.wbSpace4
+                    spacing: root.wbSpace2
                     Rectangle {
                         width: 8; height: 8; radius: 4
-                        color: root.nodeReady ? Theme.palette.success : Theme.palette.warning
+                        color: root.nodeReady ? root.wbSuccess : root.wbWarning
                     }
-                    LogosText {
-                        text: root.nodeReady ? "synced" : "connecting..."
-                        color: Theme.palette.textTertiary
-                        font.pixelSize: Theme.typography.secondaryText
+                    Text {
+                        text: root.nodeReady ? "Synced" : "Connecting…"
+                        font.pixelSize: 12
+                        color: root.wbTextTert
                     }
-                }
-                LogosText {
-                    text: "identity " + root.shortAddr(root.myAddress)
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
-                }
-                LogosText {
-                    text: "rx " + (root.diag.rxRaw || 0) + "  tx " + (root.diag.txTotal || 0)
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
+                    Text {
+                        text: "· " + root.shortAddr(root.myAddress)
+                        font.pixelSize: 12
+                        color: root.wbTextTert
+                    }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: "rx " + (root.diag.rxRaw || 0) + " / tx " + (root.diag.txTotal || 0)
+                        font.pixelSize: 11
+                        color: root.wbTextTert
+                    }
                 }
             }
         }
 
-        // ══ MAIN PANE ══════════════════════════════════════════════════════════
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            color: Theme.palette.surface  // opaque bg: Basecamp host is white; bare Item let it show through (vision UI review 2026-08-19)
+        // ── DETAIL SCREEN ─────────────────────────────────────────────────────
+        Flickable {
+            id: detailScreen
+            anchors.fill: parent
+            visible: !!root.selectedForm
+            clip: true
+            contentWidth: width
+            contentHeight: detailCol.height + 2 * root.wbSpace6
+            boundsBehavior: Flickable.StopAtBounds
 
-            // empty state
             ColumnLayout {
-                visible: !root.selectedForm
-                anchors.centerIn: parent
-                spacing: Theme.spacing.small
-                LogosText {
-                    text: "No form selected"
-                    font.pixelSize: Theme.typography.panelTitleText
-                    font.weight: Theme.typography.weightBold
-                    Layout.alignment: Qt.AlignHCenter
-                }
-                LogosText {
-                    text: "Create a form or join one from the sidebar."
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
-                    Layout.alignment: Qt.AlignHCenter
-                }
-            }
+                id: detailCol
+                width: parent.width - 2 * root.wbSpace5
+                x: root.wbSpace5
+                y: root.wbSpace5
+                spacing: root.wbSpace4
 
-            // form detail
-            Flickable {
-                visible: !!root.selectedForm
-                anchors.fill: parent
-                clip: true
-                contentWidth: width
-                contentHeight: detailCol.height + 2 * Theme.spacing.large
+                // Back button
+                RowLayout {
+                    spacing: root.wbSpace2
+                    Rectangle {
+                        width: 32; height: 32
+                        radius: root.wbRadiusSm
+                        color: root.wbSurfaceRaised
+                        Text {
+                            anchors.centerIn: parent
+                            text: "←"
+                            font.pixelSize: 16
+                            color: root.wbTextSec
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.selectedId = ""
+                        }
+                    }
+                    Text {
+                        text: "Back to forms"
+                        font.pixelSize: 13
+                        color: root.wbTextTert
+                    }
+                }
 
+                // Form header
                 ColumnLayout {
-                    id: detailCol
-                    width: parent.width - 2 * Theme.spacing.large
-                    x: Theme.spacing.large
-                    y: Theme.spacing.large
-                    spacing: Theme.spacing.medium
-
-                    // ── header ──
-                    LogosText {
+                    Layout.fillWidth: true
+                    spacing: root.wbSpace2
+                    Text {
                         Layout.fillWidth: true
                         text: root.selectedForm ? root.selectedForm.title : ""
+                        font.pixelSize: 24
+                        font.weight: Font.Bold
+                        color: root.wbText
                         wrapMode: Text.WordWrap
-                        font.pixelSize: Theme.typography.panelTitleText
-                        font.weight: Theme.typography.weightBold
                     }
-                    LogosText {
+                    Text {
                         Layout.fillWidth: true
                         visible: !!(root.selectedForm && root.selectedForm.description)
                         text: root.selectedForm ? root.selectedForm.description : ""
+                        font.pixelSize: 14
+                        color: root.wbTextSec
                         wrapMode: Text.WordWrap
-                        color: Theme.palette.textTertiary
-                        font.pixelSize: Theme.typography.secondaryText
                     }
                     RowLayout {
-                        spacing: 8
-                        LogosText {
-                            text: (root.selectedForm && root.selectedForm.status === "closed") ? "CLOSED" : "OPEN"
-                            color: (root.selectedForm && root.selectedForm.status === "closed")
-                                ? Theme.palette.textTertiary : Theme.palette.success
-                            font.pixelSize: Theme.typography.secondaryText
+                        spacing: root.wbSpace2
+                        Rectangle {
+                            visible: root.selectedForm && root.selectedForm.status === "open"
+                            width: statusBadge.implicitWidth + 16
+                            height: 22
+                            radius: 11
+                            color: "#1a3d2a"
+                            Text {
+                                id: statusBadge
+                                anchors.centerIn: parent
+                                text: "Open"
+                                font.pixelSize: 11
+                                font.weight: Font.DemiBold
+                                color: root.wbSuccess
+                            }
                         }
-                        LogosText {
+                        Text {
                             text: "by " + root.shortAddr(root.selectedForm ? root.selectedForm.creator : "")
-                            color: Theme.palette.textTertiary
-                            font.pixelSize: Theme.typography.secondaryText
+                            font.pixelSize: 12
+                            color: root.wbTextTert
                         }
-                        LogosText {
-                            text: root.selectedId
-                            color: Theme.palette.textTertiary
-                            font.pixelSize: Theme.typography.secondaryText
+                    }
+                }
+
+                // ══ CREATOR SECTION ═══════════════════════════════════════════
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: root.wbSpace4
+                    visible: root.isCreator(root.selectedForm)
+
+                    // Stats row
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: root.wbSpace3
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 72
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            ColumnLayout {
+                                anchors.centerIn: parent
+                                spacing: 2
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: String(root.responsesFor(root.selectedId).length)
+                                    font.pixelSize: 24
+                                    font.weight: Font.Bold
+                                    color: root.wbPrimary
+                                }
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Responses"
+                                    font.pixelSize: 11
+                                    color: root.wbTextTert
+                                }
+                            }
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 72
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            ColumnLayout {
+                                anchors.centerIn: parent
+                                spacing: 2
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: {
+                                        var n = 0;
+                                        var resps = root.responsesFor(root.selectedId);
+                                        for (var i = 0; i < resps.length; i++) if (resps[i].confirmed) n++;
+                                        return String(n);
+                                    }
+                                    font.pixelSize: 24
+                                    font.weight: Font.Bold
+                                    color: root.wbText
+                                }
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Confirmed"
+                                    font.pixelSize: 11
+                                    color: root.wbTextTert
+                                }
+                            }
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 72
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            ColumnLayout {
+                                anchors.centerIn: parent
+                                spacing: 2
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: {
+                                        var total = root.responsesFor(root.selectedId).length;
+                                        var und = (root.creatorView && root.creatorView.undecrypted) || 0;
+                                        if (total === 0) return "—";
+                                        return Math.round((total - und) / total * 100) + "%";
+                                    }
+                                    font.pixelSize: 24
+                                    font.weight: Font.Bold
+                                    color: root.wbSuccess
+                                }
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Decrypted"
+                                    font.pixelSize: 11
+                                    color: root.wbTextTert
+                                }
+                            }
                         }
                     }
 
-                    // ══ CREATOR SECTION ════════════════════════════════════════
-                    ColumnLayout {
+                    // Share button
+                    Rectangle {
                         Layout.fillWidth: true
-                        spacing: Theme.spacing.small
-                        visible: root.isCreator(root.selectedForm)
+                        height: 44
+                        radius: root.wbRadiusMd
+                        color: root.wbSurfaceRaised
+                        border.color: root.wbBorder
+                        border.width: 1
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: root.wbSpace2
+                            Text { text: "🔗"; font.pixelSize: 14 }
+                            Text {
+                                text: "Share this form"
+                                font.pixelSize: 14
+                                font.weight: Font.DemiBold
+                                color: root.wbText
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.buildShare();
+                                root.showShare = true;
+                            }
+                        }
+                    }
 
-                        // share card
+                    // Responses
+                    Text {
+                        text: "RESPONSES (" + root.responsesFor(root.selectedId).length + ")"
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        color: root.wbTextTert
+                        letterSpacing: 0.5
+                    }
+
+                    Repeater {
+                        model: root.responsesFor(root.selectedId)
                         Rectangle {
                             Layout.fillWidth: true
-                            implicitHeight: shareRow.implicitHeight + 2 * Theme.spacing.medium
-                            radius: Theme.spacing.radiusMedium
-                            color: Theme.palette.surface
-                            border.color: Theme.palette.borderHairline
+                            implicitHeight: respCol.implicitHeight + 2 * root.wbSpace4
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorderSubtle
                             border.width: 1
+                            property var resp: modelData
 
-                            RowLayout {
-                                id: shareRow
-                                anchors.centerIn: parent
-                                width: parent.width - 2 * Theme.spacing.medium
-                                spacing: Theme.spacing.medium
+                            ColumnLayout {
+                                id: respCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.margins: root.wbSpace4
+                                spacing: root.wbSpace3
 
-                                Canvas {
-                                    id: qrCanvas
-                                    width: 160; height: 160
-                                    visible: !!root.qrData
-                                    onPaint: {
-                                        var ctx = getContext("2d");
-                                        ctx.clearRect(0, 0, width, height);
-                                        if (!root.qrData) return;
-                                        var n = root.qrData.n, cells = root.qrData.cells;
-                                        var s = Math.min(width, height) / n;
-                                        ctx.fillStyle = "#ffffff";
-                                        ctx.fillRect(0, 0, n * s, n * s);
-                                        ctx.fillStyle = "#14141f";
-                                        for (var i = 0; i < n * n; i++) {
-                                            if (!cells[i]) continue;
-                                            var x = i % n, y = Math.floor(i / n);
-                                            ctx.fillRect(x * s, y * s, s + 0.5, s + 0.5);
-                                        }
+                                // Response header
+                                RowLayout {
+                                    spacing: root.wbSpace2
+                                    Text {
+                                        text: root.shortAddr(resp.respondent)
+                                        font.pixelSize: 12
+                                        font.family: "monospace"
+                                        color: root.wbTextSec
                                     }
-                                }
-
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: Theme.spacing.tiny
-                                    LogosText {
-                                        text: "SHARE"
-                                        color: Theme.palette.textTertiary
-                                        font.pixelSize: Theme.typography.secondaryText
+                                    Text {
+                                        text: root.fmtTime(resp.submittedAt)
+                                        font.pixelSize: 11
+                                        color: root.wbTextTert
                                     }
-                                    AppField {
-                                        Layout.fillWidth: true
-                                        implicitHeight: 34
-                                        readOnly: true
-                                        selectByMouse: true
-                                        text: root.shareUriText
-                                    }
-                                    RowLayout {
-                                        spacing: Theme.spacing.tiny
-                                        LogosButton {
-                                            implicitHeight: 30
-                                            text: "Copy link"
-                                            onClicked: { clip.text = root.shareUriText; clip.select(); clip.copy(); root.toast("Link copied"); }
-                                        }
-                                        LogosText {
-                                            text: "respondents scan the QR or open the link on their device"
-                                            color: Theme.palette.textTertiary
-                                            font.pixelSize: Theme.typography.secondaryText
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // responses table
-                        RowLayout {
-                            spacing: 6
-                            LogosText {
-                                text: "RESPONSES (" + root.responsesFor(root.selectedId).length + ")"
-                                font.pixelSize: Theme.typography.secondaryText
-                                font.weight: Theme.typography.weightMedium
-                            }
-                            LogosText {
-                                visible: root.creatorView !== null && root.creatorView.undecrypted > 0
-                                text: root.creatorView ? root.creatorView.undecrypted + " undecryptable blob(s) ignored" : ""
-                                color: Theme.palette.warning
-                                font.pixelSize: Theme.typography.secondaryText
-                            }
-                        }
-
-                        Repeater {
-                            model: root.responsesFor(root.selectedId)
-                            Rectangle {
-                                Layout.fillWidth: true
-                                implicitHeight: respCol.implicitHeight + 2 * Theme.spacing.small
-                                radius: Theme.spacing.radiusSmall
-                                color: Theme.palette.surface
-                                border.color: Theme.palette.borderHairline
-                                border.width: 1
-                                property var resp: modelData   // outer delegate data (inner repeaters shadow modelData)
-
-                                ColumnLayout {
-                                    id: respCol
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.bottom: parent.bottom
-                                    anchors.margins: Theme.spacing.small
-                                    spacing: Theme.spacing.tiny
-
-                                    RowLayout {
-                                        spacing: 6
-                                        LogosText {
-                                            text: root.shortAddr(resp.respondent)
-                                            font.pixelSize: Theme.typography.secondaryText
-                                            font.weight: Theme.typography.weightMedium
-                                        }
-                                        LogosText {
-                                            text: root.fmtTime(resp.submittedAt)
-                                            color: Theme.palette.textTertiary
-                                            font.pixelSize: Theme.typography.secondaryText
-                                        }
-                                        Item { Layout.fillWidth: true }
-                                        LogosText {
-                                            visible: resp.confirmed === true
-                                            text: "confirmed"
-                                            color: Theme.palette.success
-                                            font.pixelSize: Theme.typography.secondaryText
-                                        }
-                                        LogosButton {
-                                            visible: resp.confirmed !== true
-                                            implicitHeight: 26
+                                    Item { Layout.fillWidth: true }
+                                    // Confirm button / badge
+                                    Rectangle {
+                                        visible: resp.confirmed !== true
+                                        width: confirmBtn.implicitWidth + 20
+                                        height: 26
+                                        radius: 13
+                                        color: root.wbPrimarySubtle
+                                        Text {
+                                            id: confirmBtn
+                                            anchors.centerIn: parent
                                             text: "Confirm"
+                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
+                                            color: root.wbPrimary
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
                                             onClicked: root.mutate("confirmResponse", [root.selectedId, resp.respondent])
                                         }
                                     }
+                                    Rectangle {
+                                        visible: resp.confirmed === true
+                                        width: confBadge.implicitWidth + 16
+                                        height: 22
+                                        radius: 11
+                                        color: "#1a3d2a"
+                                        Text {
+                                            id: confBadge
+                                            anchors.centerIn: parent
+                                            text: "✓ Confirmed"
+                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
+                                            color: root.wbSuccess
+                                        }
+                                    }
+                                }
 
-                                    Repeater {
-                                        model: (resp.answers) ? resp.answers.length : 0
-                                        RowLayout {
-                                            spacing: Theme.spacing.tiny
-                                            LogosText {
-                                                text: {
-                                                    var q = null;
-                                                    if (root.selectedForm && root.selectedForm.questions) {
-                                                        for (var i = 0; i < root.selectedForm.questions.length; i++) {
-                                                            if (root.selectedForm.questions[i].id === resp.answers[index].questionId) { q = root.selectedForm.questions[i]; break; }
-                                                        }
+                                // Answers
+                                Repeater {
+                                    model: (resp.answers) ? resp.answers.length : 0
+                                    RowLayout {
+                                        spacing: root.wbSpace2
+                                        Text {
+                                            text: {
+                                                var q = null;
+                                                if (root.selectedForm && root.selectedForm.questions) {
+                                                    for (var i = 0; i < root.selectedForm.questions.length; i++) {
+                                                        if (root.selectedForm.questions[i].id === resp.answers[index].questionId) { q = root.selectedForm.questions[i]; break; }
                                                     }
-                                                    return (q ? q.text : resp.answers[index].questionId) + ":  ";
                                                 }
-                                                color: Theme.palette.textTertiary
-                                                font.pixelSize: Theme.typography.secondaryText
+                                                return (q ? q.text : resp.answers[index].questionId);
                                             }
-                                            LogosText {
-                                                Layout.fillWidth: true
-                                                wrapMode: Text.WordWrap
-                                                text: {
-                                                    var q = null;
-                                                    if (root.selectedForm && root.selectedForm.questions) {
-                                                        for (var i = 0; i < root.selectedForm.questions.length; i++) {
-                                                            if (root.selectedForm.questions[i].id === resp.answers[index].questionId) { q = root.selectedForm.questions[i]; break; }
-                                                        }
+                                            font.pixelSize: 12
+                                            color: root.wbTextTert
+                                            width: 120
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                            text: {
+                                                var q = null;
+                                                if (root.selectedForm && root.selectedForm.questions) {
+                                                    for (var i = 0; i < root.selectedForm.questions.length; i++) {
+                                                        if (root.selectedForm.questions[i].id === resp.answers[index].questionId) { q = root.selectedForm.questions[i]; break; }
                                                     }
-                                                    var v = resp.answers[index].value;
-                                                    if (q && (q.type === "radioButtons") && q.options) return q.options[v] !== undefined ? q.options[v] : String(v);
-                                                    if (q && (q.type === "checkbox") && q.options) {
-                                                        var parts = [];
-                                                        for (var j = 0; j < v.length; j++) parts.push(q.options[v[j]] !== undefined ? q.options[v[j]] : String(v[j]));
-                                                        return parts.join(", ");
-                                                    }
-                                                    return String(v);
                                                 }
-                                                font.pixelSize: Theme.typography.secondaryText
+                                                var v = resp.answers[index].value;
+                                                if (q && q.type === "radioButtons" && q.options) return q.options[v] !== undefined ? q.options[v] : String(v);
+                                                if (q && q.type === "checkbox" && q.options) {
+                                                    var parts = [];
+                                                    for (var j = 0; j < v.length; j++) parts.push(q.options[v[j]] !== undefined ? q.options[v[j]] : String(v[j]));
+                                                    return parts.join(", ");
+                                                }
+                                                return String(v);
                                             }
+                                            font.pixelSize: 13
+                                            color: root.wbText
                                         }
                                     }
                                 }
                             }
                         }
+                    }
 
-                        // creator actions
-                        RowLayout {
-                            spacing: Theme.spacing.tiny
-                            LogosButton {
-                                implicitHeight: 36
+                    // Creator actions
+                    RowLayout {
+                        spacing: root.wbSpace3
+                        Rectangle {
+                            width: csvBtn.implicitWidth + 28
+                            height: 38
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorder
+                            border.width: 1
+                            Text {
+                                id: csvBtn
+                                anchors.centerIn: parent
                                 text: "Export CSV"
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                                color: root.wbText
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
                                 onClicked: root.doExportCsv()
                             }
-                            LogosButton {
-                                visible: !(root.selectedForm && root.selectedForm.status === "closed")
-                                implicitHeight: 36
+                        }
+                        Rectangle {
+                            visible: !(root.selectedForm && root.selectedForm.status === "closed")
+                            width: closeBtn.implicitWidth + 28
+                            height: 38
+                            radius: root.wbRadiusMd
+                            color: "#2a1a1a"
+                            border.color: "#3d2020"
+                            border.width: 1
+                            Text {
+                                id: closeBtn
+                                anchors.centerIn: parent
                                 text: "Close form"
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                                color: root.wbError
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     var r = root.mutate("closeForm", [root.selectedId]);
                                     if (r && r.ok) root.toast("Form closed");
@@ -727,106 +1015,199 @@ Item {
                             }
                         }
                     }
+                }
 
-                    // ══ RESPONDENT SECTION ═════════════════════════════════════
+                // ══ RESPONDENT SECTION ════════════════════════════════════════
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: root.wbSpace4
+                    visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.status === "open"
+
+                    // Already responded
+                    Rectangle {
+                        Layout.fillWidth: true
+                        visible: root.hasResponded(root.selectedId)
+                        implicitHeight: alreadyResp.implicitHeight + 2 * root.wbSpace3
+                        radius: root.wbRadiusMd
+                        color: "#1a3d2a"
+                        border.color: "#2a4d3a"
+                        border.width: 1
+                        Text {
+                            id: alreadyResp
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.leftMargin: root.wbSpace4
+                            anchors.rightMargin: root.wbSpace4
+                            anchors.topMargin: root.wbSpace3
+                            anchors.bottomMargin: root.wbSpace3
+                            text: "✓ You already responded to this form. The creator will see your sealed answers."
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 13
+                            color: root.wbSuccess
+                        }
+                    }
+
+                    // Answer form
                     ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: Theme.spacing.small
-                        visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.status === "open"
+                        spacing: root.wbSpace5
+                        visible: !root.hasResponded(root.selectedId)
 
-                        LogosText {
-                            visible: root.hasResponded(root.selectedId)
-                            text: "You already responded to this form. The creator will see your sealed answers."
+                        // Waiting state
+                        Text {
+                            Layout.fillWidth: true
+                            visible: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length === 0 : false
+                            text: "Waiting for form data — it arrives over the mesh shortly."
                             wrapMode: Text.WordWrap
-                            color: Theme.palette.success
-                            font.pixelSize: Theme.typography.secondaryText
+                            font.pixelSize: 13
+                            color: root.wbTextTert
                         }
 
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.spacing.medium
-                            visible: !root.hasResponded(root.selectedId)
-
-                            LogosText {
+                        // Questions
+                        Repeater {
+                            model: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length : 0
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                visible: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length === 0 : false
-                                text: "Waiting for form data — it arrives over the mesh shortly after you scan."
-                                wrapMode: Text.WordWrap
-                                color: Theme.palette.textTertiary
-                                font.pixelSize: Theme.typography.secondaryText
-                            }
+                                spacing: root.wbSpace3
+                                property var qdef: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions[index] : null
 
-                            Repeater {
-                                model: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions.length : 0
+                                // Question label
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: qdef ? qdef.text + (qdef.required ? " *" : "") : ""
+                                    wrapMode: Text.WordWrap
+                                    font.pixelSize: 15
+                                    font.weight: Font.DemiBold
+                                    color: root.wbText
+                                }
+
+                                // Text input
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 44
+                                    radius: root.wbRadiusMd
+                                    color: root.wbSurfaceRaised
+                                    border.color: root.wbBorder
+                                    border.width: 1
+                                    visible: root.answerWidget(qdef) === "text"
+                                    TextField {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 14
+                                        anchors.rightMargin: 14
+                                        color: root.wbText
+                                        placeholderTextColor: root.wbTextTert
+                                        font.pixelSize: 14
+                                        background: null
+                                        placeholderText: "Your answer"
+                                        text: String(root.answerValue(qdef ? qdef.id : "") || "")
+                                        onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
+                                        selectByMouse: true
+                                    }
+                                }
+
+                                // Textarea
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 96
+                                    radius: root.wbRadiusMd
+                                    color: root.wbSurfaceRaised
+                                    border.color: root.wbBorder
+                                    border.width: 1
+                                    visible: root.answerWidget(qdef) === "textarea"
+                                    TextArea {
+                                        anchors.fill: parent
+                                        anchors.margins: 14
+                                        color: root.wbText
+                                        placeholderTextColor: root.wbTextTert
+                                        font.pixelSize: 14
+                                        background: null
+                                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                                        placeholderText: "Your answer"
+                                        text: String(root.answerValue(qdef ? qdef.id : "") || "")
+                                        onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
+                                        selectByMouse: true
+                                    }
+                                }
+
+                                // Radio / Checkbox options
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    spacing: Theme.spacing.tiny
-                                    property var qdef: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions[index] : null
+                                    spacing: root.wbSpace2
+                                    visible: (root.answerWidget(qdef) === "radioButtons" || root.answerWidget(qdef) === "checkbox")
 
-                                    LogosText {
-                                        text: qdef ? qdef.text + (qdef.required ? " *" : "") : ""
-                                        wrapMode: Text.WordWrap
-                                        font.pixelSize: Theme.typography.secondaryText
-                                    }
+                                    Repeater {
+                                        model: (qdef && qdef.options) ? qdef.options.length : 0
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            height: 44
+                                            radius: root.wbRadiusMd
+                                            color: {
+                                                var selected = qdef.type === "radioButtons"
+                                                    ? root.answerValue(qdef.id) === index
+                                                    : (root.answerValue(qdef.id) || []).indexOf(index) >= 0;
+                                                return selected ? root.wbPrimarySubtle : root.wbSurfaceRaised;
+                                            }
+                                            border.color: {
+                                                var selected = qdef.type === "radioButtons"
+                                                    ? root.answerValue(qdef.id) === index
+                                                    : (root.answerValue(qdef.id) || []).indexOf(index) >= 0;
+                                                return selected ? root.wbPrimary : root.wbBorderSubtle;
+                                            }
+                                            border.width: 1
 
-                                    AppField {
-                                        Layout.fillWidth: true
-                                        implicitHeight: 38
-                                        visible: answerWidget(qdef) === "text"
-                                        placeholderText: "Your answer"
-                                        text: String(root.answerValue(qdef ? qdef.id : "") || "")
-                                        onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
-                                    }
-                                    AppArea {
-                                        Layout.fillWidth: true
-                                        implicitHeight: 90
-                                        visible: answerWidget(qdef) === "textarea"
-                                        placeholderText: "Your answer"
-                                        text: String(root.answerValue(qdef ? qdef.id : "") || "")
-                                        onTextChanged: if (qdef) root.setAnswer(qdef.id, text)
-                                    }
-
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 2
-                                        visible: (answerWidget(qdef) === "radioButtons" || answerWidget(qdef) === "checkbox")
-
-                                        Repeater {
-                                            model: (qdef && qdef.options) ? qdef.options.length : 0
                                             RowLayout {
-                                                spacing: Theme.spacing.small
+                                                anchors.fill: parent
+                                                anchors.leftMargin: root.wbSpace4
+                                                anchors.rightMargin: root.wbSpace4
+                                                spacing: root.wbSpace3
+
+                                                // Radio/checkbox indicator
                                                 Rectangle {
                                                     width: 18; height: 18
-                                                    radius: (qdef.type === "radioButtons") ? 9 : 4
-                                                    color: "transparent"
-                                                    border.color: Theme.palette.border
-                                                    border.width: 2
-                                                    Rectangle {
-                                                        anchors.centerIn: parent
-                                                        width: 10; height: 10
-                                                        radius: (qdef.type === "radioButtons") ? 5 : 2
-                                                        color: Theme.palette.primary
-                                                        visible: qdef.type === "radioButtons"
+                                                    radius: qdef.type === "radioButtons" ? 9 : 4
+                                                    color: {
+                                                        var selected = qdef.type === "radioButtons"
                                                             ? root.answerValue(qdef.id) === index
-                                                            : (root.answerValue(qdef.id) || []).indexOf(index) >= 0
+                                                            : (root.answerValue(qdef.id) || []).indexOf(index) >= 0;
+                                                        return selected ? root.wbPrimary : "transparent";
+                                                    }
+                                                    border.color: {
+                                                        var selected = qdef.type === "radioButtons"
+                                                            ? root.answerValue(qdef.id) === index
+                                                            : (root.answerValue(qdef.id) || []).indexOf(index) >= 0;
+                                                        return selected ? root.wbPrimary : root.wbBorder;
+                                                    }
+                                                    border.width: 2
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        visible: qdef.type === "checkbox" && (root.answerValue(qdef.id) || []).indexOf(index) >= 0
+                                                        text: "✓"
+                                                        font.pixelSize: 11
+                                                        font.weight: Font.Bold
+                                                        color: "white"
                                                     }
                                                 }
-                                                LogosText {
+
+                                                Text {
                                                     text: qdef.options[index]
-                                                    font.pixelSize: Theme.typography.secondaryText
+                                                    font.pixelSize: 14
+                                                    color: root.wbText
                                                 }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        if (qdef.type === "radioButtons") root.setAnswer(qdef.id, index);
-                                                        else {
-                                                            var v = (root.answerValue(qdef.id) || []).slice();
-                                                            var p = v.indexOf(index);
-                                                            if (p >= 0) v.splice(p, 1); else v.push(index);
-                                                            v.sort(function (a, b) { return a - b; });
-                                                            root.setAnswer(qdef.id, v);
-                                                        }
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    if (qdef.type === "radioButtons") root.setAnswer(qdef.id, index);
+                                                    else {
+                                                        var v = (root.answerValue(qdef.id) || []).slice();
+                                                        var p = v.indexOf(index);
+                                                        if (p >= 0) v.splice(p, 1); else v.push(index);
+                                                        v.sort(function (a, b) { return a - b; });
+                                                        root.setAnswer(qdef.id, v);
                                                     }
                                                 }
                                             }
@@ -834,261 +1215,684 @@ Item {
                                     }
                                 }
                             }
+                        }
 
-                            LogosButton {
-                                implicitHeight: 40
-                                text: "Submit response"
+                        // Submit button
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 48
+                            radius: root.wbRadiusMd
+                            color: root.wbAccent
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Submit Response"
+                                font.pixelSize: 15
+                                font.weight: Font.Bold
+                                color: "#0b0b10"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
                                 onClicked: root.doSubmit()
                             }
-                            LogosText {
-                                text: "Your answers are sealed end-to-end. Only the form creator can read them."
-                                color: Theme.palette.textTertiary
-                                font.pixelSize: Theme.typography.secondaryText
+                        }
+
+                        // Privacy note
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: privacyNote.implicitHeight + 2 * root.wbSpace3
+                            radius: root.wbRadiusMd
+                            color: "#1a2a1a"
+                            border.color: "#2a4d3a"
+                            border.width: 1
+                            Text {
+                                id: privacyNote
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.leftMargin: root.wbSpace4
+                                anchors.rightMargin: root.wbSpace4
+                                anchors.topMargin: root.wbSpace3
+                                anchors.bottomMargin: root.wbSpace3
+                                text: "🔒 Your answers are sealed end-to-end. Only the form creator can read them. No servers, no tracking."
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: 12
+                                color: root.wbSuccess
                             }
                         }
                     }
+                }
 
-                    // ══ CLOSED / VIEWER NOTE ═══════════════════════════════════
-                    LogosText {
-                        visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.status === "closed"
-                        text: "This form is closed — no new responses are accepted."
-                        color: Theme.palette.textTertiary
-                        font.pixelSize: Theme.typography.secondaryText
-                    }
+                // Closed form note
+                Text {
+                    visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.status === "closed"
+                    Layout.fillWidth: true
+                    text: "This form is closed — no new responses are accepted."
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 13
+                    color: root.wbTextTert
                 }
             }
         }
     }
 
-    // ══ CREATE-FORM OVERLAY ════════════════════════════════════════════════════
+    // ══ CREATE FORM OVERLAY ═══════════════════════════════════════════════════
     Rectangle {
-        id: createOverlay
         anchors.fill: parent
         visible: root.showCreate
-        color: "#80000000"
+        color: "#cc0b0b10"
         z: 10
 
         Rectangle {
-            width: Math.min(560, parent.width - 48)
-            height: Math.min(parent.height - 96, createFlick.contentHeight + 2 * Theme.spacing.large)
+            width: Math.min(560, parent.width - 32)
+            height: Math.min(parent.height - 32, createFlick.contentHeight + 2 * root.wbSpace5)
             anchors.centerIn: parent
-            radius: Theme.spacing.radiusMedium
-            color: Theme.palette.surfaceRaised
-            border.color: Theme.palette.border
+            radius: root.wbRadiusXl
+            color: root.wbSurface
+            border.color: root.wbBorder
             border.width: 1
 
             Flickable {
                 id: createFlick
                 anchors.fill: parent
                 contentWidth: width
-                contentHeight: createCard.implicitHeight + 2 * Theme.spacing.large
+                contentHeight: createCard.implicitHeight + 2 * root.wbSpace5
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
                 ColumnLayout {
                     id: createCard
-                    x: Theme.spacing.large
-                    y: Theme.spacing.large
-                    width: parent.width - 2 * Theme.spacing.large
-                    spacing: Theme.spacing.small
+                    x: root.wbSpace5
+                    y: root.wbSpace5
+                    width: parent.width - 2 * root.wbSpace5
+                    spacing: root.wbSpace4
 
-                LogosText {
-                    text: "New form"
-                    font.pixelSize: Theme.typography.panelTitleText
-                    font.weight: Theme.typography.weightBold
-                }
-                AppField {
-                    id: createTitle
-                    Layout.fillWidth: true
-                    implicitHeight: 38
-                    placeholderText: "Form title (required)"
-                }
-                AppField {
-                    id: createDesc
-                    Layout.fillWidth: true
-                    implicitHeight: 38
-                    placeholderText: "Description (optional)"
-                }
+                    // Header
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text {
+                            text: "New Form"
+                            font.pixelSize: 22
+                            font.weight: Font.Bold
+                            color: root.wbText
+                        }
+                        Item { Layout.fillWidth: true }
+                        Rectangle {
+                            width: 28; height: 28
+                            radius: 14
+                            color: root.wbSurfaceRaised
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕"
+                                font.pixelSize: 13
+                                color: root.wbTextTert
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.showCreate = false
+                            }
+                        }
+                    }
 
-                LogosText {
-                    text: "QUESTIONS (" + root.draftQuestions.length + ")"
-                    color: Theme.palette.textTertiary
-                    font.pixelSize: Theme.typography.secondaryText
-                }
-
-                Repeater {
-                    model: root.draftQuestions.length
+                    // Title
                     ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: Theme.spacing.tiny
+                        spacing: root.wbSpace2
+                        Text {
+                            text: "TITLE"
+                            font.pixelSize: 11
+                            font.weight: Font.DemiBold
+                            color: root.wbTextTert
+                            letterSpacing: 0.5
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 44
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorder
+                            border.width: 1
+                            TextField {
+                                id: createTitle
+                                anchors.fill: parent
+                                anchors.leftMargin: 14
+                                anchors.rightMargin: 14
+                                color: root.wbText
+                                placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 14
+                                font.weight: Font.DemiBold
+                                background: null
+                                placeholderText: "Form title"
+                                selectByMouse: true
+                            }
+                        }
+                    }
 
-                        RowLayout {
-                            spacing: Theme.spacing.tiny
-                            AppCombo {
-                                width: 132
-                                model: ["text", "textarea", "radioButtons", "checkbox"]
-                                currentIndex: {
-                                    var m = ["text", "textarea", "radioButtons", "checkbox"];
-                                    var p = m.indexOf(normType(root.draftQuestions[index]));
-                                    return p >= 0 ? p : 0;
-                                }
-                                onActivated: {
-                                    var m = ["text", "textarea", "radioButtons", "checkbox"];
-                                    root.setDraftQuestion(index, "type", m[currentIndex]);
-                                }
+                    // Description
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: root.wbSpace2
+                        Text {
+                            text: "DESCRIPTION (OPTIONAL)"
+                            font.pixelSize: 11
+                            font.weight: Font.DemiBold
+                            color: root.wbTextTert
+                            letterSpacing: 0.5
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 44
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorder
+                            border.width: 1
+                            TextField {
+                                id: createDesc
+                                anchors.fill: parent
+                                anchors.leftMargin: 14
+                                anchors.rightMargin: 14
+                                color: root.wbText
+                                placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 14
+                                background: null
+                                placeholderText: "What's this form about?"
+                                selectByMouse: true
                             }
-                            AppField {
-                                Layout.fillWidth: true
-                                implicitHeight: 36
-                                visible: root.draftQuestions[index].type !== "textarea"
-                                placeholderText: "Question text"
-                                text: String(root.draftQuestions[index].text || "")
-                                onTextChanged: root.setDraftQuestion(index, "text", text)
-                            }
-                            AppArea {
-                                Layout.fillWidth: true
-                                implicitHeight: 64
-                                visible: root.draftQuestions[index].type === "textarea"
-                                placeholderText: "Question text (multi-line)"
-                                text: String(root.draftQuestions[index].text || "")
-                                onTextChanged: root.setDraftQuestion(index, "text", text)
-                            }
-                            RowLayout {
-                                spacing: 4
-                                LogosText {
-                                    text: "required"
-                                    color: Theme.palette.textTertiary
-                                    font.pixelSize: Theme.typography.secondaryText
+                        }
+                    }
+
+                    // Questions
+                    Text {
+                        text: "QUESTIONS (" + root.draftQuestions.length + ")"
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        color: root.wbTextTert
+                        letterSpacing: 0.5
+                    }
+
+                    Repeater {
+                        model: root.draftQuestions.length
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: qbCol.implicitHeight + 2 * root.wbSpace4
+                            radius: root.wbRadiusMd
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorderSubtle
+                            border.width: 1
+
+                            ColumnLayout {
+                                id: qbCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.margins: root.wbSpace4
+                                spacing: root.wbSpace3
+
+                                // Type + text + remove
+                                RowLayout {
+                                    spacing: root.wbSpace2
+                                    // Type badge
+                                    Rectangle {
+                                        width: typeBadge.implicitWidth + 16
+                                        height: 26
+                                        radius: 6
+                                        color: root.wbPrimarySubtle
+                                        Text {
+                                            id: typeBadge
+                                            anchors.centerIn: parent
+                                            text: {
+                                                var t = root.normType(root.draftQuestions[index]);
+                                                var m = { "text": "Text", "textarea": "Long text", "radioButtons": "Radio", "checkbox": "Checkbox" };
+                                                return m[t] || "Text";
+                                            }
+                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
+                                            color: root.wbPrimary
+                                        }
+                                    }
+                                    // Type selector (invisible combo)
+                                    ComboBox {
+                                        width: 0; height: 0
+                                        visible: false
+                                        model: ["text", "textarea", "radioButtons", "checkbox"]
+                                        currentIndex: {
+                                            var m = ["text", "textarea", "radioButtons", "checkbox"];
+                                            var p = m.indexOf(root.normType(root.draftQuestions[index]));
+                                            return p >= 0 ? p : 0;
+                                        }
+                                        onActivated: {
+                                            var m = ["text", "textarea", "radioButtons", "checkbox"];
+                                            root.setDraftQuestion(index, "type", m[currentIndex]);
+                                        }
+                                    }
+                                    // Question text
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        height: 34
+                                        radius: root.wbRadiusSm
+                                        color: root.wbSurface
+                                        border.color: root.wbBorder
+                                        border.width: 1
+                                        TextField {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 10
+                                            anchors.rightMargin: 10
+                                            color: root.wbText
+                                            placeholderTextColor: root.wbTextTert
+                                            font.pixelSize: 13
+                                            background: null
+                                            placeholderText: "Question text"
+                                            text: String(root.draftQuestions[index].text || "")
+                                            onTextChanged: root.setDraftQuestion(index, "text", text)
+                                            selectByMouse: true
+                                        }
+                                    }
+                                    // Required checkbox
+                                    Rectangle {
+                                        width: 18; height: 18
+                                        radius: 4
+                                        color: root.draftQuestions[index].required ? root.wbPrimary : "transparent"
+                                        border.color: root.wbBorder
+                                        border.width: 2
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: root.draftQuestions[index].required
+                                            text: "✓"
+                                            font.pixelSize: 11
+                                            font.weight: Font.Bold
+                                            color: "white"
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.setDraftQuestion(index, "required", !root.draftQuestions[index].required)
+                                        }
+                                    }
+                                    // Remove
+                                    Text {
+                                        text: "✕"
+                                        font.pixelSize: 14
+                                        color: root.wbTextTert
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.removeDraftQuestion(index)
+                                        }
+                                    }
                                 }
+
+                                // Options (for radio/checkbox)
                                 Rectangle {
-                                    width: 18; height: 18
-                                    radius: 4
-                                    color: root.draftQuestions[index].required ? Theme.palette.primary : "transparent"
-                                    border.color: Theme.palette.border
-                                    border.width: 2
-                                    MouseArea {
+                                    Layout.fillWidth: true
+                                    height: 72
+                                    radius: root.wbRadiusSm
+                                    color: root.wbSurface
+                                    border.color: root.wbBorder
+                                    border.width: 1
+                                    visible: root.draftQuestions[index].type === "radioButtons" || root.draftQuestions[index].type === "checkbox"
+                                    TextArea {
                                         anchors.fill: parent
-                                        onClicked: root.setDraftQuestion(index, "required", !root.draftQuestions[index].required)
+                                        anchors.margins: 10
+                                        color: root.wbText
+                                        placeholderTextColor: root.wbTextTert
+                                        font.pixelSize: 12
+                                        background: null
+                                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                                        placeholderText: "Options — one per line (min 2)"
+                                        text: String(root.draftQuestions[index].optionsText || "")
+                                        onTextChanged: root.setDraftQuestion(index, "optionsText", text)
+                                        selectByMouse: true
                                     }
                                 }
                             }
-                            LogosButton {
-                                width: 36
-                                implicitHeight: 36
-                                text: "✕"
-                                onClicked: root.removeDraftQuestion(index)
+                        }
+                    }
+
+                    // Add question
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 38
+                        radius: root.wbRadiusMd
+                        color: "transparent"
+                        border.color: root.wbBorder
+                        border.width: 1
+                        border.style: Qt.DashLine
+                        Text {
+                            anchors.centerIn: parent
+                            text: "+ Add question"
+                            font.pixelSize: 13
+                            color: root.wbTextTert
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.addDraftQuestion()
+                        }
+                    }
+
+                    // Actions
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: root.wbSpace3
+                        spacing: root.wbSpace3
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 44
+                            radius: root.wbRadiusMd
+                            color: root.wbPrimary
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Create & Share"
+                                font.pixelSize: 14
+                                font.weight: Font.Bold
+                                color: "white"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.doCreate()
                             }
                         }
-
-                        AppArea {
-                            Layout.fillWidth: true
-                            implicitHeight: 72
-                            visible: root.draftQuestions[index].type === "radioButtons" || root.draftQuestions[index].type === "checkbox"
-                            placeholderText: "Options — one per line (min 2)"
-                            text: String(root.draftQuestions[index].optionsText || "")
-                            onTextChanged: root.setDraftQuestion(index, "optionsText", text)
+                        Rectangle {
+                            width: cancelBtn.implicitWidth + 24
+                            height: 44
+                            radius: root.wbRadiusMd
+                            color: "transparent"
+                            Text {
+                                id: cancelBtn
+                                anchors.centerIn: parent
+                                text: "Cancel"
+                                font.pixelSize: 14
+                                color: root.wbTextTert
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.showCreate = false
+                            }
                         }
-                    }
-                }
-
-                LogosButton {
-                    implicitHeight: 34
-                    text: "+ Add question"
-                    onClicked: root.addDraftQuestion()
-                }
-
-                RowLayout {
-                    spacing: Theme.spacing.tiny
-                    Item { Layout.fillWidth: true }
-                    LogosButton {
-                        implicitHeight: 38
-                        text: "Cancel"
-                        onClicked: root.showCreate = false
-                    }
-                    LogosButton {
-                        implicitHeight: 38
-                        text: "Create form"
-                        onClicked: root.doCreate()
-                    }
-                }
-                }   // createCard
-            }       // createFlick
-        }
-    }
-
-    // ══ CSV POPUP ══════════════════════════════════════════════════════════════
-    Rectangle {
-        anchors.fill: parent
-        visible: root.showCsv
-        color: "#80000000"
-        z: 10
-
-        Rectangle {
-            width: Math.min(640, parent.width - 48)
-            height: Math.min(parent.height - 48, csvCard.implicitHeight + 2 * Theme.spacing.large)
-            anchors.centerIn: parent
-            radius: Theme.spacing.radiusMedium
-            color: Theme.palette.surfaceRaised
-            border.color: Theme.palette.border
-            border.width: 1
-
-            ColumnLayout {
-                id: csvCard
-                width: parent.width - 2 * Theme.spacing.large
-                x: Theme.spacing.large
-                y: Theme.spacing.large
-                spacing: Theme.spacing.small
-
-                LogosText {
-                    text: "CSV export"
-                    font.pixelSize: Theme.typography.panelTitleText
-                    font.weight: Theme.typography.weightBold
-                }
-                AppArea {
-                    Layout.fillWidth: true
-                    implicitHeight: 260
-                    readOnly: true
-                    text: root.csvText
-                }
-                RowLayout {
-                    spacing: Theme.spacing.tiny
-                    Item { Layout.fillWidth: true }
-                    LogosButton {
-                        implicitHeight: 36
-                        text: "Copy CSV"
-                        onClicked: { clip.text = root.csvText; clip.select(); clip.copy(); root.toast("CSV copied"); }
-                    }
-                    LogosButton {
-                        implicitHeight: 36
-                        text: "Close"
-                        onClicked: root.showCsv = false
                     }
                 }
             }
         }
     }
 
-    // ══ TOAST ══════════════════════════════════════════════════════════════════
+    // ══ SHARE OVERLAY ═════════════════════════════════════════════════════════
+    Rectangle {
+        anchors.fill: parent
+        visible: root.showShare
+        color: "#cc0b0b10"
+        z: 10
+
+        Rectangle {
+            width: Math.min(420, parent.width - 32)
+            height: Math.min(parent.height - 32, shareCol.implicitHeight + 2 * root.wbSpace5)
+            anchors.centerIn: parent
+            radius: root.wbRadiusXl
+            color: root.wbSurface
+            border.color: root.wbBorder
+            border.width: 1
+
+            ColumnLayout {
+                id: shareCol
+                x: root.wbSpace5
+                y: root.wbSpace5
+                width: parent.width - 2 * root.wbSpace5
+                spacing: root.wbSpace4
+
+                // Header
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        text: "Share"
+                        font.pixelSize: 20
+                        font.weight: Font.Bold
+                        color: root.wbText
+                    }
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: 28; height: 28
+                        radius: 14
+                        color: root.wbSurfaceRaised
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✕"
+                            font.pixelSize: 13
+                            color: root.wbTextTert
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showShare = false
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Anyone with this link can answer. No account needed."
+                    font.pixelSize: 13
+                    color: root.wbTextSec
+                }
+
+                // QR
+                Canvas {
+                    id: qrCanvas
+                    width: 180; height: 180
+                    Layout.alignment: Qt.AlignHCenter
+                    onPaint: {
+                        var ctx = getContext("2d");
+                        ctx.clearRect(0, 0, width, height);
+                        if (!root.qrData) return;
+                        var n = root.qrData.n, cells = root.qrData.cells;
+                        var s = Math.min(width, height) / n;
+                        ctx.fillStyle = "#ffffff";
+                        ctx.fillRect(0, 0, n * s, n * s);
+                        ctx.fillStyle = "#14141f";
+                        for (var i = 0; i < n * n; i++) {
+                            if (!cells[i]) continue;
+                            var x = i % n, y = Math.floor(i / n);
+                            ctx.fillRect(x * s, y * s, s + 0.5, s + 0.5);
+                        }
+                    }
+                }
+
+                // URI
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: uriText.implicitHeight + 2 * root.wbSpace3
+                    radius: root.wbRadiusMd
+                    color: root.wbSurfaceRaised
+                    border.color: root.wbBorder
+                    border.width: 1
+                    Text {
+                        id: uriText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: root.wbSpace3
+                        anchors.rightMargin: root.wbSpace3
+                        anchors.topMargin: root.wbSpace3
+                        anchors.bottomMargin: root.wbSpace3
+                        text: root.shareUriText || "(building…)"
+                        font.pixelSize: 11
+                        font.family: "monospace"
+                        color: root.wbTextSec
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                        elide: Text.ElideRight
+                    }
+                }
+
+                // Copy button
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 42
+                    radius: root.wbRadiusMd
+                    color: root.wbPrimary
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Copy Link"
+                        font.pixelSize: 14
+                        font.weight: Font.Bold
+                        color: "white"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: { clip.text = root.shareUriText; clip.select(); clip.copy(); root.toast("Link copied"); }
+                    }
+                }
+
+                // Privacy tip
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: tipText.implicitHeight + 2 * root.wbSpace3
+                    radius: root.wbRadiusMd
+                    color: root.wbPrimarySubtle
+                    Text {
+                        id: tipText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: root.wbSpace3
+                        anchors.rightMargin: root.wbSpace3
+                        anchors.topMargin: root.wbSpace3
+                        anchors.bottomMargin: root.wbSpace3
+                        text: "💡 Respondents see only the form questions. Their answers are encrypted to you alone."
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 12
+                        color: root.wbPrimary
+                    }
+                }
+            }
+        }
+    }
+
+    // ══ CSV OVERLAY ═══════════════════════════════════════════════════════════
+    Rectangle {
+        anchors.fill: parent
+        visible: root.showCsv
+        color: "#cc0b0b10"
+        z: 10
+
+        Rectangle {
+            width: Math.min(600, parent.width - 32)
+            height: Math.min(parent.height - 32, csvCard.implicitHeight + 2 * root.wbSpace5)
+            anchors.centerIn: parent
+            radius: root.wbRadiusXl
+            color: root.wbSurface
+            border.color: root.wbBorder
+            border.width: 1
+
+            ColumnLayout {
+                id: csvCard
+                x: root.wbSpace5
+                y: root.wbSpace5
+                width: parent.width - 2 * root.wbSpace5
+                spacing: root.wbSpace4
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        text: "CSV Export"
+                        font.pixelSize: 20
+                        font.weight: Font.Bold
+                        color: root.wbText
+                    }
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: 28; height: 28
+                        radius: 14
+                        color: root.wbSurfaceRaised
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✕"
+                            font.pixelSize: 13
+                            color: root.wbTextTert
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showCsv = false
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 240
+                    radius: root.wbRadiusMd
+                    color: root.wbSurfaceRaised
+                    border.color: root.wbBorder
+                    border.width: 1
+                    TextArea {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        readOnly: true
+                        color: root.wbText
+                        font.pixelSize: 11
+                        font.family: "monospace"
+                        background: null
+                        wrapMode: Text.NoWrap
+                        text: root.csvText
+                        selectByMouse: true
+                    }
+                }
+
+                RowLayout {
+                    spacing: root.wbSpace3
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: copyCsvBtn.implicitWidth + 24
+                        height: 36
+                        radius: root.wbRadiusMd
+                        color: root.wbPrimary
+                        Text {
+                            id: copyCsvBtn
+                            anchors.centerIn: parent
+                            text: "Copy CSV"
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { clip.text = root.csvText; clip.select(); clip.copy(); root.toast("CSV copied"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ══ TOAST ═════════════════════════════════════════════════════════════════
     Rectangle {
         visible: !!root.toastMsg
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottomMargin: Theme.spacing.large
-        width: Math.min(480, root.width - 32)
-        implicitHeight: toastText.implicitHeight + 2 * Theme.spacing.small
-        radius: Theme.spacing.radiusPill
-        color: Theme.palette.surfaceRaised
-        border.color: Theme.palette.border
+        anchors.bottomMargin: root.wbSpace6
+        width: Math.min(440, root.width - 32)
+        implicitHeight: toastText.implicitHeight + 2 * root.wbSpace3
+        radius: root.wbRadiusLg
+        color: root.wbSurfaceRaised
+        border.color: root.wbBorder
         border.width: 1
         z: 20
-        LogosText {
+        Text {
             id: toastText
             anchors.centerIn: parent
-            width: parent.width - 2 * Theme.spacing.medium
+            width: parent.width - 2 * root.wbSpace4
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             text: root.toastMsg
-            font.pixelSize: Theme.typography.secondaryText
+            font.pixelSize: 13
+            color: root.wbText
         }
     }
 }
