@@ -1567,7 +1567,7 @@ Item {
                         color: "transparent"
                         border.color: root.wbBorder
                         border.width: 1
-                        border.style: Qt.DashLine
+                        // dashed border not supported in QML Rectangle
                         Text {
                             anchors.centerIn: parent
                             text: "+ Add question"
