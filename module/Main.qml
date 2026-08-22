@@ -28,7 +28,9 @@ Item {
     property string selectedId: ""
     property string toastMsg: ""
     property bool showCreate: false
+    property bool showShare: false
     property var draftQuestions: []
+    property var answers: ({})
 
     function callCore(m, a) {
         if (typeof logos === "undefined" || !logos.callModule) return "";
@@ -59,8 +61,34 @@ Item {
         }
         if (def.questions.length === 0) { root.toast("Add at least one question"); return; }
         var r = mutate("createForm", [JSON.stringify(def)]);
-        if (r && r.ok) { root.showCreate = false; createTitle.text = ""; root.draftQuestions = []; root.toast("Form created"); }
-        else root.toast(r && r.error ? r.error : "Could not create form");
+        if (r && r.ok) {
+            root.showCreate = false; createTitle.text = ""; root.draftQuestions = [];
+            root.selectedId = String(r.formId || "").toLowerCase();
+            root.toast("Form created");
+        } else root.toast(r && r.error ? r.error : "Could not create form");
+    }
+    function doSubmit() {
+        if (!root.selectedForm) return;
+        var payload = { formId: root.selectedId, answers: root.answers };
+        var r = mutate("submitResponse", [JSON.stringify(payload)]);
+        if (r && r.ok) { root.toast("Response submitted"); root.answers = ({}); }
+        else root.toast(r && r.error ? r.error : "Could not submit");
+    }
+    function shareUri() {
+        if (!root.selectedForm) return "";
+        var payload = JSON.stringify({ id: root.selectedForm.id, title: root.selectedForm.title || "" });
+        return "whisperbox://form?" + encodeURIComponent(payload);
+    }
+    function copyShare() {
+        root.toast("URI: " + root.shareUri().substr(0, 40) + "…");
+    }
+    function exportCsv() {
+        root.toast("CSV export coming soon");
+    }
+    function setAnswer(qid, text) {
+        var a = Object.assign({}, root.answers);
+        a[qid] = text;
+        root.answers = a;
     }
 
     readonly property var formsObj: st.state && st.state.forms ? st.state.forms : ({})
@@ -245,7 +273,7 @@ Item {
                             }
                         }
 
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectedId = modelData }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.selectedId = modelData; root.answers = ({}); } }
                     }
                 }
 
@@ -265,6 +293,7 @@ Item {
             Layout.fillHeight: true
             color: root.wbSurface
 
+            // Empty state
             ColumnLayout {
                 visible: !root.selectedForm
                 anchors.centerIn: parent
@@ -284,229 +313,524 @@ Item {
                 }
             }
 
-            ColumnLayout {
+            // Form detail (scrollable)
+            Flickable {
+                id: detailFlick
                 visible: !!root.selectedForm
+                anchors.fill: parent
+                anchors.margins: 24
+                contentWidth: width
+                contentHeight: detailCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ColumnLayout {
+                    id: detailCol
+                    width: detailFlick.width
+                    spacing: 16
+
+                    // Header
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.selectedForm ? root.selectedForm.title : ""
+                            font.pixelSize: 22
+                            font.weight: Font.Bold
+                            color: root.wbText
+                            wrapMode: Text.WordWrap
+                        }
+                        Rectangle {
+                            visible: root.isCreator(root.selectedForm)
+                            width: shareBtnT.implicitWidth + 20
+                            height: 32
+                            radius: 12
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorder
+                            border.width: 1
+                            Text {
+                                id: shareBtnT
+                                anchors.centerIn: parent
+                                text: "Share"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                                color: root.wbText
+                            }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showShare = true }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: !!(root.selectedForm && root.selectedForm.description)
+                        text: root.selectedForm ? root.selectedForm.description : ""
+                        font.pixelSize: 13
+                        color: root.wbTextSec
+                        wrapMode: Text.WordWrap
+                    }
+
+                    RowLayout {
+                        spacing: 8
+                        Rectangle {
+                            visible: root.selectedForm && root.selectedForm.status === "open"
+                            width: stB.implicitWidth + 14
+                            height: 20
+                            radius: 10
+                            color: "#1a3d2a"
+                            Text {
+                                id: stB
+                                anchors.centerIn: parent
+                                text: "Open"
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                color: root.wbSuccess
+                            }
+                        }
+                        Text {
+                            text: "by " + root.shortAddr(root.selectedForm ? root.selectedForm.creator : "")
+                            font.pixelSize: 12
+                            color: root.wbTextTert
+                        }
+                    }
+
+                    // ── CREATOR VIEW ──
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 16
+                        visible: root.isCreator(root.selectedForm)
+
+                        // Stats
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 72
+                                radius: 12
+                                color: root.wbSurfaceRaised
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 2
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: String(root.responsesFor(root.selectedId).length)
+                                        font.pixelSize: 28
+                                        font.weight: Font.Bold
+                                        color: root.wbPrimary
+                                    }
+                                    Text { Layout.alignment: Qt.AlignHCenter; text: "Responses"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 72
+                                radius: 12
+                                color: root.wbSurfaceRaised
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 2
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: {
+                                            var n = 0;
+                                            var resps = root.responsesFor(root.selectedId);
+                                            for (var i = 0; i < resps.length; i++) if (resps[i].confirmed) n++;
+                                            return String(n);
+                                        }
+                                        font.pixelSize: 28
+                                        font.weight: Font.Bold
+                                        color: root.wbText
+                                    }
+                                    Text { Layout.alignment: Qt.AlignHCenter; text: "Confirmed"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 72
+                                radius: 12
+                                color: root.wbSurfaceRaised
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 2
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: {
+                                            var total = root.responsesFor(root.selectedId).length;
+                                            if (total === 0) return "—";
+                                            var und = (root.creatorView && root.creatorView.undecrypted) || 0;
+                                            return Math.round((total - und) / total * 100) + "%";
+                                        }
+                                        font.pixelSize: 28
+                                        font.weight: Font.Bold
+                                        color: root.wbSuccess
+                                    }
+                                    Text { Layout.alignment: Qt.AlignHCenter; text: "Decrypted"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                        }
+
+                        // Share card
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: shareCardCol.implicitHeight + 32
+                            radius: 12
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorderSubtle
+                            border.width: 1
+
+                            ColumnLayout {
+                                id: shareCardCol
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                spacing: 10
+
+                                Text { text: "SHARE THIS FORM"; font.pixelSize: 10; font.weight: Font.DemiBold; color: root.wbTextTert }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 36
+                                    radius: 8
+                                    color: root.wbBg
+                                    border.color: root.wbBorder
+                                    border.width: 1
+                                    Text {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: root.shareUri()
+                                        font.pixelSize: 11
+                                        font.family: "monospace"
+                                        color: root.wbTextSec
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                RowLayout {
+                                    spacing: 8
+                                    Rectangle {
+                                        width: copyT.implicitWidth + 16
+                                        height: 28
+                                        radius: 8
+                                        color: root.wbPrimary
+                                        Text {
+                                            id: copyT
+                                            anchors.centerIn: parent
+                                            text: "Copy Link"
+                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
+                                            color: "white"
+                                        }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyShare() }
+                                    }
+                                    Text { text: "Respondents scan or open link"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                        }
+
+                        // Responses list
+                        Text {
+                            text: "RESPONSES (" + root.responsesFor(root.selectedId).length + ")"
+                            font.pixelSize: 11
+                            font.weight: Font.DemiBold
+                            color: root.wbTextTert
+                        }
+
+                        Repeater {
+                            model: root.responsesFor(root.selectedId).length
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: respCol.implicitHeight + 24
+                                radius: 12
+                                color: root.wbSurfaceRaised
+                                border.color: root.wbBorderSubtle
+                                border.width: 1
+
+                                property var resp: root.responsesFor(root.selectedId)[index]
+
+                                ColumnLayout {
+                                    id: respCol
+                                    anchors.fill: parent
+                                    anchors.margins: 14
+                                    spacing: 10
+
+                                    // Response header
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: root.shortAddr(resp.from || resp.address || "unknown")
+                                            font.pixelSize: 11
+                                            font.family: "monospace"
+                                            color: root.wbTextSec
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Rectangle {
+                                            visible: resp.decrypted && !resp.confirmed
+                                            width: decB.implicitWidth + 12
+                                            height: 18
+                                            radius: 9
+                                            color: "#1a3d2a"
+                                            Text {
+                                                id: decB
+                                                anchors.centerIn: parent
+                                                text: "Decrypted"
+                                                font.pixelSize: 9
+                                                font.weight: Font.DemiBold
+                                                color: root.wbSuccess
+                                            }
+                                        }
+                                        Rectangle {
+                                            visible: resp.confirmed
+                                            width: confB.implicitWidth + 12
+                                            height: 18
+                                            radius: 9
+                                            color: "#1a3d2a"
+                                            Text {
+                                                id: confB
+                                                anchors.centerIn: parent
+                                                text: "✓ Confirmed"
+                                                font.pixelSize: 9
+                                                font.weight: Font.DemiBold
+                                                color: root.wbSuccess
+                                            }
+                                        }
+                                        Rectangle {
+                                            visible: !resp.decrypted
+                                            width: undB.implicitWidth + 12
+                                            height: 18
+                                            radius: 9
+                                            color: "#2a2a1a"
+                                            Text {
+                                                id: undB
+                                                anchors.centerIn: parent
+                                                text: "Encrypted"
+                                                font.pixelSize: 9
+                                                font.weight: Font.DemiBold
+                                                color: root.wbWarning
+                                            }
+                                        }
+                                    }
+
+                                    // Q&A rows
+                                    Repeater {
+                                        model: (resp.answers && resp.answers.length) ? resp.answers.length : 0
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 12
+                                            property var ans: resp.answers[index]
+
+                                            Text {
+                                                text: (ans.question || ans.q || "Q" + (index+1))
+                                                font.pixelSize: 12
+                                                color: root.wbTextTert
+                                                width: 140
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: (ans.answer || ans.a || "—")
+                                                font.pixelSize: 13
+                                                color: (ans.answer || ans.a) ? root.wbText : root.wbTextTert
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Export CSV
+                        Rectangle {
+                            width: csvT.implicitWidth + 20
+                            height: 32
+                            radius: 12
+                            color: root.wbSurfaceRaised
+                            border.color: root.wbBorder
+                            border.width: 1
+                            Text {
+                                id: csvT
+                                anchors.centerIn: parent
+                                text: "Export CSV"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                                color: root.wbText
+                            }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.exportCsv() }
+                        }
+                    }
+
+                    // ── RESPONDENT VIEW ──
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.questions
+
+                        Repeater {
+                            model: root.selectedForm.questions.length
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                property var qdef: root.selectedForm.questions[index]
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: qdef ? qdef.text + (qdef.required ? " *" : "") : ""
+                                    wrapMode: Text.WordWrap
+                                    font.pixelSize: 14
+                                    font.weight: Font.DemiBold
+                                    color: root.wbText
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 44
+                                    radius: 12
+                                    color: root.wbSurfaceRaised
+                                    border.color: root.wbBorder
+                                    border.width: 1
+                                    TextField {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 14
+                                        anchors.rightMargin: 14
+                                        color: root.wbText
+                                        placeholderTextColor: root.wbTextTert
+                                        font.pixelSize: 13
+                                        background: null
+                                        placeholderText: "Your answer"
+                                        text: (root.answers[qdef.id] || root.answers["question_" + (index+1)]) || ""
+                                        onTextChanged: root.setAnswer(qdef.id || "question_" + (index+1), text)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Submit
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 48
+                            radius: 12
+                            color: root.wbAccent
+                            visible: root.selectedForm && root.selectedForm.status === "open"
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Submit Response"
+                                font.pixelSize: 15
+                                font.weight: Font.Bold
+                                color: "#0b0b10"
+                            }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.doSubmit() }
+                        }
+
+                        // Privacy note
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: privT.implicitHeight + 24
+                            radius: 12
+                            color: "#1a2a1a"
+                            border.color: "#2a4d3a"
+                            border.width: 1
+                            Text {
+                                id: privT
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.leftMargin: 16
+                                anchors.rightMargin: 16
+                                anchors.topMargin: 12
+                                anchors.bottomMargin: 12
+                                text: "🔒 Your answers are sealed end-to-end. Only the form creator can read them. No servers, no tracking."
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: 12
+                                color: root.wbSuccess
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ══ SHARE OVERLAY ══
+    Rectangle {
+        anchors.fill: parent
+        visible: root.showShare
+        color: "#cc0b0b10"
+        z: 10
+
+        Rectangle {
+            width: Math.min(480, parent.width - 48)
+            height: Math.min(parent.height - 48, 320)
+            anchors.centerIn: parent
+            radius: 16
+            color: root.wbSurface
+            border.color: root.wbBorder
+            border.width: 1
+
+            ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 24
                 spacing: 16
 
                 RowLayout {
                     Layout.fillWidth: true
+                    Text { text: "Share Form"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
+                    Item { Layout.fillWidth: true }
                     Text {
-                        Layout.fillWidth: true
-                        text: root.selectedForm ? root.selectedForm.title : ""
-                        font.pixelSize: 22
-                        font.weight: Font.Bold
-                        color: root.wbText
-                        wrapMode: Text.WordWrap
+                        text: "✕"; font.pixelSize: 14; color: root.wbTextTert
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showShare = false }
                     }
-                    Rectangle {
-                        visible: root.isCreator(root.selectedForm)
-                        width: shareBtnT.implicitWidth + 20
-                        height: 32
-                        radius: 12
-                        color: root.wbSurfaceRaised
-                        border.color: root.wbBorder
-                        border.width: 1
-                        Text {
-                            id: shareBtnT
-                            anchors.centerIn: parent
-                            text: "Share"
-                            font.pixelSize: 12
-                            font.weight: Font.DemiBold
-                            color: root.wbText
-                        }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toast("Share coming soon") }
+                }
+
+                Text { text: "SHARE THIS FORM"; font.pixelSize: 10; font.weight: Font.DemiBold; color: root.wbTextTert }
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 44
+                    radius: 10
+                    color: root.wbBg
+                    border.color: root.wbBorder
+                    border.width: 1
+                    Text {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        verticalAlignment: Text.AlignVCenter
+                        text: root.shareUri()
+                        font.pixelSize: 12
+                        font.family: "monospace"
+                        color: root.wbTextSec
+                        elide: Text.ElideRight
                     }
                 }
 
                 Text {
                     Layout.fillWidth: true
-                    visible: !!(root.selectedForm && root.selectedForm.description)
-                    text: root.selectedForm ? root.selectedForm.description : ""
-                    font.pixelSize: 13
-                    color: root.wbTextSec
+                    text: "Anyone with this link can respond. Responses are encrypted end-to-end — only you can read them."
+                    font.pixelSize: 12
+                    color: root.wbTextTert
                     wrapMode: Text.WordWrap
                 }
 
                 RowLayout {
-                    spacing: 8
+                    Layout.fillWidth: true
+                    Layout.topMargin: 8
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: "Close"; font.pixelSize: 13; color: root.wbTextTert
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showShare = false }
+                    }
                     Rectangle {
-                        visible: root.selectedForm && root.selectedForm.status === "open"
-                        width: stB.implicitWidth + 14
-                        height: 20
-                        radius: 10
-                        color: "#1a3d2a"
+                        width: 120
+                        height: 40
+                        radius: 12
+                        color: root.wbPrimary
                         Text {
-                            id: stB
                             anchors.centerIn: parent
-                            text: "Open"
-                            font.pixelSize: 10
-                            font.weight: Font.DemiBold
-                            color: root.wbSuccess
+                            text: "Copy Link"
+                            font.pixelSize: 13
+                            font.weight: Font.Bold
+                            color: "white"
                         }
-                    }
-                    Text {
-                        text: "by " + root.shortAddr(root.selectedForm ? root.selectedForm.creator : "")
-                        font.pixelSize: 12
-                        color: root.wbTextTert
-                    }
-                }
-
-                // Creator stats
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-                    visible: root.isCreator(root.selectedForm)
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        height: 72
-                        radius: 12
-                        color: root.wbSurfaceRaised
-                        ColumnLayout {
-                            anchors.centerIn: parent
-                            spacing: 2
-                            Text {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: String(root.responsesFor(root.selectedId).length)
-                                font.pixelSize: 28
-                                font.weight: Font.Bold
-                                color: root.wbPrimary
-                            }
-                            Text { Layout.alignment: Qt.AlignHCenter; text: "Responses"; font.pixelSize: 11; color: root.wbTextTert }
-                        }
-                    }
-                    Rectangle {
-                        Layout.fillWidth: true
-                        height: 72
-                        radius: 12
-                        color: root.wbSurfaceRaised
-                        ColumnLayout {
-                            anchors.centerIn: parent
-                            spacing: 2
-                            Text {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: {
-                                    var n = 0;
-                                    var resps = root.responsesFor(root.selectedId);
-                                    for (var i = 0; i < resps.length; i++) if (resps[i].confirmed) n++;
-                                    return String(n);
-                                }
-                                font.pixelSize: 28
-                                font.weight: Font.Bold
-                                color: root.wbText
-                            }
-                            Text { Layout.alignment: Qt.AlignHCenter; text: "Confirmed"; font.pixelSize: 11; color: root.wbTextTert }
-                        }
-                    }
-                    Rectangle {
-                        Layout.fillWidth: true
-                        height: 72
-                        radius: 12
-                        color: root.wbSurfaceRaised
-                        ColumnLayout {
-                            anchors.centerIn: parent
-                            spacing: 2
-                            Text {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: {
-                                    var total = root.responsesFor(root.selectedId).length;
-                                    if (total === 0) return "—";
-                                    var und = (root.creatorView && root.creatorView.undecrypted) || 0;
-                                    return Math.round((total - und) / total * 100) + "%";
-                                }
-                                font.pixelSize: 28
-                                font.weight: Font.Bold
-                                color: root.wbSuccess
-                            }
-                            Text { Layout.alignment: Qt.AlignHCenter; text: "Decrypted"; font.pixelSize: 11; color: root.wbTextTert }
-                        }
-                    }
-                }
-
-                // Questions (respondent view)
-                Repeater {
-                    model: (root.selectedForm && root.selectedForm.questions && !root.isCreator(root.selectedForm)) ? root.selectedForm.questions.length : 0
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        property var qdef: (root.selectedForm && root.selectedForm.questions) ? root.selectedForm.questions[index] : null
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: qdef ? qdef.text + (qdef.required ? " *" : "") : ""
-                            wrapMode: Text.WordWrap
-                            font.pixelSize: 14
-                            font.weight: Font.DemiBold
-                            color: root.wbText
-                        }
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            height: 44
-                            radius: 12
-                            color: root.wbSurfaceRaised
-                            border.color: root.wbBorder
-                            border.width: 1
-                            TextField {
-                                anchors.fill: parent
-                                anchors.leftMargin: 14
-                                anchors.rightMargin: 14
-                                color: root.wbText
-                                placeholderTextColor: root.wbTextTert
-                                font.pixelSize: 13
-                                background: null
-                                placeholderText: "Your answer"
-                            }
-                        }
-                    }
-                }
-
-                // Submit button
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 48
-                    radius: 12
-                    color: root.wbAccent
-                    visible: !root.isCreator(root.selectedForm) && root.selectedForm && root.selectedForm.status === "open"
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Submit Response"
-                        font.pixelSize: 15
-                        font.weight: Font.Bold
-                        color: "#0b0b10"
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.toast("Submit coming soon")
-                    }
-                }
-
-                // Privacy note
-                Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: privT.implicitHeight + 24
-                    radius: 12
-                    color: "#1a2a1a"
-                    border.color: "#2a4d3a"
-                    border.width: 1
-                    visible: !root.isCreator(root.selectedForm)
-                    Text {
-                        id: privT
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.leftMargin: 16
-                        anchors.rightMargin: 16
-                        anchors.topMargin: 12
-                        anchors.bottomMargin: 12
-                        text: "🔒 Your answers are sealed end-to-end. Only the form creator can read them. No servers, no tracking."
-                        wrapMode: Text.WordWrap
-                        font.pixelSize: 12
-                        color: root.wbSuccess
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.copyShare(); root.showShare = false; } }
                     }
                 }
             }
