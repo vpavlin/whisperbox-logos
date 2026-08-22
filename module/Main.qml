@@ -286,7 +286,7 @@ Item {
         Rectangle {
             Layout.preferredWidth: 320
             Layout.fillHeight: true
-            color: "#ff0000" // DEBUG: test if colors are applied
+            color: root.wbBg
             border.color: root.wbBorderSubtle
             border.width: 1
             border.left: 0; border.top: 0; border.bottom: 0
