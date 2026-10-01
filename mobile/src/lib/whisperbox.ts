@@ -4,6 +4,7 @@
 import * as transport from "./loam-transport";
 import * as SecureStore from "expo-secure-store";
 import { fileStore, secretStore } from "./store";
+import { crumb, initCrashLog } from "./crashlog";
 // @ts-ignore - plain ESM shared with the desktop reference + tests
 import { WhisperboxClient, TOPIC, parseLink } from "../../../packages/client/src/client.mjs";
 
@@ -25,23 +26,39 @@ let booted: Promise<void> | null = null;
 export function boot(): Promise<void> {
   if (booted) return booted;
   booted = (async () => {
+    await initCrashLog();
+    crumb("client.init");
     await client.init();
+    crumb("client ready dev=" + client.deviceId + " log=" + client.log.length);
     try { net.shared = (await SecureStore.getItemAsync("wb-shared-node")) !== "0"; } catch { net.shared = true; }
     transport.preferServiceBackend(net.shared, APP_ID);
+    crumb("transport.start shared=" + net.shared);
+    let rx = 0;
     try {
       await transport.start({
         deviceId: client.deviceId,
         topics: [TOPIC],
-        onReceive: (topic: string, candidates: Uint8Array[]) => topic === TOPIC && client.ingest(candidates),
-        onStatus: (s: string) => { net.status = s; client.emit(); },
+        onReceive: (topic: string, candidates: Uint8Array[]) => {
+          if (topic !== TOPIC) return false;
+          rx++; if (rx <= 3 || rx % 25 === 0) crumb("rx #" + rx + " new=" + client.diag.rxNew + " err=" + (client.diag.rxErr || 0));
+          return client.ingest(candidates);
+        },
+        onStatus: (s: string) => { net.status = s; crumb("status: " + s); client.emit(); },
       });
       net.started = true; net.status = "Connected";
+      crumb("started " + (transport.usingServiceBackend() ? "shared node" : "own node"));
       client.onConnected();
-      transport.storeSync((t: string, c: Uint8Array[]) => t === TOPIC && client.ingest(c)).catch(() => {});
+      crumb("store sync");
+      transport.storeSync((t: string, c: Uint8Array[]) => { try { return t === TOPIC && client.ingest(c); } catch { return false; } })
+        .then(() => crumb("store sync done log=" + client.log.length)).catch((e: any) => crumb("store sync failed " + (e?.message || e)));
     } catch (e: any) {
-      net.error = String(e?.message || e); net.status = "Offline"; client.emit();
+      net.error = String(e?.message || e); net.status = "Offline"; crumb("start failed: " + net.error); client.emit();
     }
-    ticker = setInterval(() => client.tick(), 1000);
+    let ticks = 0;
+    ticker = setInterval(() => {
+      try { client.tick(); } catch (e: any) { crumb("tick error " + (e?.message || e)); }
+      if (++ticks === 5 || ticks === 30) crumb("alive " + ticks + "s log=" + client.log.length + " rx=" + client.diag.rxRaw);
+    }, 1000);
   })();
   return booted;
 }

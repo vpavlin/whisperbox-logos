@@ -12,6 +12,7 @@ import QRCode from "react-native-qrcode-svg";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { SharedNodeStatus } from "./src/lib/loam-transport-pkg/src/SharedNodeStatus";
 import { boot, client, net, pullHistory, setSharedNode, parseLink } from "./src/lib/whisperbox";
+import { crumb, previousCrash, previousLog, currentLog, fatalError, onFatal, reportFatal, clearFatal } from "./src/lib/crashlog";
 
 // ── palette: the desktop view's indigo/charcoal ──
 const C = {
@@ -46,11 +47,42 @@ const answerText = (q: any, v: any): string => {
 };
 
 export default function App() {
+  const [fatal, setFatal] = useState<string | null>(fatalError());
+  const [gen, setGen] = useState(0);
+  useEffect(() => onFatal(() => setFatal(fatalError())), []);
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <Root />
+      {fatal ? <FatalScreen msg={fatal} onRetry={() => { clearFatal(); setGen((g) => g + 1); }} /> : (
+        <Boundary key={gen}><Root /></Boundary>
+      )}
     </SafeAreaProvider>
+  );
+}
+
+// Render errors -> the same on-screen report (a release build would otherwise just die).
+class Boundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(e: any) { reportFatal(e, "render"); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
+
+function FatalScreen({ msg, onRetry }: { msg: string; onRetry: () => void }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <SafeAreaView style={[st.fill, st.pad]}>
+      <LockMark size={28} tint={C.err} />
+      <Text style={[st.h1, { marginTop: 14 }]}>WhisperBox hit an error</Text>
+      <Text style={[st.muted, { marginTop: 6 }]}>Your forms and answers are safe on this phone. Please copy the details and send them to the developer.</Text>
+      <ScrollView style={[st.card, { flex: 1, marginTop: 14 }]}>
+        <Text style={st.csv} selectable>{msg + "\n\n" + currentLog()}</Text>
+      </ScrollView>
+      <View style={[st.joinRow, { marginTop: 12 }]}>
+        <Btn label={copied ? "Copied" : "Copy details"} primary onPress={async () => { await Clipboard.setStringAsync(msg + "\n\n--- log ---\n" + currentLog()); setCopied(true); }} style={{ flex: 1 }} />
+        <Btn label="Try again" onPress={onRetry} style={{ flex: 1 }} />
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -221,6 +253,7 @@ function Home({ snap, push, openLink }: Ctx) {
         </Pressable>
       </View>
       <SharedNodeStatus appName="WhisperBox" />
+      <CrashBanner />
       <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} progressBackgroundColor={C.surface} />}>
         <Label>OPEN A SHARED FORM</Label>
@@ -249,6 +282,22 @@ function Home({ snap, push, openLink }: Ctx) {
       <Pressable onPress={() => push({ k: "create" })} style={({ pressed }) => [st.fab, pressed && { backgroundColor: C.primaryHover }]} accessibilityLabel="New form">
         <Text style={st.fabT}>+  New form</Text>
       </Pressable>
+    </View>
+  );
+}
+
+function CrashBanner() {
+  const [crash] = useState(previousCrash);
+  const [hidden, setHidden] = useState(false);
+  const [copied, setCopied] = useState(false);
+  if (!crash || hidden) return null;
+  return (
+    <View style={[st.banner, { backgroundColor: C.errSubtle, borderColor: C.err + "55", marginHorizontal: 18, marginBottom: 6 }]}>
+      <Text style={{ color: C.err, fontSize: 14, lineHeight: 20 }}>WhisperBox closed unexpectedly last time ({crash.secs}s after starting). The debug log shows how far it got.</Text>
+      <View style={[st.joinRow, { marginTop: 10 }]}>
+        <Btn label={copied ? "Copied" : "Copy debug log"} onPress={async () => { await Clipboard.setStringAsync("WhisperBox previous session\n" + crash.log); setCopied(true); }} style={{ flex: 1 }} />
+        <Btn label="Dismiss" onPress={() => setHidden(true)} style={{ flex: 1 }} />
+      </View>
     </View>
   );
 }
@@ -568,6 +617,10 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
           <Switch value={shared} onValueChange={async (v) => { setShared(v); await setSharedNode(v); toast("Applies after restarting WhisperBox"); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
         </View>
         <Btn label="Ask peers for anything I'm missing" onPress={() => { pullHistory(); toast("Catch-up requested"); }} style={{ marginTop: 12 }} />
+        <Btn label="Copy debug log" onPress={async () => {
+          await Clipboard.setStringAsync(`WhisperBox ${snap.deviceId}\nlastError: ${client.lastError || "-"}\ndiag: ${JSON.stringify(snap.diagnostics)}\n--- this session ---\n${currentLog()}\n--- previous session ---\n${previousLog()}`);
+          toast("Debug log copied");
+        }} style={{ marginTop: 10 }} />
         {net.error ? <Banner tone="err" text={"Network error: " + net.error} /> : null}
       </ScrollView>
     </View>
