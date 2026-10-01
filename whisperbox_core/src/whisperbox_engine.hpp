@@ -88,7 +88,8 @@ inline std::vector<json> mergeWhisperbox(std::vector<std::vector<json>> logs) {
     std::vector<json> out;
     out.reserve(byId.size());
     for (auto& kv : byId) out.push_back(kv.second);
-    std::sort(out.begin(), out.end(), totalOrder);
+    // totalOrder is a 3-way compare (-1/0/1); std::sort needs a strict "less".
+    std::sort(out.begin(), out.end(), [](const json& a, const json& b) { return totalOrder(a, b) < 0; });
     return out;
 }
 
@@ -97,10 +98,12 @@ inline bool mergeOne(std::vector<json>& log, const json& e) {
     if (!e.contains("id") || !e["id"].is_string()) return false;
     const std::string id = e["id"].get<std::string>();
     for (const auto& x : log) if (x.value("id", "") == id) return false; // dedup by id
+    // Walk back from the end past every event ordered AFTER e, then insert —
+    // keeps the log HLC-sorted (the fold's single-pass invariant).
     auto it = log.end();
     while (it != log.begin()) {
         auto prev = std::prev(it);
-        if (totalOrder(*prev, e) < 0) it = prev; else break;
+        if (totalOrder(*prev, e) > 0) it = prev; else break;
     }
     log.insert(it, e);
     return true;
@@ -264,6 +267,17 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     return state;
 }
 
+// Parsed address allow-list of {type:"addresses", value:"0xa,0xb"} (mirror engine.mjs).
+inline std::vector<std::string> whitelistAddresses(const json& wl) {
+    std::vector<std::string> out;
+    std::string v = wl.is_object() && wl.contains("value") && wl["value"].is_string() ? wl["value"].get<std::string>() : "";
+    std::string cur;
+    auto flush = [&] { if (!cur.empty()) out.push_back(lc(cur)); cur.clear(); };
+    for (char c : v) { if (c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r') flush(); else cur.push_back(c); }
+    flush();
+    return out;
+}
+
 // ── creatorView: decrypt + interpret the sealed response pool for ONE creator. ──
 // open() — ECIES open hook over a hex blob; returns the decrypted response object
 //          {formId, respondent, submittedAt, answers, signature} or null when the
@@ -332,6 +346,13 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
 
         std::string respondent = lc(dec.value("respondent", ""));
         if (respondent.empty()) { drop(dropped, "no-respondent"); continue; }
+        // Address allow-list (mirror engine.mjs): only listed respondents count.
+        if (wlType == "addresses") {
+            auto allowed = whitelistAddresses(f["whitelist"]);
+            if (std::find(allowed.begin(), allowed.end(), respondent) == allowed.end()) {
+                drop(dropped, "not-whitelisted"); continue;
+            }
+        }
         auto& seen = seenRespondent[formId];
         if (seen.count(respondent)) { drop(dropped, "duplicate-respondent"); continue; }
         seen.insert(respondent);
@@ -341,6 +362,8 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         r["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : nullptr;
         r["answers"] = dec.value("answers", json::array());
         r["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
+        // Respondent-chosen random receipt id (sealed, unlinkable); null pre-0.2.
+        r["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
         r["hlc"] = blob["hlc"];
         respObj[formId].push_back(r);
     }
