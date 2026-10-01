@@ -7,7 +7,8 @@
 // event-loop thread freezes the module on the IPC timeout).
 #include "whisperbox_core_impl.h"
 #include "logos_sdk.h"   // umbrella: LogosModules + LogosMap(nlohmann::json) + StdLogosResult
-#include "qrcodegen.hpp"  // vendored Nayuki QR encoder (host qr core unreachable from a pure-QML view)
+#include "qrcodegen.hpp"
+#include "logos_sync/catchup.hpp"   // loam-sync RBSR catch-up (fp/ids/need) - replaces the whole-log reseed  // vendored Nayuki QR encoder (host qr core unreachable from a pure-QML view)
 #include <QTimer>
 #include <chrono>
 #include <cstdio>
@@ -145,6 +146,7 @@ void WhisperboxCoreImpl::onContextReady() {
     m_clock.primeFrom(m_log);
     loadWatched();
     loadMySubmissions();
+    loadPins();
     bootstrapDelivery();
     fprintf(stderr, "WHISPERBOX delivery bootstrapped nodeReady=%d\n", (int)m_nodeReady);
     // Hub tick: retry node start until ready, then a rate-limited periodic seed so
@@ -154,14 +156,15 @@ void WhisperboxCoreImpl::onContextReady() {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
         if (!m_nodeReady) bootstrapDelivery();
         else {
-            if (nowMs() - m_lastSeedMs >= 60000 && !m_log.empty()) seedBroadcast();
-            // Catchup retries: ALWAYS 3s, 10s, 25s after the node-up request (the
-            // first peer to answer may hold only part of the log, or be inside its
-            // 3s re-serve throttle), then every 60s while the log is still empty.
-            if (m_nodeReady && (m_syncReqTries <= 3 || m_log.empty())) {
-                static const long long kBackoffMs[] = {3000, 10000, 25000};
-                long long delay = m_syncReqTries <= 3 ? kBackoffMs[m_syncReqTries - 1] : 60000;
-                if (nowMs() - m_lastSyncReqMs >= delay) requestSync();
+            // Catch-up schedule: an RBSR round at 3s, 10s, 25s after node-up (the first
+            // answer may come from a peer holding only part of the log), then every 60s.
+            // A round is ONE bounded fingerprint message; peers reply with the exact delta
+            // (never the whole log). The first rounds also carry a SYNC_REQ for 0.1.x peers.
+            static const long long kBackoffMs[] = {3000, 10000, 25000};
+            long long delay = m_syncReqTries <= 3 ? kBackoffMs[m_syncReqTries - 1] : 60000;
+            if (nowMs() - m_lastSyncReqMs >= delay) {
+                if (m_syncReqTries <= 3) requestSync(); else { m_lastSyncReqMs = nowMs(); m_syncReqTries++; }
+                catchupRound();
             }
             // Distributed-debugging: counters on stderr every 30s ("watch counters").
             if (nowMs() - m_lastStatMs >= 30000) {
@@ -255,6 +258,18 @@ void WhisperboxCoreImpl::saveWatched() {
     json a = json::array(); for (auto& id : m_watched) a.push_back(id);
     std::ofstream f(m_dataDir + "/watched.json", std::ios::trunc); if (f) f << a.dump();
 }
+void WhisperboxCoreImpl::loadPins() {
+    m_pinned.clear();
+    std::ifstream f(m_dataDir + "/pins.json"); if (!f) return;
+    try {
+        json o = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
+        if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) if (it.value().is_string()) m_pinned[lc(it.key())] = lc(it.value().get<std::string>());
+    } catch (...) { /* ignore */ }
+}
+void WhisperboxCoreImpl::savePins() {
+    json o = json::object(); for (auto& kv : m_pinned) o[kv.first] = kv.second;
+    std::ofstream f(m_dataDir + "/pins.json", std::ios::trunc); if (f) f << o.dump();
+}
 void WhisperboxCoreImpl::loadMySubmissions() {
     m_mySubmissions.clear(); m_myConfirmIds.clear();
     std::ifstream f(m_dataDir + "/my_submissions.json"); if (!f) return;
@@ -334,8 +349,8 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
                 std::lock_guard<std::recursive_mutex> lk(m_mtx);
                 m_nodeReady = true;
                 joinTransport();
-                seedBroadcast();   // serve our log if we have one
-                requestSync();     // AND pull: cold start with empty log needs history
+                requestSync();     // legacy (0.1.x) peers answer with their log
+                catchupRound();    // RBSR peers reconcile the exact delta both ways
                 setStatus("Connected");
                 publishState();
             });
@@ -359,8 +374,27 @@ void WhisperboxCoreImpl::seedBroadcast() {
     m_lastSeedMs = nowMs();
 }
 
-// Ask peers for the full log (cold-start catchup). Peers answer with a full-log
-// seedBroadcast (rate-limited 3s on their side); idempotent — everyone dedups by id.
+// One RBSR round: publish a bounded fingerprint over our id-set. Peers respond() with
+// splits / exact id lists / need, converging on the id-exact delta in both directions.
+void WhisperboxCoreImpl::catchupRound() {
+    if (!m_nodeReady) return;
+    std::vector<logos_sync::Event> evs; evs.reserve(m_log.size());
+    // RBSR items are event KEYS (id, or id#signer for signed events) so two signers'
+    // events under one id both reconcile - same key function as the merge.
+    for (const auto& e : m_log) { logos_sync::Event x; x.id = whisperbox::eventKey(e); evs.push_back(std::move(x)); }
+    sendControl(logos_sync::catchup::buildInitial(evs, m_deviceId));
+}
+void WhisperboxCoreImpl::sendControl(const json& msg) {
+    const std::string b64 = whisperbox::b64encode(msg.dump());
+    try {
+        std::vector<uint8_t> raw(b64.begin(), b64.end());
+        modules().delivery_module.sendAsync(TOPIC, raw, [](StdLogosResult){});
+    } catch (...) { /* best-effort */ }
+    if (deliverySend(TOPIC, b64)) m_txTotal++;
+}
+
+// Ask peers for state (flagged rbsr: 0.2+ peers ignore it and reconcile via RBSR;
+// 0.1.x peers answer with a full-log seedBroadcast, rate-limited 3s on their side).
 void WhisperboxCoreImpl::requestSync() {
     if (!m_nodeReady) return;
     std::string text = whisperbox::eventToJsonText(whisperbox::envSyncReq(m_deviceId));
@@ -443,9 +477,26 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
         json env = whisperbox::parseEnvelope(t);
         if (!env.is_object()) return false;
         const std::string type = env["type"].get<std::string>();
+        if (type == "RBSR") {
+            std::vector<logos_sync::Event> evs; evs.reserve(m_log.size());
+            std::map<std::string, const json*> byId;
+            for (const auto& e : m_log) {
+                logos_sync::Event x; x.id = whisperbox::eventKey(e); byId[x.id] = &e; evs.push_back(std::move(x));
+            }
+            env.erase("type");
+            auto step = logos_sync::catchup::respond(evs, env, m_deviceId);
+            for (const auto& r : step.replies) sendControl(r);
+            for (const auto& sv : step.serve) { auto it = byId.find(sv.id); if (it != byId.end()) broadcastEvent(*it->second); }
+            m_rbsrRx++;
+            return true;
+        }
         if (type == "SYNC_REQ") {
+            // Flagged rbsr = a peer that reconciles via RBSR; re-serving the whole log too
+            // would be pure flood. Unflagged = a 0.1.x peer that only knows SYNC_REQ.
+            if (env.contains("rbsr")) return true;
             if (env.value("from", "") != m_deviceId && nowMs() - m_lastSyncReserveMs >= 3000) {
                 m_lastSyncReserveMs = nowMs();
+                m_legacyReseeds++;
                 seedBroadcast();   // re-serve the whole log (idempotent — peers dedup)
             }
             return true;
@@ -506,7 +557,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     const std::string me = m_signId.valid ? m_signId.address : "";
     // Engine fold (log level): verify hook for signed gated events.
     auto verify = [](const json& e) { return whisperbox::verifyEventJson(e); };
-    OrderedJson state = whisperbox::computeState(m_log, me, verify);
+    OrderedJson state = whisperbox::computeState(m_log, me, verify, m_pinned);
 
     // Creator view: decrypt the response pool with our key, then mark each
     // response confirmed by matching its receipt id against the public set
@@ -543,11 +594,18 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
             auto list = whisperbox::whitelistAddresses(f["whitelist"]);
             allowed = m_signId.valid && std::find(list.begin(), list.end(), m_signId.address) != list.end();
         } else if (wlType != "none") allowed = false;   // nft: unsupported in v1
+        const bool contested = f.contains("contested") && f["contested"].is_boolean() && f["contested"].get<bool>();
+        const std::string pin = m_pinned.count(fid) ? m_pinned[fid] : std::string();
+        const bool linkMismatch = !pin.empty() && pin != f["creator"].get<std::string>();
+        const bool trusted = !linkMismatch && (!contested || pin == f["creator"].get<std::string>());
+        f["contested"] = contested;
+        f["pinnedCreator"] = pin.empty() ? json(nullptr) : json(pin);
+        f["linkMismatch"] = linkMismatch;
         f["mine"] = mine;
         f["mySubmitted"] = submitted;
         f["myConfirmed"] = confirmed;
         f["allowed"] = allowed;
-        f["canRespond"] = !mine && !submitted && allowed && f["status"].get<std::string>() == "open"
+        f["canRespond"] = trusted && !mine && !submitted && allowed && f["status"].get<std::string>() == "open"
                           && f["publicKey"].is_string() && !f["publicKey"].get<std::string>().empty();
     }
 
@@ -569,6 +627,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["diagnostics"] = json({
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType},
+        {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
     });
     return snap;
 }
@@ -625,7 +684,7 @@ std::string WhisperboxCoreImpl::closeForm(std::string formId) {
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(formId);
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.address);
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
@@ -647,7 +706,7 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(formId);
     respondentAddr = lc(respondentAddr);
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.address);
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
@@ -683,11 +742,18 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     try { answers = json::parse(trim(answersJson)); } catch (...) { out["ok"] = false; out["error"] = "bad answersJson"; return out.dump(); }
     if (!answers.is_array()) { out["ok"] = false; out["error"] = "answers must be an array of {questionId,value}"; return out.dump(); }
 
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.address);
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     const auto& f = state["forms"][formId];
     if (f["status"].get<std::string>() != "open") { out["ok"] = false; out["error"] = "form is closed"; return out.dump(); }
     if (m_mySubmissions.count(formId)) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
+    {
+        const std::string creator = f["creator"].get<std::string>();
+        const std::string pin = m_pinned.count(formId) ? m_pinned[formId] : std::string();
+        const bool contested = f.contains("contested") && f["contested"].is_boolean() && f["contested"].get<bool>();
+        if (!pin.empty() && pin != creator) { out["ok"] = false; out["error"] = "this form's creator doesn't match the link you opened - refusing to send answers"; return out.dump(); }
+        if (contested && pin != creator) { out["ok"] = false; out["error"] = "two different people published a form with this id - open it from the creator's link to answer"; return out.dump(); }
+    }
     if (!f["publicKey"].is_string() || f["publicKey"].get<std::string>().empty()) { out["ok"] = false; out["error"] = "form not synced yet - try again in a moment"; return out.dump(); }
     {
         std::string wl = f["whitelist"].is_object() ? f["whitelist"].value("type", "none") : "none";
@@ -762,7 +828,7 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(formId);
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.address);
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
@@ -824,7 +890,7 @@ std::string WhisperboxCoreImpl::shareUri(std::string formId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     formId = lc(formId);
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.valid ? m_signId.address : "");
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.valid ? m_signId.address : "", nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     const auto& f = state["forms"][formId];
     OrderedJson def = OrderedJson::object();
@@ -841,7 +907,7 @@ std::string WhisperboxCoreImpl::shareUri(std::string formId) {
     // carries the full def over Waku (public topic, re-broadcast + catchup); the
     // importer adopts by id optimistically and fills in when sync lands. Keeps
     // the QR at version 1-2 (scannable) instead of embedding the whole def.
-    std::string uri = "whisperbox://form?id=" + formId;
+    std::string uri = "whisperbox://form?id=" + formId + "&by=" + f["creator"].get<std::string>();
     out["ok"] = true; out["uri"] = uri;
     return out.dump();
 }
@@ -879,8 +945,21 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
         size_t q = input.find('?');
         std::string query = (q != std::string::npos) ? input.substr(q + 1) : "";
         if (query.rfind("id=", 0) == 0) {
+            // "id=<form>[&by=<creator address>]" - `by` pins the creator the link came from.
             def = json::object();
-            def["id"] = trim(query.substr(3));
+            size_t pos = 0;
+            while (pos <= query.size()) {
+                size_t amp = query.find('&', pos);
+                std::string kv = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+                size_t eq = kv.find('=');
+                if (eq != std::string::npos) {
+                    std::string k = kv.substr(0, eq), v = trim(kv.substr(eq + 1));
+                    if (k == "id") def["id"] = v;
+                    else if (k == "by") def["creator"] = v;
+                }
+                if (amp == std::string::npos) break;
+                pos = amp + 1;
+            }
         } else {
             try { def = json::parse(whisperbox::b64decode(query)); }
             catch (...) { out["ok"] = false; out["error"] = "bad URI payload"; return out.dump(); }
@@ -899,11 +978,15 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
     // No local placeholder event: an unsigned form.publish with the canonical id
     // would shadow the creator's signed event forever (union-by-id keeps the first
     // copy). Watch the id and pull; the view shows it as pending until it lands.
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.valid ? m_signId.address : "");
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.valid ? m_signId.address : "", nullptr, m_pinned);
     const bool have = state["forms"].contains(formId);
-    if (!have && m_nodeReady) requestSync();
+    if (!have && m_nodeReady) { requestSync(); catchupRound(); }
     m_watched.insert(formId);
     saveWatched();
+    // Pin the creator the link vouches for: answers will only ever be sealed to a form
+    // whose (signed) creator matches it - protects against form-id squatting.
+    std::string by = lc(def.value("creator", ""));
+    if (by.size() == 42 && by.rfind("0x", 0) == 0) { m_pinned[formId] = by; savePins(); }
     publishState();
     out["ok"] = true; out["formId"] = formId; out["pending"] = !have;
     return out.dump();
@@ -914,7 +997,7 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(formId);
-    OrderedJson state = whisperbox::computeState(m_log, m_signId.address);
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
@@ -974,9 +1057,8 @@ std::string WhisperboxCoreImpl::resync() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!m_nodeReady) { json o = {{"ok", false}, {"error", "node not ready"}}; return o.dump(); }
     // Ask peers for state AND re-serve ours (idempotent both ways).
-    std::string text = whisperbox::eventToJsonText(whisperbox::envSyncReq(m_deviceId));
-    if (deliverySend(TOPIC, whisperbox::b64encode(text))) m_txTotal++;
-    seedBroadcast();
+    requestSync();
+    catchupRound();
     publishState();
     json out = {{"ok", true}, {"logSize", (int)m_log.size()}};
     return out.dump();

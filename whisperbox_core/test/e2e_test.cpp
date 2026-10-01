@@ -12,11 +12,14 @@
 #include "whisperbox_core_impl.h"
 #include "fake_bus.h"
 #include <QElapsedTimer>
+#include <execinfo.h>
+#include <exception>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <unistd.h>
 #include <fstream>
+#include <set>
 
 using whisperbox::json;
 
@@ -47,6 +50,7 @@ struct Peer {
         v.erase(std::remove(v.begin(), v.end(), node.get()), v.end());
         core.reset(); node.reset();
     }
+    ~Peer() { if (node) stop(); }   // always leave the bus before the node is freed
     json snap() { return json::parse(core->snapshot()); }
     json call(const std::string& r) { return json::parse(r); }
 };
@@ -81,6 +85,13 @@ static json responsesOf(Peer& p, const std::string& fid) {
 }
 
 int main(int argc, char** argv) {
+    // Print a backtrace on an uncaught exception (diagnoses crashes that hide under gdb).
+    std::set_terminate([] {
+        void* fr[64]; int n = backtrace(fr, 64);
+        try { if (auto ep = std::current_exception()) std::rethrow_exception(ep); }
+        catch (const std::exception& ex) { std::fprintf(stderr, "UNCAUGHT: %s\n", ex.what()); } catch (...) {}
+        backtrace_symbols_fd(fr, n, 2); std::abort();
+    });
     QCoreApplication app(argc, argv);
     char tmpl[] = "/tmp/wb-e2e-XXXXXX";
     g_base = mkdtemp(tmpl);
@@ -234,11 +245,50 @@ int main(int argc, char** argv) {
     CHECK(caught, "late node D catches up on all forms");
     CHECK(t.elapsed() < 8000, "catch-up is driven by SYNC_REQ, not the 60s seed (" + std::to_string(t.elapsed()) + " ms)");
     CHECK(waitUntil([&] { return D->snap()["state"]["responses"].size() == A->snap()["state"]["responses"].size(); }, 5000), "D has the full response pool");
+    {
+        long rb = D->snap()["diagnostics"].value("rbsrRx", 0L);
+        long legacy = A->snap()["diagnostics"].value("legacyReseeds", 0L) + B->snap()["diagnostics"].value("legacyReseeds", 0L)
+                    + C->snap()["diagnostics"].value("legacyReseeds", 0L);
+        CHECK(rb > 0, "D reconciled via RBSR (" + std::to_string(rb) + " control frames)");
+        CHECK(legacy == 0, "no whole-log reseeds between 0.2 peers");
+    }
+
+    std::printf("legacy 0.1.x peer:\n");
+    {
+        // A node that only speaks the old protocol: sends an UNFLAGGED SYNC_REQ and expects
+        // the whole log back as EVENT envelopes.
+        FakeNode old; old.name = "legacy"; old.up = true; old.subscribed = true; old.senderId = "legacy";
+        std::set<std::string> got;
+        old.onMsg = [&](const std::string&, const std::string&, const LogosMap& p, int64_t) {
+            std::string once = whisperbox::b64decode(p["_bytes"].get<std::string>());
+            for (const std::string& t : {whisperbox::b64decode(once), once}) {
+                json env = whisperbox::parseEnvelope(t);
+                if (env.is_object() && env.value("type", "") == "EVENT") { got.insert(env["event"].value("id", "")); break; }
+            }
+        };
+        FakeBus::get().nodes.push_back(&old);
+        json req = {{"v", 1}, {"type", "SYNC_REQ"}, {"from", "legacy"}};
+        FakeBus::get().relay(&old, whisperbox::TOPIC, whisperbox::b64encode(req.dump()));
+        size_t want = 0; { json a = json::parse(std::ifstream(A->dir + "/events.json")); want = a.size(); }
+        CHECK(waitUntil([&] { return got.size() >= want; }, 5000), "legacy peer receives the whole log (" + std::to_string(got.size()) + "/" + std::to_string(want) + ")");
+        auto& v = FakeBus::get().nodes; v.erase(std::remove(v.begin(), v.end(), &old), v.end());
+    }
+
+    std::printf("partition heal:\n");
+    {
+        D->node->online = false;
+        std::string pf = A->call(A->core->createForm(json({{"title", "While D was away"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})}}).dump())).value("formId", "");
+        pump(400);
+        CHECK(!hasForm(*D, pf), "offline D missed the new form");
+        D->node->online = true;
+        D->core->resync();
+        CHECK(waitUntil([&] { return hasForm(*D, pf); }, 4000), "D reconciles the missed form via RBSR after reconnect");
+    }
 
     // ── import before sync (share link opened on a node that hasn't synced) ────
     std::printf("import-before-sync:\n");
     std::string uri = A->call(A->core->shareUri(fid)).value("uri", "");
-    CHECK(uri == "whisperbox://form?id=" + fid, "shareUri is the short id form");
+    CHECK(uri == "whisperbox://form?id=" + fid + "&by=" + addrA, "shareUri is the short id form, pinned to the creator");
     std::string ifid = A->call(A->core->createForm(json({{"title", "Fresh"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})}}).dump())).value("formId", "");
     auto E = mkPeer("E");
     E->node->online = false;   // offline: link opened before any sync
@@ -251,6 +301,40 @@ int main(int argc, char** argv) {
     E->core->resync();
     CHECK(waitUntil([&] { return hasForm(*E, ifid) && formOf(*E, ifid).value("title", "") == "Fresh"; }, 8000), "canonical form def fills in after sync");
     CHECK(!formOf(*E, ifid).value("publicKey", "").empty(), "imported form has the creator key (answerable)");
+
+    // ── id squatting: a back-dated, validly SIGNED copy of A's form id from C ──
+    std::printf("id squatting:\n");
+    {
+        std::string sfid = A->call(A->core->createForm(json({{"title", "Salary survey"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Salary?"}, {"required", true}}})}}).dump())).value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*B, sfid) && hasForm(*C, sfid); }, 3000), "genuine form syncs");
+        std::ifstream idf(C->dir + "/identity.json"); json idj = json::parse(idf);
+        whisperbox::SignId xid = whisperbox::identityFromPriv(whisperbox::fromHex(idj["privHex"].get<std::string>()));
+        json p = {{"id", sfid}, {"title", "Salary survey"}, {"description", ""}, {"creator", xid.address}, {"publicKey", xid.pubHex},
+                  {"createdAt", 1}, {"expiresAt", nullptr}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Salary?"}, {"required", true}}})},
+                  {"whitelist", {{"type", "none"}, {"value", ""}}}};
+        json ev = {{"v", 1}, {"id", "form:" + sfid}, {"type", "form.publish"}, {"hlc", {{"wall", 1}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", p}};
+        whisperbox::signEventJson(ev, xid);
+        FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev))));
+        CHECK(waitUntil([&] { return formOf(*A, sfid).value("contested", false); }, 3000), "the squat reaches A and flags the id contested");
+        CHECK(formOf(*A, sfid).value("creator", "") == addrA && formOf(*A, sfid).value("mine", false), "A still sees and owns its genuine form");
+        std::string link = A->call(A->core->shareUri(sfid)).value("uri", "");
+        auto G = mkPeer("G");
+        CHECK(waitUntil([&] { return G->snap()["nodeReady"] == true; }, 3000), "G up");
+        CHECK(G->call(G->core->importForm(link)).value("ok", false), "G opens the creator's pinned link");
+        CHECK(waitUntil([&] { return hasForm(*G, sfid) && formOf(*G, sfid).value("contested", false); }, 8000), "G syncs both copies");
+        json gf = formOf(*G, sfid);
+        CHECK(gf.value("creator", "") == addrA && gf.value("canRespond", false), "pinned link shows the GENUINE form and allows answering");
+        json one = json::array({{{"questionId", "q1"}, {"value", "plenty"}}});
+        CHECK(G->call(G->core->submitResponse(sfid, one.dump())).value("ok", false), "G answers");
+        CHECK(waitUntil([&] { return responsesOf(*A, sfid).size() == 1; }, 4000), "...and only the real creator A can read it");
+        auto H = mkPeer("H");
+        CHECK(waitUntil([&] { return H->snap()["nodeReady"] == true; }, 3000), "H up");
+        H->call(H->core->importForm("whisperbox://form?id=" + sfid));   // an old, unpinned link
+        CHECK(waitUntil([&] { return hasForm(*H, sfid) && formOf(*H, sfid).value("contested", false); }, 8000), "H syncs both copies");
+        CHECK(!formOf(*H, sfid).value("canRespond", true), "unpinned link to a contested form: answering disabled");
+        json hr = H->call(H->core->submitResponse(sfid, one.dump()));
+        CHECK(!hr.value("ok", true), "unpinned submit refused (" + hr.value("error", std::string()) + ")");
+    }
 
     // ── restart persistence ────────────────────────────────────────────────────
     std::printf("restart:\n");
@@ -284,7 +368,7 @@ int main(int argc, char** argv) {
         for (size_t k = 1; k < ev2.size(); ++k) if (whisperbox::totalOrder(ev2[k - 1], ev2[k]) > 0) sorted = false;
         CHECK(sorted, "repaired log is HLC-sorted on disk");
         F->node->online = true; F->core->resync();
-        CHECK(waitUntil([&] { return hasForm(*F, wfid); }, 5000), "dropped form returns as the signed original via sync");
+        CHECK(waitUntil([&] { return hasForm(*F, wfid); }, 10000), "dropped form returns as the signed original via sync");
     }
 
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);

@@ -67,6 +67,16 @@ inline int totalOrder(const json& a, const json& b) {
     return 0;
 }
 
+// Dedup key (mirror merge.mjs eventKey): signed events by (id, signer) so a forged copy
+// can't shadow the genuine event under a deterministic id; unsigned (sealed responses,
+// content-addressed) by id.
+inline std::string eventKey(const json& e) {
+    std::string id = e.value("id", "");
+    if (e.contains("pub") && e["pub"].is_string() && !e["pub"].get<std::string>().empty())
+        return id + "#" + e["pub"].get<std::string>();
+    return id;
+}
+
 // ── Merge: union by id with MIN-HLC conflict rule (documented deviation from
 // loam-sync's concat-order win — natural ids can legitimately carry different
 // payloads, e.g. a resubmission; min-HLC is replica-deterministic). Pure. ────────
@@ -75,7 +85,7 @@ inline std::vector<json> mergeWhisperbox(std::vector<std::vector<json>> logs) {
     for (const auto& log : logs) {
         for (const auto& e : log) {
             if (!e.contains("id") || !e["id"].is_string() || e["id"].get<std::string>().empty()) continue;
-            const std::string id = e["id"].get<std::string>();
+            const std::string id = eventKey(e);
             auto it = byId.find(id);
             if (it == byId.end()) {
                 byId.emplace(id, e);
@@ -96,8 +106,15 @@ inline std::vector<json> mergeWhisperbox(std::vector<std::vector<json>> logs) {
 // Merge one event into an already-merged log in place. Returns true if NEW.
 inline bool mergeOne(std::vector<json>& log, const json& e) {
     if (!e.contains("id") || !e["id"].is_string()) return false;
-    const std::string id = e["id"].get<std::string>();
-    for (const auto& x : log) if (x.value("id", "") == id) return false; // dedup by id
+    const std::string key = eventKey(e);
+    for (auto x = log.begin(); x != log.end(); ++x) {
+        if (eventKey(*x) != key) continue;
+        // Same key: an EARLIER-HLC copy replaces the held one (min-HLC rule, arrival-order
+        // independent - same as mergeWhisperbox); otherwise it's a duplicate.
+        if (compareHlc(e.value("hlc", json::object()), x->value("hlc", json::object())) >= 0) return false;
+        log.erase(x);
+        break;
+    }
     // Walk back from the end past every event ordered AFTER e, then insert —
     // keeps the log HLC-sorted (the fold's single-pass invariant).
     auto it = log.end();
@@ -151,8 +168,14 @@ struct Clock {
 //                 copies of your own submissions).
 inline OrderedJson computeState(const std::vector<json>& mergedLog,
                                 const std::string& identity = "",
-                                std::function<bool(const json&)> verify = nullptr) {
+                                std::function<bool(const json&)> verify = nullptr,
+                                const std::map<std::string, std::string>& prefer = {}) {
     const std::string ident = lc(identity);
+    // Contested form ids (published by >1 creator): every contender folds on its own;
+    // the device then shows its own copy, else the link-pinned (prefer) creator's, else
+    // the first (mirror engine.mjs).
+    std::map<std::string, std::map<std::string, OrderedJson>> alts;   // formId -> creator -> view
+    std::map<std::string, json> closeHlcBy;                            // "formId|creator" -> hlc
 
     OrderedJson forms = OrderedJson::object();   // insertion order = HLC publish order
     std::vector<std::pair<std::string, json>> formHlc;  // (formId, publish hlc) — feed ordering
@@ -166,7 +189,6 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
         const json p = e.value("payload", json::object());
         if (type == FORM_PUBLISH) {
             std::string formId = lc(p.value("id", ""));
-            if (forms.contains(formId)) return;   // same id ⇒ already folded (defensive)
             OrderedJson f = OrderedJson::object();
             f["id"] = formId;
             f["title"] = p.value("title", "");
@@ -179,6 +201,14 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             f["whitelist"] = p.value("whitelist", json({{"type", "none"}, {"value", ""}}));
             f["status"] = "open";
             f["confirmations"] = json::array();
+            if (forms.contains(formId)) {
+                const std::string c = f["creator"].get<std::string>();
+                if (c != forms[formId]["creator"].get<std::string>()) {
+                    if (!alts[formId].count(c)) alts[formId][c] = f;
+                    forms[formId]["contested"] = true;
+                }
+                return;
+            }
             forms[formId] = f;
             formHlc.push_back({formId, e.value("hlc", json::object())});
             // Lenient ordering: replay deferred gated events for this form in HLC order.
@@ -207,17 +237,25 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
                 && !verify(e)) { drop(dropped, "sig-invalid"); return; }
             std::string formId = lc(p.value("formId", ""));
             if (!forms.contains(formId)) { deferred.push_back(e); return; } // lenient: may lead publish
-            const OrderedJson& f = forms[formId];
-            if (lc(p.value("author", "")) != f["creator"].get<std::string>()) { drop(dropped, "not-creator"); return; }
+            const std::string author = lc(p.value("author", ""));
+            OrderedJson* tf = &forms[formId];
+            bool isFirst = true;
+            if (author != (*tf)["creator"].get<std::string>()) {
+                auto ai = alts.find(formId);
+                if (ai == alts.end() || !ai->second.count(author)) { drop(dropped, "not-creator"); return; }
+                tf = &ai->second[author]; isFirst = false;   // a contender's own close/confirm
+            }
+            OrderedJson& f = *tf;
             if (type == RESPONSE_CONFIRM) {
                 std::string cid = p.value("confirmationId", "");
                 const json confs = f["confirmations"];
                 bool has = false; for (const auto& c : confs) if (c.get<std::string>() == cid) { has = true; break; }
-                if (!has) { json nc = confs; nc.push_back(cid); forms[formId]["confirmations"] = nc; }
+                if (!has) { json nc = confs; nc.push_back(cid); f["confirmations"] = nc; }
             } else { // FORM_CLOSE — sticky, idempotent
-                forms[formId]["status"] = "closed";
-                closeHlc[formId] = e.value("hlc", json::object());
-                if (p.contains("expiresAt") && !p["expiresAt"].is_null()) forms[formId]["expiresAt"] = p["expiresAt"];
+                f["status"] = "closed";
+                if (isFirst) closeHlc[formId] = e.value("hlc", json::object());
+                closeHlcBy[formId + "|" + f["creator"].get<std::string>()] = e.value("hlc", json::object());
+                if (p.contains("expiresAt") && !p["expiresAt"].is_null()) f["expiresAt"] = p["expiresAt"];
             }
             return;
         }
@@ -225,6 +263,25 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     };
 
     for (const auto& e : mergedLog) applyEvent(e);
+
+    // Per-device choice for contested ids (mirror engine.mjs): own > link-pinned > first.
+    for (auto& kv : alts) {
+        const std::string& formId = kv.first;
+        forms[formId]["contested"] = true;
+        for (auto& a : kv.second) a.second["contested"] = true;
+        const std::string first = forms[formId]["creator"].get<std::string>();
+        std::string want;
+        if (!ident.empty() && (first == ident || kv.second.count(ident))) want = ident;
+        else {
+            auto pi = prefer.find(formId);
+            if (pi != prefer.end() && (first == lc(pi->second) || kv.second.count(lc(pi->second)))) want = lc(pi->second);
+        }
+        if (!want.empty() && want != first) {
+            forms[formId] = kv.second[want];
+            auto ch = closeHlcBy.find(formId + "|" + want);
+            if (ch != closeHlcBy.end()) closeHlc[formId] = ch->second; else closeHlc.erase(formId);
+        }
+    }
 
     // ── Assemble state (ordered JSON — byte-parity with the TS reference) ──────
     std::vector<std::pair<std::string, json>> feedSrc = formHlc;

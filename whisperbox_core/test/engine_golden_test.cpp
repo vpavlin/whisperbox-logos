@@ -57,6 +57,24 @@ int main(int argc, char** argv) {
     int n = 0; for (auto it = view["responses"].begin(); it != view["responses"].end(); ++it) n += (int)it.value().size();
     CHECK(n > 0, "golden creator view is non-trivial");
 
+    // Contested form id (id squatting): same projections as the TS reference, for any
+    // arrival order of the five signed events.
+    {
+        OrderedJson sq = load(fx + "golden-squat.json");
+        std::vector<json> evs; for (auto& e : sq["log"]) evs.push_back(json::parse(e.dump()));
+        const std::string creator = sq["creator"];
+        bool ok = true;
+        for (int t = 0; t < 30 && ok; t++) {
+            std::vector<json> order = evs; std::shuffle(order.begin(), order.end(), rng);
+            std::vector<json> log; for (auto& e : order) mergeOne(log, e);
+            ok = log.size() == evs.size()
+              && json::parse(computeState(log, creator).dump()) == json::parse(sq["asCreator"].dump())
+              && json::parse(computeState(log, "", nullptr, {{"fs", creator}}).dump()) == json::parse(sq["pinned"].dump())
+              && json::parse(computeState(log).dump()) == json::parse(sq["browsing"].dump());
+        }
+        CHECK(ok, "contested id: creator / link-pinned / browsing projections == TS (30 arrival orders)");
+    }
+
     std::printf(failures ? "ENGINE GOLDEN FAILED\n" : "ENGINE GOLDEN GREEN\n");
     return failures ? 1 : 0;
 }

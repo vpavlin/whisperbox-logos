@@ -22,6 +22,9 @@ logos_module(
         src/whisperbox_wire.hpp
         src/qrcodegen.hpp
         src/qrcodegen.cpp
+        src/logos_sync/catchup.hpp
+        src/logos_sync/event.hpp
+        src/logos_sync/reconcile.hpp
     INCLUDE_DIRS src
     FIND_PACKAGES OpenSSL
     LINK_LIBRARIES OpenSSL::Crypto

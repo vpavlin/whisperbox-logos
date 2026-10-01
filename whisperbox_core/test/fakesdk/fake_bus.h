@@ -8,6 +8,10 @@
 #include <openssl/evp.h>
 
 struct FakeNode {
+    // Monotonic serial: queued deliveries carry it and re-check that the node is still on
+    // the bus, so a peer stopped mid-flight (restart tests) never gets a dangling call.
+    long serial = nextSerial();
+    static long nextSerial() { static long n = 0; return ++n; }
     std::string name;
     bool created = false, up = false, online = true, subscribed = false, channel = false;
     std::string senderId;
@@ -25,14 +29,21 @@ struct FakeBus {
         out.resize(n); return out;
     }
     static void later(std::function<void()> fn) { QTimer::singleShot(0, QCoreApplication::instance(), fn); }
+    FakeNode* alive(long serial) {
+        for (FakeNode* n : nodes) if (n->serial == serial) return n;
+        return nullptr;
+    }
     // Receive wrapping like delivery 0.1.3+: {"_bytes": base64(raw)}.
     static LogosMap wrap(const std::string& raw) { return LogosMap{{"_bytes", b64(raw)}}; }
     void relay(FakeNode* from, const std::string& topic, const std::string& raw) {
         if (!from->online) { dropped++; return; }
         for (FakeNode* n : nodes) {
             if (!n->up || !n->online || !n->subscribed || !n->onMsg) continue;
-            auto fn = n->onMsg; FakeNode* nn = n;
-            later([fn, nn, topic, raw] { if (nn->online) { nn->rx++; fn("hash", topic, wrap(raw), 0); } });
+            long sid = n->serial;
+            later([sid, topic, raw] {
+                FakeNode* nn = FakeBus::get().alive(sid);
+                if (nn && nn->online && nn->onMsg) { nn->rx++; auto fn = nn->onMsg; fn("hash", topic, wrap(raw), 0); }
+            });
         }
     }
     void channel(FakeNode* from, const std::string& chId, const std::string& raw) {
@@ -41,8 +52,11 @@ struct FakeBus {
             // SDS: a node never delivers frames carrying its OWN senderId.
             if (n == from || !n->up || !n->online || !n->channel || !n->onCh) continue;
             if (n->senderId == from->senderId) { dropped++; continue; }
-            auto fn = n->onCh; FakeNode* nn = n; std::string sid = from->senderId;
-            later([fn, nn, chId, sid, raw] { if (nn->online) { nn->rx++; fn(chId, sid, wrap(raw), 0); } });
+            long serial = n->serial; std::string sid = from->senderId;
+            later([serial, chId, sid, raw] {
+                FakeNode* nn = FakeBus::get().alive(serial);
+                if (nn && nn->online && nn->onCh) { nn->rx++; auto fn = nn->onCh; fn(chId, sid, wrap(raw), 0); }
+            });
         }
     }
 };
@@ -50,10 +64,10 @@ struct FakeBus {
 inline bool FakeDeliveryModule::onMessageReceived(MsgFn fn) { node->onMsg = fn; return true; }
 inline bool FakeDeliveryModule::onChannelMessageReceived(MsgFn fn) { node->onCh = fn; return true; }
 inline void FakeDeliveryModule::createNodeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
-    FakeNode* n = node; FakeBus::later([n, cb] { n->created = true; cb(StdLogosResult{}); });
+    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->created = true; cb(StdLogosResult{}); } });
 }
 inline void FakeDeliveryModule::startAsync(std::function<void(StdLogosResult)> cb) {
-    FakeNode* n = node; FakeBus::later([n, cb] { n->up = true; cb(StdLogosResult{}); });
+    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->up = true; cb(StdLogosResult{}); } });
 }
 inline void FakeDeliveryModule::subscribeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
     if (!node->up) throw std::runtime_error("no provider registered");

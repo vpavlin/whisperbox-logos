@@ -92,6 +92,8 @@ private:
     void saveWatched();
     void loadMySubmissions();
     void saveMySubmissions();
+    void loadPins();
+    void savePins();
     std::string randomHex(int bytes);
 
     // --- delivery (all calls async / fire-and-forget) ---
@@ -99,6 +101,8 @@ private:
     void joinTransport();
     void seedBroadcast();
     void requestSync();
+    void catchupRound();
+    void sendControl(const whisperbox::json& msg);
 
     // --- state ---
     std::vector<whisperbox::json> m_log;              // merged, HLC-ordered (single shared log)
@@ -131,4 +135,8 @@ private:
     // creator's public receipt without the receipt being linkable to my address).
     // Appended LAST for the same layout reason as m_mySubmissions.
     std::map<std::string, std::string> m_myConfirmIds;
+    long m_rbsrRx = 0;   // RBSR control frames handled (appended last: layout rule above)
+    long m_legacyReseeds = 0;   // whole-log answers to unflagged (0.1.x) SYNC_REQs
+    // formId -> creator address pinned by the share link it was opened from (by=...).
+    std::map<std::string, std::string> m_pinned;
 };

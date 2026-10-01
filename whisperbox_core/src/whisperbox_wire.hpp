@@ -7,7 +7,11 @@
 // sealed response payloads inside response.submit events; form events are public
 // by design (public feed). Envelopes:
 //   {v:1, type:"EVENT",     event:{...full event envelope...}}
-//   {v:1, type:"SYNC_REQ",  from:<deviceId>}      // joiner asks for full log
+//   {v:1, type:"SYNC_REQ",  from:<deviceId>[, rbsr:true]}  // joiner asks for state
+//   {v:2, t:"fp"|"ids"|"need", from, ...}         // loam-sync RBSR catch-up (ids only)
+// A SYNC_REQ flagged rbsr comes from a peer that also runs RBSR; RBSR peers ignore it (the
+// fp/ids/need exchange already serves the exact delta) while 0.1.x peers, which only know
+// SYNC_REQ, answer it with their whole log - so mixed-version topics still converge.
 // The channel payload is the base64 TEXT of the envelope (delivery_module
 // base64-encodes once more on the wire — peers may need one or two peels; the
 // ingest path tries both, same as qaku).
@@ -49,9 +53,10 @@ inline json envEvent(const json& event) {
     o["v"] = 1; o["type"] = "EVENT"; o["event"] = event;
     return o;
 }
-inline json envSyncReq(const std::string& from) {
+inline json envSyncReq(const std::string& from, bool rbsr = true) {
     OrderedJson o = OrderedJson::object();
     o["v"] = 1; o["type"] = "SYNC_REQ"; o["from"] = from;
+    if (rbsr) o["rbsr"] = true;
     return o;
 }
 
@@ -60,7 +65,14 @@ inline json envSyncReq(const std::string& from) {
 inline json parseEnvelope(const std::string& text) {
     try {
         json o = json::parse(text);
-        if (!o.is_object() || !o.contains("type") || !o["type"].is_string()) return json();
+        if (!o.is_object()) return json();
+        // loam-sync RBSR control frame: no "type", {v:2, t:fp|ids|need}.
+        if (o.value("v", 0) == 2 && o.contains("t") && o["t"].is_string()) {
+            const std::string t = o["t"].get<std::string>();
+            if (t == "fp" || t == "ids" || t == "need") { o["type"] = "RBSR"; return o; }
+            return json();
+        }
+        if (!o.contains("type") || !o["type"].is_string()) return json();
         const std::string t = o["type"].get<std::string>();
         if (t == "EVENT" && o.contains("event") && o["event"].is_object()) return o;
         if (t == "SYNC_REQ") return o;
