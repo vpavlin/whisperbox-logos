@@ -22,6 +22,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include "logos_module_context.h"
 #include "whisperbox_engine.hpp"
@@ -139,4 +140,10 @@ private:
     long m_legacyReseeds = 0;   // whole-log answers to unflagged (0.1.x) SYNC_REQs
     // formId -> creator address pinned by the share link it was opened from (by=...).
     std::map<std::string, std::string> m_pinned;
+    // Per-form keys: formId -> derived key (cache), and sealed-blob hex -> open result
+    // (decrypted json or null + key count tried). Appended last: layout rule above.
+    std::map<std::string, whisperbox::SignId> m_formKeyCache;
+    struct Opened { whisperbox::json dec; size_t nKeys = 0; };
+    std::unordered_map<std::string, Opened> m_openCache;
+    whisperbox::OrderedJson decryptView(const whisperbox::OrderedJson& state);
 };

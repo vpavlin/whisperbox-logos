@@ -45,6 +45,26 @@ int main(int argc, char** argv) {
         else if (name == "carol") byName[2] = id;
     }
 
+    // ── 1b. Per-form keys ────────────────────────────────────────────────────
+    std::printf("per-form keys:\n");
+    {
+        json fkDoc = loadJson(fx + "crypto-formkeys.json");
+        int n = 0, ok = 0;
+        for (const auto& k : fkDoc["formKeys"]) {
+            const std::string owner = k["owner"];
+            const SignId& o = owner == "alice" ? byName[0] : owner == "bob" ? byName[1] : byName[2];
+            SignId d = deriveFormKey(o, k["formId"]);
+            n++; if (d.valid && d.pubHex == k["pubHex"] && toHex(d.priv) == k["privHex"]) ok++;
+        }
+        CHECK(n > 0 && ok == n, "every per-form key matches TS (incl. upper-case + non-ASCII ids)");
+        const json& fs = fkDoc["formSeal"];
+        SignId fk = deriveFormKey(byName[1], fs["formId"]);
+        Bytes pt = eciesOpen(fk.priv, fromHex(fs["sealedHex"]));
+        CHECK(std::string(pt.begin(), pt.end()) == fs["plaintext"], "C++ opens a TS seal to a form key");
+        bool idOpens = true; try { eciesOpen(byName[1].priv, fromHex(fs["sealedHex"])); } catch (...) { idOpens = false; }
+        CHECK(!idOpens, "identity key cannot open a form-key seal");
+    }
+
     // ── 2. Signed events ──────────────────────────────────────────────────────
     std::printf("signed events:\n");
     json evDoc = loadJson(fx + "crypto-signed-events.json");

@@ -96,34 +96,23 @@ static bool emptyAnswer(const json& v) {
     if (v.is_array()) return v.empty();
     return false;
 }
-// Decrypt + interpret the response pool for `id` (the creator). One place for the
-// open/verify hooks shared by snapshot, getDecryptedResponses, exportCsv, confirm.
-static OrderedJson decryptView(const OrderedJson& state, const whisperbox::SignId& id) {
-    auto open = [&id](const std::string& hexBlob) -> json {
-        try {
-            whisperbox::Bytes pt = whisperbox::eciesOpen(id.priv, whisperbox::fromHex(hexBlob));
-            return json::parse(std::string(pt.begin(), pt.end()));
-        } catch (...) { return json(); }
-    };
-    auto verifyResponse = [](const json& pseudo) -> bool {
-        // Inner signature over the DECRYPTED content (whitelist != none):
-        // canonical "whisperbox-inner-v1|{formId,respondent,submittedAt,answers}",
-        // ECDSA low-S, and address(pub) must equal respondent.
-        const json p = pseudo.value("payload", json::object());
-        std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
-        if (pubHex.empty() || sigHex.empty()) return false;
-        OrderedJson m = OrderedJson::object();
-        m["formId"] = lc(p.value("formId", ""));
-        m["respondent"] = lc(p.value("respondent", ""));
-        m["submittedAt"] = p.value("submittedAt", 0LL);
-        m["answers"] = p.value("answers", json::array());
-        std::string msg = "whisperbox-inner-v1|" + m.dump();
-        whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
-        if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
-        whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
-        return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
-    };
-    return whisperbox::creatorView(state, id.address, open, verifyResponse);
+// Inner signature over the DECRYPTED content (whitelist != none):
+// canonical "whisperbox-inner-v1|{formId,respondent,submittedAt,answers}",
+// ECDSA low-S, and address(pub) must equal respondent.
+static bool verifyInnerResponse(const json& pseudo) {
+    const json p = pseudo.value("payload", json::object());
+    std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
+    if (pubHex.empty() || sigHex.empty()) return false;
+    OrderedJson m = OrderedJson::object();
+    m["formId"] = lc(p.value("formId", ""));
+    m["respondent"] = lc(p.value("respondent", ""));
+    m["submittedAt"] = p.value("submittedAt", 0LL);
+    m["answers"] = p.value("answers", json::array());
+    std::string msg = "whisperbox-inner-v1|" + m.dump();
+    whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
+    if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
+    whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
+    return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
 }
 static std::string isoUtc(long long ms) {
     if (ms <= 0) return "";
@@ -594,7 +583,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     // (module layer, NOT the engine - keeps the TS/C++ engine parity intact).
     json creatorViewJson;
     if (state["creator"] != nullptr && m_signId.valid) {
-        OrderedJson cv = decryptView(state, m_signId);
+        OrderedJson cv = decryptView(state);
         for (auto it = cv["responses"].begin(); it != cv["responses"].end(); ++it) {
             const std::string fid = it.key();
             const json confs = cv["confirmations"].contains(fid) ? json(cv["confirmations"][fid]) : json::array();
@@ -678,6 +667,44 @@ std::string WhisperboxCoreImpl::status() {
     return m_status;
 }
 
+// ── decrypt (per-form keys) ──────────────────────────────────────────────────────
+// Decrypt + interpret the response pool for me as creator. One place for the open/verify
+// hooks shared by snapshot, getDecryptedResponses, exportCsv, confirm. Each of my forms is
+// sealed to its OWN key (derived from the identity; legacy forms: the identity key). A blob
+// doesn't say which form it answers (that would publish per-form answer counts), so it is
+// trial-opened against my keys; results are cached and a miss is retried only when the key
+// set grows. The key that opens a blob must be the sealing key of the form it claims.
+OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
+    std::map<std::string, const whisperbox::SignId*> keys; // sealing pubHex -> key
+    if (state.contains("forms")) for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) {
+        const auto& f = it.value();
+        if (f.value("creator", "") != m_signId.address) continue;
+        const std::string pub = f.value("publicKey", "");
+        if (pub.empty()) continue;
+        if (pub == m_signId.pubHex) { keys[pub] = &m_signId; continue; }
+        auto c = m_formKeyCache.find(it.key());
+        if (c == m_formKeyCache.end()) c = m_formKeyCache.emplace(it.key(), whisperbox::deriveFormKey(m_signId, it.key())).first;
+        if (c->second.valid && c->second.pubHex == pub) keys[pub] = &c->second;
+    }
+    auto open = [&](const std::string& hexBlob) -> json {
+        auto c = m_openCache.find(hexBlob);
+        if (c != m_openCache.end() && (!c->second.dec.is_null() || c->second.nKeys == keys.size())) return c->second.dec;
+        json dec;
+        const whisperbox::Bytes blob = whisperbox::fromHex(hexBlob);
+        for (const auto& kv : keys) {
+            whisperbox::Bytes pt;
+            try { pt = whisperbox::eciesOpen(kv.second->priv, blob); } catch (...) { continue; }
+            try { dec = json::parse(std::string(pt.begin(), pt.end())); } catch (...) { dec = json(); break; }
+            const std::string fid = dec.is_object() ? lc(dec.value("formId", "")) : "";
+            if (fid.empty() || !state["forms"].contains(fid) || state["forms"][fid].value("publicKey", "") != kv.first) dec = json();
+            break;
+        }
+        m_openCache[hexBlob] = Opened{dec, keys.size()};
+        return dec;
+    };
+    return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse);
+}
+
 // ── create ───────────────────────────────────────────────────────────────────────
 std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -695,7 +722,8 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     p["title"] = def.value("title", "");
     p["description"] = def.value("description", "");
     p["creator"] = m_signId.address;
-    p["publicKey"] = m_signId.pubHex;
+    // Sealing key = this form's OWN key, derived from the identity (whisperbox_identity.hpp).
+    p["publicKey"] = whisperbox::deriveFormKey(m_signId, formId).pubHex;
     p["createdAt"] = nowMs();
     p["expiresAt"] = def.contains("expiresAt") ? def["expiresAt"] : nullptr;
     p["questions"] = def.value("questions", json::array());
@@ -743,7 +771,7 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     // The receipt id is the one the respondent SEALED inside its response (random,
     // unlinkable); legacy responses fall back to the old (form, respondent) hash.
     // Same id every time -> re-confirmation is idempotent under union-by-id.
-    OrderedJson cv = decryptView(state, m_signId);
+    OrderedJson cv = decryptView(state);
     std::string confirmationId;
     if (cv["responses"].contains(formId))
         for (const auto& r : cv["responses"][formId])
@@ -862,7 +890,7 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
-    OrderedJson view = decryptView(state, m_signId);
+    OrderedJson view = decryptView(state);
     if (view["responses"].contains(formId))
         for (auto& r : view["responses"][formId]) r["confirmed"] = containsStr(state["forms"][formId]["confirmations"], confirmIdOf(json::parse(r.dump()), formId));
     out["ok"] = true;
@@ -899,6 +927,7 @@ std::string WhisperboxCoreImpl::importIdentity(std::string privHex) {
     if (!isHex(trim(privHex), 64)) { out["ok"] = false; out["error"] = "privHex must be 64 hex chars"; return out.dump(); }
     m_signId = whisperbox::identityFromPriv(whisperbox::fromHex(trim(privHex)));
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "invalid scalar (0, >= n, or bad point)"; return out.dump(); }
+    m_formKeyCache.clear(); m_openCache.clear(); // keys derive from the identity
     saveIdentity();
     publishState();
     out["ok"] = true; out["address"] = m_signId.address;
@@ -1031,7 +1060,7 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
-    OrderedJson view = decryptView(state, m_signId);
+    OrderedJson view = decryptView(state);
 
     auto csvCell = [](const std::string& v) {
         if (v.find_first_of(",\"\r\n") != std::string::npos) {

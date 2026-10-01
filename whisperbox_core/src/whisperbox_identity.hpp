@@ -112,6 +112,27 @@ inline SignId generateIdentity() {
     return SignId{};
 }
 
+// ── Per-form encryption keys ─────────────────────────────────────────────────────
+// Every form gets its OWN sealing key (form.publish payload.publicKey), never the creator's
+// identity key. A leaked form key opens one form's answers - not the identity (which signs)
+// and not any other form - so one form's key can be handed to a validator hub.
+//   soft (identity key on the device):
+//     formPriv = first valid scalar of HKDF-SHA256(ikm=identityPriv, salt="whisperbox-formkey-v1",
+//                info=utf8(formId) [|| "#" || i for retry i>=1], L=32)
+//   keycard: exported from the EIP-1581 subtree, m/43'/60'/1581'/22338'/formKeyIndex(formId)'
+//     formKeyIndex = u32be(sha256("whisperbox-formkey-v1|" || formId)[0..4]) & 0x7fffffff
+// Respondents are unaffected: they always sealed to the form's publicKey. Legacy forms
+// (publicKey == identity pub) keep opening with the identity key.
+inline SignId deriveFormKey(const SignId& identity, const std::string& formId) {
+    const std::string fid = toLower(formId);
+    for (int i = 0; i < 8; i++) {
+        std::string info = i ? fid + "#" + std::to_string(i) : fid;
+        SignId k = identityFromPriv(hkdfSha256(identity.priv, strBytes("whisperbox-formkey-v1"), strBytes(info), 32));
+        if (k.valid) return k;
+    }
+    return SignId{};
+}
+
 // ── ECDSA compact r||s (64B), low-S normalized ────────────────────────────────────
 inline Bytes ecdsaSignLowS(const Bytes& priv, const Bytes& digest32) {
     Bytes out;

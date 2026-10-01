@@ -373,6 +373,56 @@ int main(int argc, char** argv) {
         CHECK(waitUntil([&] { return hasForm(*F, wfid); }, 10000), "dropped form returns as the signed original via sync");
     }
 
+    // ── per-form keys ────────────────────────────────────────────────────────────
+    std::printf("per-form keys:\n");
+    {
+        auto relayEv = [&](const json& ev) { FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev)))); };
+        auto sealTo = [&](const std::string& pubHex, const whisperbox::OrderedJson& resp, int wall) {
+            std::string pt = resp.dump();
+            std::string sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pubHex), whisperbox::Bytes(pt.begin(), pt.end())));
+            return json{{"v", 1}, {"id", whisperbox::responseSubmitId(sealed)}, {"type", "response.submit"},
+                        {"hlc", {{"wall", wall}, {"ctr", 0}, {"dev", "k"}}}, {"dev", "k"}, {"payload", {{"encryptedPayload", sealed}}}};
+        };
+        const std::string pubA = A->snap()["identity"]["pubHex"];
+        const std::string pk1 = formOf(*A, fid).value("publicKey", "");
+        CHECK(!pk1.empty() && pk1 != pubA, "a new form seals to its OWN key, not the creator's identity key");
+        std::string f2 = A->call(A->core->createForm(json({{"title", "Second"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})}}).dump())).value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*C, f2); }, 3000), "second form syncs");
+        const std::string pk2 = formOf(*A, f2).value("publicKey", "");
+        CHECK(!pk2.empty() && pk2 != pk1 && pk2 != pubA, "each form has a different key");
+        std::ifstream idf(A->dir + "/identity.json"); json idj = json::parse(idf);
+        whisperbox::SignId aid = whisperbox::identityFromPriv(whisperbox::fromHex(idj["privHex"].get<std::string>()));
+        CHECK(whisperbox::deriveFormKey(aid, f2).pubHex == pk2, "the key is re-derivable from the identity (nothing extra to back up)");
+
+        // A form key opens only its own form's answers; a blob sealed to form 1's key that
+        // claims to answer form 2 is not accepted for either.
+        whisperbox::OrderedJson cross = whisperbox::OrderedJson::object();
+        cross["formId"] = f2; cross["respondent"] = addrC; cross["submittedAt"] = 7;
+        cross["answers"] = json::array({{{"questionId", "q1"}, {"value", "cross"}}}); cross["signature"] = nullptr; cross["pub"] = nullptr;
+        size_t n1 = responsesOf(*A, fid).size();
+        relayEv(sealTo(pk1, cross, 7));
+        pump(500);
+        CHECK(responsesOf(*A, f2).empty() && responsesOf(*A, fid).size() == n1, "a blob sealed to another form's key is rejected");
+
+        // Legacy form (0.2.0 and earlier): publicKey == the identity key - still opens.
+        std::string lg = "form-legacykey";
+        json p = {{"id", lg}, {"title", "Legacy key"}, {"description", ""}, {"creator", aid.address}, {"publicKey", aid.pubHex},
+                  {"createdAt", 1}, {"expiresAt", nullptr}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})},
+                  {"whitelist", {{"type", "none"}, {"value", ""}}}};
+        json fe = {{"v", 1}, {"id", "form:" + lg}, {"type", "form.publish"}, {"hlc", {{"wall", 8}, {"ctr", 0}, {"dev", "old"}}}, {"dev", "old"}, {"payload", p}};
+        whisperbox::signEventJson(fe, aid);
+        relayEv(fe);
+        CHECK(waitUntil([&] { return hasForm(*A, lg); }, 3000), "legacy-key form arrives");
+        whisperbox::OrderedJson lr = whisperbox::OrderedJson::object();
+        lr["formId"] = lg; lr["respondent"] = addrC; lr["submittedAt"] = 9;
+        lr["answers"] = json::array({{{"questionId", "q1"}, {"value", "old key"}}}); lr["signature"] = nullptr; lr["pub"] = nullptr;
+        relayEv(sealTo(aid.pubHex, lr, 9));
+        CHECK(waitUntil([&] { return responsesOf(*A, lg).size() == 1; }, 3000), "answers to a legacy identity-key form still decrypt");
+        A->stop(); A->start();
+        CHECK(waitUntil([&] { return responsesOf(*A, f2).empty() && responsesOf(*A, lg).size() == 1 && responsesOf(*A, fid).size() == n1; }, 3000),
+              "after a restart every form's answers still open (keys re-derived)");
+    }
+
     // Truncated files (module killed mid-write by an old version): never overwritten.
     std::printf("corrupt files:\n");
     {

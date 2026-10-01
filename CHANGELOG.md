@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - per-form keys
+
+- **Each form is sealed to its own key** (`form.publicKey`), derived from the identity
+  with HKDF (`whisperbox-formkey-v1`), no longer the identity key itself. A leaked
+  form key opens one form only - the groundwork for Keycard-exported form keys and
+  validator hubs (docs/adr/0001-per-form-keys.md). Respondents are unchanged; forms
+  created before keep opening with the identity key. Creators trial-open blobs
+  against their form keys (cached); a key must match the form the answer claims.
+- Golden vectors shared by JS reference, portable JS and C++; E2E 88/88.
+
 ## 0.2.0 (2026-10-01) - core + view in lockstep
 
 Review of everything shipped so far found several bugs that hit every install;
