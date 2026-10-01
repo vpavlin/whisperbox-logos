@@ -573,6 +573,7 @@ Item {
                             visible: !!(root.sel && root.sel.whitelist && root.sel.whitelist.type === "addresses")
                             label: "Members only"; fg: root.wbAccent; bg: root.wbWarningSubtle
                         }
+                        Badge { visible: !!(root.sel && root.sel.contested); label: "Contested id"; fg: root.wbWarning; bg: root.wbWarningSubtle }
                         Text {
                             height: 20
                             verticalAlignment: Text.AlignVCenter
@@ -722,8 +723,9 @@ Item {
                             implicitHeight: bannerT.implicitHeight + 26
                             radius: 12
                             property bool good: !!(root.sel && root.sel.mySubmitted)
-                            color: good ? root.wbSuccessSubtle : root.wbSurfaceRaised
-                            border.color: good ? "#2a4d3a" : root.wbBorder
+                            property bool danger: !!(root.sel && (root.sel.linkMismatch || (root.sel.contested && root.sel.pinnedCreator !== root.sel.creator)))
+                            color: danger ? root.wbErrorSubtle : (good ? root.wbSuccessSubtle : root.wbSurfaceRaised)
+                            border.color: danger ? root.wbError : (good ? "#2a4d3a" : root.wbBorder)
                             border.width: 1
                             Text {
                                 id: bannerT
@@ -731,10 +733,12 @@ Item {
                                 anchors.margins: 13
                                 wrapMode: Text.WordWrap
                                 font.pixelSize: 13
-                                color: parent.good ? root.wbSuccess : root.wbTextSec
+                                color: parent.danger ? root.wbError : (parent.good ? root.wbSuccess : root.wbTextSec)
                                 text: {
                                     var f = root.sel;
                                     if (!f) return "";
+                                    if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it.";
+                                    if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
                                     if (f.mySubmitted && f.myConfirmed) return "Your answers were received - the creator sent you a receipt.";
                                     if (f.mySubmitted) return "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.";
                                     if (f.status === "closed") return "This form is closed and no longer accepts answers.";
@@ -949,7 +953,7 @@ Item {
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 color: root.wbTextTert
-                text: "Paste the link into WhisperBox's \"Open a shared form\" box, or scan the code. The form itself syncs from the network; answers are sealed to its creator."
+                text: "Paste the link into WhisperBox's \"Open a shared form\" box, or scan it with the phone app. The link names the form and its creator, so answers are sealed only to you even if someone copies the form id."
             }
             RowLayout {
                 Layout.fillWidth: true

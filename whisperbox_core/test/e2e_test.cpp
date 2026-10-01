@@ -332,6 +332,7 @@ int main(int argc, char** argv) {
         H->call(H->core->importForm("whisperbox://form?id=" + sfid));   // an old, unpinned link
         CHECK(waitUntil([&] { return hasForm(*H, sfid) && formOf(*H, sfid).value("contested", false); }, 8000), "H syncs both copies");
         CHECK(!formOf(*H, sfid).value("canRespond", true), "unpinned link to a contested form: answering disabled");
+        dumpFixture(*H, "contested");   // unpinned peer looking at a squatted form id
         json hr = H->call(H->core->submitResponse(sfid, one.dump()));
         CHECK(!hr.value("ok", true), "unpinned submit refused (" + hr.value("error", std::string()) + ")");
     }

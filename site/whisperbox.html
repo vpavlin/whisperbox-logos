@@ -159,7 +159,8 @@ td:first-child { font-weight: 700; }
 .pill.pub { color: var(--ink-2); border: 1px solid var(--line); }
 .pill.sealed { color: var(--paper); background: var(--seal); }
 
-.get { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.get { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 980px) { .get { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .get { grid-template-columns: minmax(0, 1fr); } }
 .get > div { min-width: 0; }
 .get h3 { font: 700 1.05rem/1.3 var(--body); margin-bottom: 8px; }
@@ -335,7 +336,7 @@ footer p { margin: 0; max-width: 70ch; }
 
   <section id="get">
     <h2>Get it</h2>
-    <p class="sub">WhisperBox runs inside Logos Basecamp 0.2, or headless on any Linux box as an always-on hub.</p>
+    <p class="sub">WhisperBox runs inside Logos Basecamp 0.2, on Android phones, or headless on any Linux box as an always-on hub. They all speak the same protocol, so a form made on one is answered on the others.</p>
     <div class="get">
       <div>
         <h3>In Basecamp</h3>
@@ -344,6 +345,10 @@ footer p { margin: 0; max-width: 70ch; }
           <code id="repo">https://raw.githubusercontent.com/jimmy-claw/whisperbox-basecamp/main/logos-repo.json</code>
           <button type="button" id="copy-repo">Copy</button>
         </div>
+      </div>
+      <div>
+        <h3>On Android</h3>
+        <p>Install <strong>Loam</strong> (the one network node your Logos apps share) and <strong>WhisperBox</strong> from the Loam F-Droid repository, open Loam once and approve WhisperBox. Scan a form's QR code or tap its link to answer; your key never leaves the phone.</p>
       </div>
       <div>
         <h3>As a headless hub</h3>

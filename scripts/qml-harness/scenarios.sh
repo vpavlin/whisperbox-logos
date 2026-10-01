@@ -65,6 +65,8 @@ run outsider-members outsider  "{\"selectedId\":\"$MEMBERS_C\"}"
 deny "CALL whisperbox_core submitResponse" "no submit offered when not on the list"
 run pending          pending   "{\"selectedId\":\"$(pend)\"}" "resync"
 expect "CALL whisperbox_core resync argc=0" "pending -> resync()"
+run contested        contested "{\"selectedId\":\"$(fid contested "Salary survey")\"}"
+deny "CALL whisperbox_core submitResponse" "contested form offers no submit"
 run identity         creator   '{"showIdentity":true}'
 run join-id          empty     "{}" ""
 echo

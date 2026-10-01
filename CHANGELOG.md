@@ -41,6 +41,20 @@ this release fixes them and finishes the Phase 6 feature set. Both packages
 - `exportCsv`: proper columns (no trailing empty column), ISO timestamps, a
   `confirmed` column, choice answers rendered as option text.
 
+- **Catch-up via loam-sync RBSR.** The 60 s whole-log re-broadcast is gone:
+  peers exchange one bounded fingerprint message per round (at 3 s, 10 s,
+  25 s after connect, then every 60 s) and serve only the exact delta.
+  0.1.x peers still get the full log when they ask (unflagged SYNC_REQ).
+- **Security: event-id squatting.** Ids are deterministic and not tied to the
+  author, so a forged `close:<form>` (or a back-dated, validly signed
+  `form:<id>` from someone else) could shadow the genuine event - in the
+  squatting case respondents would seal answers to the attacker. Signed
+  events now dedup by (id, signer); a form id published by two creators is
+  marked `contested`; each device shows its own copy, else the creator pinned
+  by the share link, else the first, and refuses to send answers to a
+  contested or link-mismatched form. Share links now carry the creator
+  (`whisperbox://form?id=…&by=0x…`); old id-only links still open.
+
 ### View (`whisperbox`)
 - Rewired to the real core API (0.1.3 called `submitResponse` with one
   argument and read non-existent fields, so submitting and the creator's
@@ -62,6 +76,18 @@ this release fixes them and finishes the Phase 6 feature set. Both packages
   "Single choice" on Q2 appended a phantom question instead. Handlers now use
   the question's captured index.
 
+- Contested-id and link-mismatch warnings (answering disabled).
+
+### Android app (new, `mobile/`)
+- WhisperBox for Android with the same flows and look as the desktop view:
+  forms list, builder (4 question types, required, options, allow-list),
+  answering with validation, receipts, close, CSV via the share sheet, QR
+  share + QR scan, `whisperbox://` deep links, identity & network screen.
+- Network via the Loam shared node (loam-transport, opt-out → own node).
+- Protocol = `packages/client` - a JS mirror of the C++ core built only from
+  the shared reference packages (engine, merge, portable crypto, loam-sync
+  catch-up). Interop-tested against the real C++ core in both directions.
+
 ### Hub
 - `whisperbox join` uses `importForm` (pulls immediately); new
   `whisperbox confirm <form> <respondent>`; `list` shows receipts.
@@ -82,6 +108,14 @@ this release fixes them and finishes the Phase 6 feature set. Both packages
   all question types, sees the receipt.
 
 ### Tests (all runnable without nix: `scripts/test.sh`)
+- The JS reference `mergeOne` had the same reversed insert as the C++ port;
+  fixed, with an incremental-vs-batch merge test (50 worlds).
+- Squatting: TS unit tests, a squat golden reproduced by C++ for 30 arrival
+  orders, and an end-to-end scenario (creator unaffected, pinned respondent
+  answers the real creator, unpinned respondent refused).
+- Portable crypto (`crypto-portable.mjs`, used by the phone) byte-identical to
+  the Node reference and the fixtures; JS client <-> C++ core interop test
+  over a stdin/stdout bridge.
 - C++ engine parity against the TS golden vectors (merge/fold/creator view);
   the golden creator view is now non-empty (it was `{}`, so the projection was
   never pinned).

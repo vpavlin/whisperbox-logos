@@ -1,18 +1,20 @@
 {
   "creatorView": null,
-  "deviceId": "wb-8a559e33b8c5",
+  "deviceId": "wb-6d1f6bee46d8",
   "diagnostics": {
     "admDropSig": 0,
     "admDropType": 0,
+    "legacyReseeds": 0,
+    "rbsrRx": 5,
     "rxDup": 0,
     "rxNew": 0,
-    "rxRaw": 2,
-    "rxSeen": 2,
-    "txTotal": 0
+    "rxRaw": 7,
+    "rxSeen": 4,
+    "txTotal": 1
   },
   "identity": {
-    "address": "0x070423641718a6a4fe776d97633c7e1f91960288",
-    "pubHex": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900"
+    "address": "0x779c8fe7fb869584a4e5e80a3ef437a78cdb5f26",
+    "pubHex": "02b322227744bc178c3bc823dcb0a42b5297a11b640fec0b12c164aa6100695065"
   },
   "mySubmissions": [],
   "nodeReady": true,

@@ -1,0 +1,645 @@
+// WhisperBox for Android — same flows and look as the Basecamp view (module/Main.qml),
+// over the same protocol client the desktop is interop-tested against.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  View, Text, TextInput, Pressable, ScrollView, StyleSheet, BackHandler, Linking, Share,
+  ActivityIndicator, Animated, RefreshControl, Switch, KeyboardAvoidingView, Platform,
+} from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { StatusBar } from "expo-status-bar";
+import * as Clipboard from "expo-clipboard";
+import QRCode from "react-native-qrcode-svg";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import { SharedNodeStatus } from "./src/lib/loam-transport-pkg/src/SharedNodeStatus";
+import { boot, client, net, pullHistory, setSharedNode, parseLink } from "./src/lib/whisperbox";
+
+// ── palette: the desktop view's indigo/charcoal ──
+const C = {
+  primary: "#7c6ff7", primaryHover: "#9187f9", primarySubtle: "#1e1b3a", accent: "#f7a44c",
+  bg: "#0b0b10", surface: "#14141e", raised: "#1c1c2a", border: "#2a2a3e", borderSubtle: "#1e1e30",
+  text: "#f0f0f8", text2: "#a0a0b8", text3: "#6b6b82",
+  ok: "#4ade80", okSubtle: "#16301f", warn: "#fbbf24", warnSubtle: "#2e2714", err: "#f87171", errSubtle: "#341a1d",
+};
+const MONO: string = Platform.OS === "android" ? "monospace" : "Courier";
+
+type Screen =
+  | { k: "home" } | { k: "form"; id: string } | { k: "create" } | { k: "share"; id: string }
+  | { k: "scan" } | { k: "identity" } | { k: "csv"; id: string; csv: string };
+
+const QTYPES = [
+  { t: "text", label: "Short text" }, { t: "textarea", label: "Paragraph" },
+  { t: "radioButtons", label: "Single choice" }, { t: "checkbox", label: "Multiple choice" },
+];
+const normType = (t: any) => (["text", "textarea", "radioButtons", "checkbox"].includes(String(t)) ? String(t) : "text");
+const shortAddr = (a?: string) => (!a ? "-" : a.length > 14 ? a.slice(0, 6) + "…" + a.slice(-4) : a);
+const fmtTime = (ms?: number) => {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) + ", " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+};
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+const answerText = (q: any, v: any): string => {
+  if (v === null || v === undefined || v === "") return "";
+  const opts: string[] = q?.options || [];
+  const one = (x: any) => (typeof x === "number" && opts[x] !== undefined ? String(opts[x]) : String(x));
+  return Array.isArray(v) ? v.map(one).join(", ") : one(v);
+};
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="light" />
+      <Root />
+    </SafeAreaProvider>
+  );
+}
+
+function useSnapshot() {
+  const [tick, setTick] = useState(0);
+  useEffect(() => { const off = client.subscribe(() => setTick((t: number) => t + 1)); return () => { off(); }; }, []);
+  return useMemo(() => (client.identity ? client.snapshot() : null), [tick]);
+}
+
+function Root() {
+  const [ready, setReady] = useState(false);
+  const [stack, setStack] = useState<Screen[]>([{ k: "home" }]);
+  const [toastMsg, setToastMsg] = useState("");
+  const toastTimer = useRef<any>(null);
+  const snap = useSnapshot();
+  const screen = stack[stack.length - 1];
+
+  const toast = useCallback((m: string) => {
+    setToastMsg(m);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastMsg(""), 3200);
+  }, []);
+  const push = useCallback((s: Screen) => setStack((st) => [...st, s]), []);
+  const pop = useCallback(() => setStack((st) => (st.length > 1 ? st.slice(0, -1) : st)), []);
+  const replace = useCallback((s: Screen) => setStack((st) => [...st.slice(0, -1), s]), []);
+
+  const openLink = useCallback((input: string) => {
+    const l = parseLink(input);
+    if (!l) { toast("That's not a WhisperBox link or form id"); return false; }
+    const r = client.importForm(input);
+    if (!r.ok) { toast(r.error); return false; }
+    setStack([{ k: "home" }, { k: "form", id: r.formId }]);
+    if (r.pending) toast("Form added - waiting for it to sync");
+    return true;
+  }, [toast]);
+
+  useEffect(() => {
+    boot().then(() => setReady(true));
+    Linking.getInitialURL().then((u) => { if (u && u.startsWith("whisperbox://")) boot().then(() => openLink(u)); });
+    const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("whisperbox://")) boot().then(() => openLink(url)); });
+    return () => sub.remove();
+  }, [openLink]);
+
+  useEffect(() => {
+    const h = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (stack.length > 1) { pop(); return true; }
+      return false;
+    });
+    return () => h.remove();
+  }, [stack, pop]);
+
+  if (!ready || !snap) {
+    return (
+      <SafeAreaView style={[st.fill, st.center]}>
+        <LockMark size={40} />
+        <Text style={[st.h2, { marginTop: 16 }]}>WhisperBox</Text>
+        <ActivityIndicator color={C.primary} style={{ marginTop: 18 }} />
+      </SafeAreaView>
+    );
+  }
+
+  const ctx = { snap, push, pop, replace, toast, openLink };
+  return (
+    <SafeAreaView style={st.fill} edges={["top", "bottom"]}>
+      {screen.k === "home" && <Home {...ctx} />}
+      {screen.k === "form" && <FormScreen {...ctx} id={screen.id} />}
+      {screen.k === "create" && <CreateScreen {...ctx} />}
+      {screen.k === "share" && <ShareScreen {...ctx} id={screen.id} />}
+      {screen.k === "scan" && <ScanScreen {...ctx} />}
+      {screen.k === "identity" && <IdentityScreen {...ctx} />}
+      {screen.k === "csv" && <CsvScreen {...ctx} csv={screen.csv} />}
+      {!!toastMsg && <Toast msg={toastMsg} />}
+    </SafeAreaView>
+  );
+}
+type Ctx = { snap: any; push: (s: Screen) => void; pop: () => void; replace: (s: Screen) => void; toast: (m: string) => void; openLink: (s: string) => boolean };
+
+// ── shared bits ──────────────────────────────────────────────────────────────────
+function LockMark({ size = 22, tint = C.primary }: { size?: number; tint?: string }) {
+  const w = size, h = size * 1.18;
+  return (
+    <View style={{ width: w, height: h }}>
+      <View style={{ position: "absolute", left: w * 0.18, top: 0, width: w * 0.64, height: h * 0.62, borderRadius: w, borderWidth: Math.max(2, w * 0.13), borderColor: tint }} />
+      <View style={{ position: "absolute", left: 0, bottom: 0, width: w, height: h * 0.62, borderRadius: w * 0.18, backgroundColor: tint, alignItems: "center", justifyContent: "center" }}>
+        <View style={{ width: Math.max(2, w * 0.12), height: h * 0.24, borderRadius: w, backgroundColor: C.bg }} />
+      </View>
+    </View>
+  );
+}
+function Btn({ label, onPress, primary, danger, disabled, style }: { label: string; onPress: () => void; primary?: boolean; danger?: boolean; disabled?: boolean; style?: any }) {
+  return (
+    <Pressable onPress={disabled ? undefined : onPress} accessibilityRole="button" accessibilityState={{ disabled: !!disabled }}
+      style={({ pressed }) => [st.btn, primary && st.btnPrimary, danger && st.btnDanger, pressed && !disabled && { opacity: 0.75 }, disabled && { opacity: 0.4 }, style]}>
+      <Text style={[st.btnT, primary && { color: "#fff" }, danger && { color: C.err }]}>{label}</Text>
+    </Pressable>
+  );
+}
+function Badge({ label, fg = C.ok, bg = C.okSubtle }: { label: string; fg?: string; bg?: string }) {
+  return <View style={[st.badge, { backgroundColor: bg }]}><Text style={[st.badgeT, { color: fg }]}>{label}</Text></View>;
+}
+function Label({ children }: { children: React.ReactNode }) { return <Text style={st.label}>{children}</Text>; }
+function Header({ title, onBack, right }: { title?: string; onBack?: () => void; right?: React.ReactNode }) {
+  return (
+    <View style={st.header}>
+      {onBack ? <Pressable onPress={onBack} hitSlop={12} accessibilityLabel="Back"><Text style={st.back}>‹</Text></Pressable> : null}
+      <Text style={st.headerT} numberOfLines={1}>{title}</Text>
+      <View style={{ flex: 1 }} />
+      {right}
+    </View>
+  );
+}
+function Toast({ msg }: { msg: string }) {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => { Animated.timing(a, { toValue: 1, duration: 180, useNativeDriver: true }).start(); }, [a]);
+  return <Animated.View pointerEvents="none" style={[st.toast, { opacity: a }]}><Text style={st.toastT}>{msg}</Text></Animated.View>;
+}
+function Banner({ text, tone = "info" }: { text: string; tone?: "ok" | "info" | "warn" | "err" }) {
+  const map = { ok: [C.okSubtle, C.ok], info: [C.raised, C.text2], warn: [C.warnSubtle, C.warn], err: [C.errSubtle, C.err] } as const;
+  const [bg, fg] = map[tone];
+  return <View style={[st.banner, { backgroundColor: bg, borderColor: tone === "info" ? C.border : fg + "55" }]}><Text style={{ color: fg, fontSize: 14, lineHeight: 20 }}>{text}</Text></View>;
+}
+
+// ── Home ─────────────────────────────────────────────────────────────────────────
+function Home({ snap, push, openLink }: Ctx) {
+  const [link, setLink] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const forms = snap.state.forms as Record<string, any>;
+  const ids = Object.keys(forms).sort((a, b) => (forms[b].createdAt || 0) - (forms[a].createdAt || 0));
+  const mine = ids.filter((i) => forms[i].mine);
+  const answered = ids.filter((i) => !forms[i].mine && forms[i].mySubmitted);
+  const open = ids.filter((i) => !forms[i].mine && !forms[i].mySubmitted && forms[i].status === "open");
+  const pending: string[] = snap.pendingForms;
+  const responsesFor = (id: string) => snap.creatorView?.responses?.[id]?.length || 0;
+
+  const Row = ({ id }: { id: string }) => {
+    const f = forms[id];
+    const sub = !f ? "syncing…" : [plural(f.questions.length, "question", "questions"), f.mine ? plural(responsesFor(id), "response", "responses") : null, f.status === "closed" ? "closed" : null].filter(Boolean).join("  ·  ");
+    return (
+      <Pressable onPress={() => push({ k: "form", id })} style={({ pressed }) => [st.row, pressed && { backgroundColor: C.raised }]}>
+        <View style={[st.glyph, f?.status === "closed" && { opacity: 0.5 }]}>{[14, 10, 12].map((w, i) => <View key={i} style={{ width: w, height: 2, borderRadius: 1, backgroundColor: C.primary, marginVertical: 1.5 }} />)}</View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={st.rowT} numberOfLines={1}>{f ? f.title || "(untitled)" : id}</Text>
+          <Text style={st.rowS} numberOfLines={1}>{sub}</Text>
+        </View>
+        {f && !f.mine && f.mySubmitted ? <Badge label={f.myConfirmed ? "Receipt" : "Sent"} fg={f.myConfirmed ? C.ok : C.text2} bg={f.myConfirmed ? C.okSubtle : C.raised} /> : null}
+        {f?.contested ? <Badge label="Check link" fg={C.warn} bg={C.warnSubtle} /> : null}
+      </Pressable>
+    );
+  };
+  const Section = ({ title, list, pend }: { title: string; list: string[]; pend?: boolean }) =>
+    list.length ? (<View style={{ marginTop: 18 }}><Label>{title}  {list.length}</Label>{list.map((id) => pend ? <Row key={id} id={id} /> : <Row key={id} id={id} />)}</View>) : null;
+
+  const onRefresh = async () => { setRefreshing(true); try { await pullHistory(); } finally { setRefreshing(false); } };
+  const empty = !mine.length && !answered.length && !open.length && !pending.length;
+
+  return (
+    <View style={st.fill}>
+      <View style={st.topbar}>
+        <LockMark />
+        <View style={{ marginLeft: 10 }}>
+          <Text style={st.brand}>WhisperBox</Text>
+          <Text style={st.brandSub}>end-to-end encrypted forms</Text>
+        </View>
+        <View style={{ flex: 1 }} />
+        <Pressable onPress={() => push({ k: "identity" })} style={st.idPill} accessibilityLabel="Identity and network">
+          <View style={[st.dot, { backgroundColor: net.started ? C.ok : C.warn }]} />
+          <Text style={st.idPillT}>{shortAddr(snap.identity.address)}</Text>
+        </Pressable>
+      </View>
+      <SharedNodeStatus appName="WhisperBox" />
+      <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} progressBackgroundColor={C.surface} />}>
+        <Label>OPEN A SHARED FORM</Label>
+        <View style={st.joinRow}>
+          <TextInput value={link} onChangeText={setLink} placeholder="whisperbox:// link or form id" placeholderTextColor={C.text3}
+            style={[st.input, { flex: 1 }]} autoCapitalize="none" autoCorrect={false} onSubmitEditing={() => { if (openLink(link)) setLink(""); }} />
+          <Btn label="Open" disabled={!link.trim()} onPress={() => { if (openLink(link)) setLink(""); }} />
+        </View>
+        <View style={[st.joinRow, { marginTop: 8 }]}>
+          <Btn label="Scan QR" onPress={() => push({ k: "scan" })} style={{ flex: 1 }} />
+          <Btn label="Paste link" onPress={async () => { const t = await Clipboard.getStringAsync(); if (t) openLink(t); }} style={{ flex: 1 }} />
+        </View>
+
+        {empty ? (
+          <View style={st.empty}>
+            <Text style={st.emptyT}>Psst… nothing to whisper about yet.</Text>
+            <Text style={st.emptyS}>{net.started ? "Create a form, or open a link someone shared with you. Answers are sealed so only the person who asked can read them." : "Connecting to the network…"}</Text>
+          </View>
+        ) : null}
+        <Section title="WAITING FOR SYNC" list={pending} pend />
+        <Section title="MY FORMS" list={mine} />
+        <Section title="ANSWERED" list={answered} />
+        <Section title="OPEN FORMS" list={open} />
+        <View style={{ height: 96 }} />
+      </ScrollView>
+      <Pressable onPress={() => push({ k: "create" })} style={({ pressed }) => [st.fab, pressed && { backgroundColor: C.primaryHover }]} accessibilityLabel="New form">
+        <Text style={st.fabT}>+  New form</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+// ── Form (creator + respondent) ─────────────────────────────────────────────────
+function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
+  const f = snap.state.forms[id];
+  const pending = !f;
+  const [answers, setAnswers] = useState<Record<string, any>>({});
+  const [showErrors, setShowErrors] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+
+  if (pending) {
+    return (
+      <View style={st.fill}>
+        <Header title="Waiting for sync" onBack={pop} />
+        <View style={[st.fill, st.center, { padding: 28 }]}>
+          <ActivityIndicator color={C.primary} />
+          <Text style={[st.h2, { marginTop: 18, textAlign: "center" }]}>Waiting for the form to sync</Text>
+          <Text style={[st.muted, { textAlign: "center", marginTop: 8 }]}>The link only carries the form id ({id}). Its questions arrive from peers on the network, usually within seconds.</Text>
+          <Btn label="Ask peers again" onPress={() => { pullHistory(); toast("Asked peers for the form"); }} style={{ marginTop: 18 }} />
+        </View>
+      </View>
+    );
+  }
+  const responses: any[] = snap.creatorView?.responses?.[id] || [];
+  const confirmed = responses.filter((r) => r.confirmed).length;
+  const qOf = (qid: string) => (f.questions || []).find((q: any) => q.id === qid);
+  const set = (qid: string, v: any) => setAnswers((a) => ({ ...a, [qid]: v }));
+  const missing = (q: any) => { const v = answers[q.id]; return !!q.required && (v === undefined || v === null || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && !v.length)); };
+  const submit = () => {
+    for (const q of f.questions) if (missing(q)) { setShowErrors(true); toast("Please answer: " + q.text); return; }
+    const arr = f.questions.map((q: any) => ({ questionId: q.id, value: answers[q.id] ?? (normType(q.type) === "checkbox" ? [] : normType(q.type) === "radioButtons" ? null : "") }));
+    const r = client.submitResponse(id, arr);
+    if (r.ok) { toast("Answers sealed and sent"); setAnswers({}); setShowErrors(false); } else toast(r.error);
+  };
+  const banner = (() => {
+    if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it.` } as const;
+    if (f.contested && !f.mine && f.pinnedCreator !== f.creator) return { tone: "warn", text: "Two different people published a form with this id. Open it from the creator's own link to answer - your answers are only ever sealed to the creator that link names." } as const;
+    if (f.mySubmitted && f.myConfirmed) return { tone: "ok", text: "Your answers were received - the creator sent you a receipt." } as const;
+    if (f.mySubmitted) return { tone: "ok", text: "Your answers are sealed and sent. You'll see a receipt here once the creator opens them." } as const;
+    if (f.status === "closed") return { tone: "info", text: "This form is closed and no longer accepts answers." } as const;
+    if (!f.allowed) return { tone: "info", text: `This form only accepts answers from specific addresses, and yours (${shortAddr(snap.identity.address)}) isn't on the list.` } as const;
+    return null;
+  })();
+
+  return (
+    <View style={st.fill}>
+      <Header onBack={pop} right={<Btn label="Share" onPress={() => push({ k: "share", id })} />} />
+      <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
+          <Text style={st.h1}>{f.title || "(untitled)"}</Text>
+          <View style={st.badges}>
+            <Badge label={f.status === "closed" ? "Closed" : "Open"} fg={f.status === "closed" ? C.text2 : C.ok} bg={f.status === "closed" ? C.raised : C.okSubtle} />
+            {f.mine ? <Badge label="Yours" fg={C.primary} bg={C.primarySubtle} /> : null}
+            {f.whitelist?.type === "addresses" ? <Badge label="Members only" fg={C.accent} bg={C.warnSubtle} /> : null}
+            {f.contested ? <Badge label="Contested id" fg={C.warn} bg={C.warnSubtle} /> : null}
+          </View>
+          <Text style={st.meta}>by {shortAddr(f.creator)}{f.createdAt ? "  ·  " + fmtTime(f.createdAt) : ""}</Text>
+          {f.description ? <Text style={st.desc}>{f.description}</Text> : null}
+
+          {f.mine ? (
+            <View style={{ marginTop: 18 }}>
+              <View style={st.stats}>
+                {[{ n: responses.length, l: "Responses", c: C.primary }, { n: confirmed, l: "Receipts sent", c: C.ok }, { n: responses.length - confirmed, l: "Awaiting", c: C.warn }].map((x) => (
+                  <View key={x.l} style={st.stat}><Text style={[st.statN, { color: x.c }]}>{x.n}</Text><Text style={st.statL}>{x.l}</Text></View>
+                ))}
+              </View>
+              <View style={[st.joinRow, { marginTop: 12 }]}>
+                <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} style={{ flex: 1 }} />
+                {f.status === "open" ? <Btn label={confirmClose ? "Tap again to close" : "Close form"} danger onPress={() => {
+                  if (!confirmClose) { setConfirmClose(true); setTimeout(() => setConfirmClose(false), 3000); return; }
+                  const r = client.closeForm(id); toast(r.ok ? "Form closed - no new answers" : r.error); setConfirmClose(false);
+                }} style={{ flex: 1 }} /> : null}
+              </View>
+              <View style={{ marginTop: 20 }}><Label>RESPONSES ({responses.length})</Label></View>
+              {!responses.length ? <Text style={st.muted}>No responses yet. Share the link - answers arrive sealed and only this phone can open them.</Text> : null}
+              {responses.map((r: any) => (
+                <View key={r.respondent + r.hlc?.wall} style={st.card}>
+                  <View style={st.cardHead}>
+                    <Pressable onPress={async () => { await Clipboard.setStringAsync(r.respondent); toast("Address copied"); }}>
+                      <Text style={st.addr}>{shortAddr(r.respondent)}</Text>
+                    </Pressable>
+                    <Text style={st.time}>{fmtTime(r.submittedAt)}</Text>
+                    <View style={{ flex: 1 }} />
+                    {r.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, r.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
+                  </View>
+                  {(r.answers || []).map((a: any) => {
+                    const q = qOf(a.questionId); const v = answerText(q, a.value);
+                    return (
+                      <View key={a.questionId} style={{ marginTop: 8 }}>
+                        <Text style={st.qSmall}>{q ? q.text : a.questionId}</Text>
+                        <Text style={[st.answer, !v && { color: C.text3 }]}>{v || "(no answer)"}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={{ marginTop: 18 }}>
+              {banner ? <Banner tone={banner.tone} text={banner.text} /> : null}
+              {f.canRespond ? f.questions.map((q: any, qi: number) => {
+                const qt = normType(q.type); const invalid = showErrors && missing(q);
+                return (
+                  <View key={q.id} style={{ marginTop: 18 }}>
+                    <Text style={[st.q, invalid && { color: C.err }]}>{qi + 1}. {q.text}{q.required ? "  *" : ""}</Text>
+                    {qt === "text" || qt === "textarea" ? (
+                      <TextInput multiline={qt === "textarea"} value={answers[q.id] || ""} onChangeText={(t) => set(q.id, t)}
+                        placeholder="Your answer" placeholderTextColor={C.text3}
+                        style={[st.input, qt === "textarea" && { minHeight: 104, textAlignVertical: "top" }, invalid && { borderColor: C.err }]} />
+                    ) : (
+                      (q.options || []).map((o: string, oi: number) => {
+                        const multi = qt === "checkbox";
+                        const on = multi ? (answers[q.id] || []).includes(oi) : answers[q.id] === oi;
+                        return (
+                          <Pressable key={oi} accessibilityRole={multi ? "checkbox" : "radio"} accessibilityState={{ checked: on }}
+                            onPress={() => multi ? set(q.id, on ? (answers[q.id] || []).filter((x: number) => x !== oi) : [...(answers[q.id] || []), oi].sort((a, b) => a - b)) : set(q.id, oi)}
+                            style={[st.opt, on && { borderColor: C.primary, backgroundColor: C.primarySubtle }, invalid && !on && { borderColor: C.err }]}>
+                            <View style={[st.tick, { borderRadius: multi ? 4 : 9, borderColor: on ? C.primary : C.text3 }]}>{on ? <View style={[st.tickIn, { borderRadius: multi ? 2 : 5 }]} /> : null}</View>
+                            <Text style={st.optT}>{o}</Text>
+                          </Pressable>
+                        );
+                      })
+                    )}
+                  </View>
+                );
+              }) : null}
+              {f.canRespond ? <Btn label="Seal and send answers" primary onPress={submit} style={{ marginTop: 22, paddingVertical: 15 }} /> : null}
+              <View style={st.privacy}>
+                <LockMark size={14} tint={C.ok} />
+                <Text style={st.privacyT}>Answers are encrypted to the creator's key before they leave this phone. Everyone else on the network - including peers that relay and store them - sees only an opaque blob. The receipt the creator sends back can't be linked to your address.</Text>
+              </View>
+            </View>
+          )}
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+// ── Create ─────────────────────────────────────────────────────────────────────
+type Draft = { type: string; text: string; required: boolean; optionsText: string };
+function CreateScreen({ replace, pop, toast }: Ctx) {
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+  const [qs, setQs] = useState<Draft[]>([{ type: "text", text: "", required: true, optionsText: "" }]);
+  const [restrict, setRestrict] = useState(false);
+  const [allow, setAllow] = useState("");
+  const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
+  const publish = () => {
+    if (!title.trim()) { toast("Give the form a title"); return; }
+    const questions: any[] = [];
+    for (const d of qs) {
+      const text = d.text.trim(); if (!text) continue;
+      const q: any = { id: "q" + (questions.length + 1), type: d.type, text, required: d.required };
+      if (d.type === "radioButtons" || d.type === "checkbox") {
+        q.options = d.optionsText.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (q.options.length < 2) { toast(`"${text}" needs at least two options`); return; }
+      }
+      questions.push(q);
+    }
+    if (!questions.length) { toast("Add at least one question"); return; }
+    let whitelist = { type: "none", value: "" };
+    if (restrict) {
+      const addrs = allow.split(/[\s,]+/).filter((a) => /^0x[0-9a-fA-F]{40}$/.test(a)).map((a) => a.toLowerCase());
+      if (!addrs.length) { toast("Add at least one 0x address, or allow anyone"); return; }
+      whitelist = { type: "addresses", value: addrs.join(",") };
+    }
+    const r = client.createForm({ title: title.trim(), description: desc.trim(), questions, whitelist });
+    if (r.ok) { toast("Form published"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+  };
+  return (
+    <View style={st.fill}>
+      <Header title="New form" onBack={pop} right={<Btn label="Publish" primary onPress={publish} />} />
+      <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
+          <Label>TITLE</Label>
+          <TextInput value={title} onChangeText={setTitle} placeholder="What are you asking about?" placeholderTextColor={C.text3} style={[st.input, { fontWeight: "600" }]} />
+          <View style={{ marginTop: 14 }}><Label>DESCRIPTION (OPTIONAL)</Label></View>
+          <TextInput value={desc} onChangeText={setDesc} multiline placeholder="Context for respondents" placeholderTextColor={C.text3} style={[st.input, { minHeight: 70, textAlignVertical: "top" }]} />
+          <View style={{ marginTop: 18 }}><Label>QUESTIONS ({qs.length})</Label></View>
+          {qs.map((q, i) => {
+            const choice = q.type === "radioButtons" || q.type === "checkbox";
+            return (
+              <View key={i} style={st.card}>
+                <View style={st.cardHead}>
+                  <Text style={{ color: C.primary, fontWeight: "700", marginRight: 8 }}>Q{i + 1}</Text>
+                  <TextInput value={q.text} onChangeText={(t) => upd(i, { text: t })} placeholder="Question" placeholderTextColor={C.text3} style={[st.input, { flex: 1, backgroundColor: C.surface }]} />
+                </View>
+                <View style={st.chips}>
+                  {QTYPES.map((t) => (
+                    <Pressable key={t.t} onPress={() => upd(i, { type: t.t })} style={[st.chip, q.type === t.t && st.chipOn]}>
+                      <Text style={[st.chipT, q.type === t.t && { color: C.primary }]}>{t.label}</Text>
+                    </Pressable>
+                  ))}
+                  <Pressable onPress={() => upd(i, { required: !q.required })} style={[st.chip, q.required && { borderColor: C.accent, backgroundColor: C.warnSubtle }]}>
+                    <Text style={[st.chipT, q.required && { color: C.accent }]}>{q.required ? "Required" : "Optional"}</Text>
+                  </Pressable>
+                  {qs.length > 1 ? (
+                    <Pressable onPress={() => setQs((a) => a.filter((_, j) => j !== i))} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Remove question ${i + 1}`}>
+                      <Text style={[st.chipT, { color: C.err }]}>Remove</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                {choice ? <TextInput value={q.optionsText} onChangeText={(t) => upd(i, { optionsText: t })} multiline placeholder="One option per line" placeholderTextColor={C.text3} style={[st.input, { minHeight: 84, textAlignVertical: "top", backgroundColor: C.surface, marginTop: 10 }]} /> : null}
+              </View>
+            );
+          })}
+          <Btn label="+ Add question" onPress={() => setQs((a) => [...a, { type: "text", text: "", required: false, optionsText: "" }])} style={{ marginTop: 12 }} />
+          <View style={{ marginTop: 22 }}><Label>WHO CAN ANSWER</Label></View>
+          <View style={st.chips}>
+            {[{ r: false, l: "Anyone with the link" }, { r: true, l: "Only listed addresses" }].map((x) => (
+              <Pressable key={x.l} onPress={() => setRestrict(x.r)} style={[st.chip, restrict === x.r && st.chipOn]}>
+                <Text style={[st.chipT, restrict === x.r && { color: C.primary }]}>{x.l}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {restrict ? <TextInput value={allow} onChangeText={setAllow} multiline autoCapitalize="none" placeholder="0x addresses, one per line (respondents find theirs under Identity)" placeholderTextColor={C.text3} style={[st.input, { minHeight: 80, textAlignVertical: "top", fontFamily: MONO, fontSize: 12, marginTop: 10 }]} /> : null}
+          <Text style={[st.muted, { marginTop: 14 }]}>The form (title, questions, who may answer) is public on the network. Answers are encrypted to your key.</Text>
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+// ── Share / CSV / Scan / Identity ──────────────────────────────────────────────
+function ShareScreen({ pop, toast, id }: Ctx & { id: string }) {
+  const r = client.shareUri(id);
+  const uri: string = r.ok ? r.uri : "";
+  return (
+    <View style={st.fill}>
+      <Header title="Share form" onBack={pop} />
+      <ScrollView contentContainerStyle={[st.pad, { alignItems: "center" }]}>
+        <View style={st.qr}>{uri ? <QRCode value={uri} size={220} color={C.bg} backgroundColor="#ffffff" ecl="M" /> : null}</View>
+        <Text style={st.link} selectable>{uri}</Text>
+        <View style={[st.joinRow, { marginTop: 14, alignSelf: "stretch" }]}>
+          <Btn label="Copy link" primary onPress={async () => { await Clipboard.setStringAsync(uri); toast("Link copied"); }} style={{ flex: 1 }} />
+          <Btn label="Share…" onPress={() => Share.share({ message: uri })} style={{ flex: 1 }} />
+        </View>
+        <Text style={[st.muted, { marginTop: 16, textAlign: "center" }]}>The link names the form and its creator, so a respondent's answers are sealed only to you even if someone else copies the form id. The questions sync from the network.</Text>
+      </ScrollView>
+    </View>
+  );
+}
+function CsvScreen({ pop, toast, csv }: Ctx & { csv: string }) {
+  return (
+    <View style={st.fill}>
+      <Header title="Responses as CSV" onBack={pop} right={<Btn label="Share…" primary onPress={() => Share.share({ message: csv })} />} />
+      <ScrollView contentContainerStyle={st.pad}>
+        <Text style={st.muted}>Decrypted on this phone only. Nothing is uploaded unless you share it.</Text>
+        <ScrollView horizontal style={[st.card, { marginTop: 12 }]}>
+          <Text style={st.csv} selectable>{csv}</Text>
+        </ScrollView>
+        <Btn label="Copy CSV" onPress={async () => { await Clipboard.setStringAsync(csv); toast("CSV copied"); }} style={{ marginTop: 12 }} />
+      </ScrollView>
+    </View>
+  );
+}
+function ScanScreen({ pop, openLink, toast }: Ctx) {
+  const [perm, request] = useCameraPermissions();
+  const done = useRef(false);
+  useEffect(() => { if (perm && !perm.granted && perm.canAskAgain) request(); }, [perm, request]);
+  return (
+    <View style={st.fill}>
+      <Header title="Scan a form's QR" onBack={pop} />
+      {perm?.granted ? (
+        <View style={st.fill}>
+          <CameraView style={st.fill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+            onBarcodeScanned={({ data }) => {
+              if (done.current) return;
+              if (!String(data).startsWith("whisperbox://")) { toast("That QR isn't a WhisperBox link"); return; }
+              done.current = true; openLink(String(data));
+            }} />
+          <View pointerEvents="none" style={st.scanFrame} />
+        </View>
+      ) : (
+        <View style={[st.fill, st.center, { padding: 28 }]}>
+          <Text style={[st.muted, { textAlign: "center" }]}>WhisperBox needs the camera only to read a form's QR code.</Text>
+          <Btn label="Allow camera" primary onPress={request} style={{ marginTop: 16 }} />
+        </View>
+      )}
+    </View>
+  );
+}
+function IdentityScreen({ snap, pop, toast }: Ctx) {
+  const [shared, setShared] = useState(net.shared);
+  const d = snap.diagnostics;
+  const rows: [string, string][] = [
+    ["Network", net.started ? (net.shared ? "Loam shared node" : "Own node") : net.status],
+    ["Status", net.status], ["Device", snap.deviceId], ["Events", String(d.logSize)],
+    ["Received", String(d.rxRaw)], ["New", String(d.rxNew)], ["Sent", String(d.txTotal)],
+    ["Catch-up frames", String(d.rbsrRx)], ["Rejected", String(d.admDropSig + d.admDropType)],
+  ];
+  return (
+    <View style={st.fill}>
+      <Header title="Identity & network" onBack={pop} />
+      <ScrollView contentContainerStyle={st.pad}>
+        <Label>YOUR ADDRESS</Label>
+        <Pressable onPress={async () => { await Clipboard.setStringAsync(snap.identity.address); toast("Address copied"); }} style={st.card}>
+          <Text style={[st.addr, { fontSize: 13 }]} selectable>{snap.identity.address}</Text>
+          <Text style={[st.muted, { marginTop: 6 }]}>Tap to copy. Creators of members-only forms need this address. The key behind it never leaves this phone.</Text>
+        </Pressable>
+        <View style={{ marginTop: 18 }}><Label>NETWORK</Label></View>
+        <View style={st.card}>
+          {rows.map(([k, v]) => (
+            <View key={k} style={st.kv}><Text style={st.kvK}>{k}</Text><Text style={st.kvV} numberOfLines={1}>{v}</Text></View>
+          ))}
+        </View>
+        <View style={[st.card, st.cardHead]}>
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={{ color: C.text, fontWeight: "600" }}>Use the Loam shared node</Text>
+            <Text style={st.muted}>One network node for all your Logos apps (saves battery). Takes effect after restarting WhisperBox.</Text>
+          </View>
+          <Switch value={shared} onValueChange={async (v) => { setShared(v); await setSharedNode(v); toast("Applies after restarting WhisperBox"); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
+        </View>
+        <Btn label="Ask peers for anything I'm missing" onPress={() => { pullHistory(); toast("Catch-up requested"); }} style={{ marginTop: 12 }} />
+        {net.error ? <Banner tone="err" text={"Network error: " + net.error} /> : null}
+      </ScrollView>
+    </View>
+  );
+}
+
+const st = StyleSheet.create({
+  fill: { flex: 1, backgroundColor: C.bg },
+  center: { alignItems: "center", justifyContent: "center" },
+  pad: { padding: 18 },
+  topbar: { flexDirection: "row", alignItems: "center", paddingHorizontal: 18, paddingVertical: 14 },
+  brand: { color: C.text, fontSize: 18, fontWeight: "700" },
+  brandSub: { color: C.text3, fontSize: 11 },
+  idPill: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: C.border, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
+  idPillT: { color: C.text2, fontFamily: MONO, fontSize: 11 },
+  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.borderSubtle, minHeight: 56 },
+  back: { color: C.text, fontSize: 32, lineHeight: 34, paddingHorizontal: 8 },
+  headerT: { color: C.text, fontSize: 17, fontWeight: "700", marginLeft: 4, flexShrink: 1 },
+  h1: { color: C.text, fontSize: 26, fontWeight: "800", lineHeight: 32 },
+  h2: { color: C.text2, fontSize: 18, fontWeight: "600" },
+  label: { color: C.text3, fontSize: 11, fontWeight: "700", letterSpacing: 1, marginBottom: 8 },
+  muted: { color: C.text3, fontSize: 13, lineHeight: 19 },
+  meta: { color: C.text3, fontSize: 12, marginTop: 8 },
+  desc: { color: C.text2, fontSize: 15, lineHeight: 22, marginTop: 10 },
+  input: { backgroundColor: C.raised, borderWidth: 1, borderColor: C.border, borderRadius: 10, color: C.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
+  joinRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  btn: { backgroundColor: C.raised, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, alignItems: "center", justifyContent: "center" },
+  btnPrimary: { backgroundColor: C.primary, borderColor: C.primary },
+  btnDanger: { borderColor: C.err, backgroundColor: "transparent" },
+  btnT: { color: C.text, fontWeight: "700", fontSize: 14 },
+  badges: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 10 },
+  badge: { borderRadius: 999, paddingHorizontal: 9, paddingVertical: 3 },
+  badgeT: { fontSize: 11, fontWeight: "700" },
+  row: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10, paddingHorizontal: 8, borderRadius: 10 },
+  rowT: { color: C.text, fontSize: 15, fontWeight: "600" },
+  rowS: { color: C.text3, fontSize: 12, marginTop: 1 },
+  glyph: { width: 36, height: 36, borderRadius: 9, backgroundColor: C.primarySubtle, alignItems: "center", justifyContent: "center" },
+  empty: { marginTop: 36, alignItems: "center", paddingHorizontal: 18 },
+  emptyT: { color: C.text2, fontSize: 17, fontWeight: "600", textAlign: "center" },
+  emptyS: { color: C.text3, fontSize: 13, lineHeight: 19, textAlign: "center", marginTop: 8 },
+  fab: { position: "absolute", right: 18, bottom: 18, backgroundColor: C.primary, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 15, elevation: 6 },
+  fabT: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  stats: { flexDirection: "row", gap: 8 },
+  stat: { flex: 1, backgroundColor: C.raised, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
+  statN: { fontSize: 26, fontWeight: "800" },
+  statL: { color: C.text3, fontSize: 11, marginTop: 2 },
+  card: { backgroundColor: C.raised, borderWidth: 1, borderColor: C.borderSubtle, borderRadius: 12, padding: 14, marginTop: 10 },
+  cardHead: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
+  addr: { color: C.text2, fontFamily: MONO, fontSize: 12 },
+  time: { color: C.text3, fontSize: 11 },
+  qSmall: { color: C.text3, fontSize: 12 },
+  answer: { color: C.text, fontSize: 15, marginTop: 2 },
+  q: { color: C.text, fontSize: 15, fontWeight: "700", marginBottom: 8 },
+  opt: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: C.border, backgroundColor: C.raised, borderRadius: 10, padding: 13, marginTop: 6 },
+  optT: { color: C.text, fontSize: 15, flex: 1 },
+  tick: { width: 18, height: 18, borderWidth: 2, alignItems: "center", justifyContent: "center" },
+  tickIn: { width: 9, height: 9, backgroundColor: C.primary },
+  banner: { borderWidth: 1, borderRadius: 12, padding: 13, marginTop: 4 },
+  privacy: { flexDirection: "row", gap: 10, backgroundColor: "#141c18", borderColor: "#24392d", borderWidth: 1, borderRadius: 12, padding: 13, marginTop: 22 },
+  privacyT: { color: C.ok, fontSize: 12, lineHeight: 18, flex: 1 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 10 },
+  chip: { borderWidth: 1, borderColor: C.border, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 6 },
+  chipOn: { borderColor: C.primary, backgroundColor: C.primarySubtle },
+  chipT: { color: C.text2, fontSize: 12 },
+  qr: { backgroundColor: "#fff", padding: 16, borderRadius: 16, marginTop: 8 },
+  link: { color: C.text2, fontFamily: MONO, fontSize: 12, marginTop: 16, textAlign: "center" },
+  csv: { color: C.text, fontFamily: MONO, fontSize: 12, lineHeight: 18 },
+  scanFrame: { position: "absolute", top: "25%", left: "15%", right: "15%", aspectRatio: 1, borderWidth: 3, borderColor: C.primary, borderRadius: 20 },
+  kv: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
+  kvK: { color: C.text3, fontSize: 13 },
+  kvV: { color: C.text2, fontSize: 13, fontFamily: MONO, maxWidth: "62%" },
+  toast: { position: "absolute", left: 24, right: 24, bottom: 96, backgroundColor: C.raised, borderColor: C.border, borderWidth: 1, borderRadius: 14, padding: 14 },
+  toastT: { color: C.text, textAlign: "center", fontSize: 14 },
+});

@@ -19,6 +19,10 @@ module wrapper) libraries. Template: [qaku-logos](https://github.com/vpavlin/qak
   identity, delivery wiring, persistence). Runs behind the view AND headless as a hub.
 - **`module/`** - the desktop `ui_qml` view (pure QML over the Logos design system).
 - **`hub/`** - headless CLI/runner over logoscore (`hub/README.md`).
+- **`mobile/`** - the Android app (Expo/React Native). Network via the Loam
+  shared node (`loam-transport` submodule); protocol via `packages/client`.
+- **`packages/client/`** - the WhisperBox protocol in JS (the phone's core), a
+  behavioural mirror of `whisperbox_core`, interop-tested against it.
 - **`site/`** - the product website (single page, live in-browser sealing demo). Edit
   `site/whisperbox.html`, run `scripts/build-site.sh`, serve `site/` with GitHub Pages.
 
@@ -40,12 +44,22 @@ Add the package repository in Basecamp and install **WhisperBox** (it pulls
 
 Always update `whisperbox` and `whisperbox_core` together (same version).
 
+## Android
+Install **Loam** (the device-wide Logos node) and **WhisperBox** from the Loam
+F-Droid repository, open Loam once and approve WhisperBox when asked. Without
+Loam, WhisperBox runs its own node (Settings → Identity & network).
+Build: `cd mobile && npm install && npx expo prebuild --platform android &&
+cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a`
+(arm64 only; release signing reads `WB_*` from `~/.gradle/gradle.properties`).
+
 ## Privacy model
 - Form definitions (title, questions, who may answer) are public on the topic.
 - A response is ECIES-sealed to the form creator's key; on the wire and in the
   fleet store it is an opaque blob with no respondent identity.
 - The creator's receipt carries a random id the respondent sealed inside its
   response, so a receipt can't be linked to an address.
+- Share links name the creator; a client never seals answers to a form whose
+  creator differs from the link, or to a form id two people published.
 - "Only listed addresses" forms: respondents sign inside the sealed payload;
   the creator drops unsigned or unlisted responses.
 - Delta vs. the original whisperbox: Logos delivery keeps channel history in the
