@@ -19,6 +19,8 @@ module wrapper) libraries. Template: [qaku-logos](https://github.com/vpavlin/qak
   identity, delivery wiring, persistence). Runs behind the view AND headless as a hub.
 - **`module/`** - the desktop `ui_qml` view (pure QML over the Logos design system).
 - **`hub/`** - headless CLI/runner over logoscore (`hub/README.md`).
+- **`site/`** - the product website (single page, live in-browser sealing demo). Edit
+  `site/whisperbox.html`, run `scripts/build-site.sh`, serve `site/` with GitHub Pages.
 
 ## Protocol (one shared topic, `/whisperbox/1/all/proto`)
 | event | who | notes |

@@ -1,0 +1,419 @@
+<title>WhisperBox</title>
+<meta name="description" content="Encrypted forms for Logos Basecamp. Forms are public; every answer is sealed so only the person who asked can read it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gloock&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Martian+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a letter-desk. Left, the form someone fills in; right, the same answer twice —
+   as the network carries it (a segmented sealed blob) and as the creator opens it. */
+:root {
+  --ink: #f2f0fa;          /* primary text */
+  --ink-2: #b3b0c8;        /* secondary text */
+  --ink-3: #75728c;        /* captions, rules */
+  --paper: #0d0c14;        /* page ground */
+  --desk: #15131f;         /* raised surfaces */
+  --desk-2: #1d1a2b;       /* inputs, wells */
+  --line: #2b2840;         /* hairlines */
+  --seal: #8c7ff8;         /* indigo: the WhisperBox accent, keys */
+  --wax: #f2a64e;          /* amber: nonce / sealing moments */
+  --ok: #5fd68a;           /* opened, verified */
+  --bad: #f07a7a;          /* refused */
+  --display: "Gloock", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --step-0: 1rem; --step-1: 1.2rem; --step-2: 1.6rem; --step-3: clamp(2.4rem, 6vw, 4.1rem);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ink: #1a1726; --ink-2: #4b4762; --ink-3: #807c96;
+    --paper: #f6f4fb; --desk: #ffffff; --desk-2: #eeebf7; --line: #dcd8ea;
+    --seal: #5b4be0; --wax: #b8650d; --ok: #1d8a4a; --bad: #c23b3b;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --ink: #1a1726; --ink-2: #4b4762; --ink-3: #807c96;
+  --paper: #f6f4fb; --desk: #ffffff; --desk-2: #eeebf7; --line: #dcd8ea;
+  --seal: #5b4be0; --wax: #b8650d; --ok: #1d8a4a; --bad: #c23b3b;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 var(--step-0)/1.6 var(--body);
+  padding-inline: clamp(16px, 4vw, 48px); padding-block: 0 64px;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1120px; margin-inline: auto; }
+a { color: var(--seal); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, label:focus-within {
+  outline: 2px solid var(--seal); outline-offset: 2px;
+}
+h1, h2, h3 { font-family: var(--display); font-weight: 400; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+.label {
+  font: 500 0.68rem/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3);
+}
+
+/* ── top bar ── */
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding-block: 22px; }
+.mark { display: flex; align-items: center; gap: 10px; font: 400 1.3rem/1 var(--display); color: var(--ink); text-decoration: none; }
+.mark svg { width: 22px; height: 26px; }
+.bar nav { display: flex; gap: 20px; flex-wrap: wrap; font-size: 0.95rem; }
+.bar nav a { color: var(--ink-2); text-decoration: none; }
+.bar nav a:hover { color: var(--ink); }
+
+/* ── hero ── */
+.hero { padding-block: clamp(28px, 6vw, 64px) 40px; display: grid; gap: 18px; }
+.hero h1 { font-size: var(--step-3); line-height: 1.02; max-width: 15ch; }
+.hero h1 em { font-style: normal; color: var(--seal); }
+.lede { font-size: var(--step-1); color: var(--ink-2); max-width: 58ch; margin: 0; }
+
+/* ── the demo desk ── */
+.desk { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; margin-top: 8px; }
+@media (max-width: 860px) { .desk { grid-template-columns: minmax(0, 1fr); } }
+.sheet, .view { background: var(--desk); border: 1px solid var(--line); border-radius: 14px; padding: 22px; min-width: 0; }
+.sheet { display: grid; gap: 16px; align-content: start; }
+.sheet h2 { font-size: var(--step-2); }
+.sheet .by { font-size: 0.85rem; color: var(--ink-3); margin-top: 4px; }
+.q { display: grid; gap: 8px; border: 0; padding: 0; margin: 0; }
+.q legend, .q > span { font-weight: 700; padding: 0; }
+.opts { display: grid; gap: 6px; }
+.opt { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--desk-2); cursor: pointer; }
+.opt:has(input:checked) { border-color: var(--seal); }
+.opt input { accent-color: var(--seal); margin: 0; }
+textarea {
+  width: 100%; min-height: 84px; resize: vertical; padding: 10px 12px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--desk-2); color: var(--ink); font: inherit;
+}
+.views { display: grid; gap: 20px; min-width: 0; }
+.view header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.view h3 { font-size: 1.25rem; }
+.blob {
+  font: 400 0.72rem/1.75 var(--mono); word-break: break-all; color: var(--ink-3);
+  background: var(--desk-2); border-radius: 9px; padding: 12px 14px;
+}
+.blob .v { color: var(--ink); }
+.blob .k { color: var(--seal); }
+.blob .n { color: var(--wax); }
+.blob .t { color: var(--ok); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font: 400 0.7rem/1.4 var(--mono); color: var(--ink-3); }
+.legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+.legend .k i { background: var(--seal); } .legend .n i { background: var(--wax); }
+.legend .c i { background: var(--ink-3); } .legend .t i { background: var(--ok); } .legend .v i { background: var(--ink); }
+.note { font-size: 0.85rem; color: var(--ink-3); margin: 10px 0 0; }
+
+.keys { display: flex; gap: 6px; flex-wrap: wrap; }
+.keys button {
+  font: 500 0.75rem/1 var(--mono); padding: 8px 10px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-2);
+}
+.keys button[aria-pressed="true"] { border-color: var(--seal); color: var(--ink); background: var(--desk-2); }
+.opened { display: grid; gap: 10px; }
+.opened dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; }
+.opened dt { color: var(--ink-3); font-size: 0.9rem; }
+.opened dd { margin: 0; overflow-wrap: anywhere; }
+.opened .addr { font: 400 0.78rem/1.6 var(--mono); }
+.status { font: 500 0.72rem/1.3 var(--mono); padding: 5px 9px; border-radius: 999px; border: 1px solid currentColor; }
+.status.ok { color: var(--ok); } .status.bad { color: var(--bad); }
+.refused { color: var(--bad); margin: 0; }
+
+/* ── sections ── */
+section { padding-block: 56px 8px; }
+section > h2 { font-size: var(--step-2); margin-bottom: 8px; }
+section > .sub { color: var(--ink-2); max-width: 62ch; margin: 0 0 28px; }
+.steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; counter-reset: s; }
+@media (max-width: 760px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+.steps li { counter-increment: s; border-top: 1px solid var(--line); padding-top: 14px; }
+.steps li::before { content: counter(s); font: 400 2rem/1 var(--display); color: var(--seal); display: block; margin-bottom: 10px; }
+.steps h3 { font: 700 1.05rem/1.3 var(--body); margin-bottom: 6px; }
+.steps p { margin: 0; color: var(--ink-2); }
+
+.ledger { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--desk); }
+table { width: 100%; border-collapse: collapse; min-width: 560px; }
+th, td { text-align: left; padding: 13px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 0.68rem/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3); }
+td:first-child { font-weight: 700; }
+.pill { font: 500 0.72rem/1 var(--mono); padding: 4px 8px; border-radius: 999px; white-space: nowrap; }
+.pill.pub { color: var(--ink-2); border: 1px solid var(--line); }
+.pill.sealed { color: var(--paper); background: var(--seal); }
+
+.get { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 760px) { .get { grid-template-columns: minmax(0, 1fr); } }
+.get > div { min-width: 0; }
+.get h3 { font: 700 1.05rem/1.3 var(--body); margin-bottom: 8px; }
+.get p { color: var(--ink-2); margin: 0 0 12px; }
+.copy { display: flex; gap: 8px; align-items: stretch; }
+.copy code, pre {
+  font: 400 0.76rem/1.7 var(--mono); background: var(--desk); border: 1px solid var(--line); border-radius: 9px;
+  padding: 10px 12px; color: var(--ink); overflow-x: auto; min-width: 0; margin: 0;
+}
+.copy code { flex: 1; white-space: nowrap; }
+.copy button {
+  font: 500 0.75rem/1 var(--mono); padding: 0 14px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--seal); background: var(--seal); color: var(--paper);
+}
+pre .c { color: var(--ink-3); }
+
+footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; color: var(--ink-3); font-size: 0.88rem; }
+footer p { margin: 0; max-width: 70ch; }
+
+@keyframes reseal { from { opacity: 0.35; } to { opacity: 1; } }
+.blob.fresh { animation: reseal 260ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .blob.fresh { animation: none; } }
+</style>
+
+<div class="wrap">
+  <div class="bar">
+    <a class="mark" href="#top" aria-label="WhisperBox home">
+      <svg viewBox="0 0 22 26" aria-hidden="true"><rect x="4" y="1.5" width="14" height="15" rx="7" fill="none" stroke="var(--seal)" stroke-width="3"/><rect x="0" y="10" width="22" height="16" rx="4" fill="var(--seal)"/><rect x="10" y="15" width="2.5" height="6" rx="1.2" fill="var(--paper)"/></svg>
+      WhisperBox
+    </a>
+    <nav aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#privacy">What's public</a>
+      <a href="#get">Get it</a>
+      <a href="https://github.com/vpavlin/whisperbox-logos">Source</a>
+    </nav>
+  </div>
+
+  <header class="hero" id="top">
+    <span class="label">Encrypted forms for Logos Basecamp</span>
+    <h1>Ask in public. <em>Read in private.</em></h1>
+    <p class="lede">Publish a form anyone can find. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
+  </header>
+
+  <div class="desk" aria-label="Live demo">
+    <form class="sheet" id="form" autocomplete="off">
+      <div>
+        <span class="label">Example form</span>
+        <h2>Team offsite</h2>
+        <div class="by">by 0xdda9…7d7d · open</div>
+      </div>
+      <fieldset class="q">
+        <legend>1. Where should we go? *</legend>
+        <div class="opts">
+          <label class="opt"><input type="radio" name="q1" id="q1-0" value="0"> The city</label>
+          <label class="opt"><input type="radio" name="q1" id="q1-1" value="1" checked> The mountains</label>
+          <label class="opt"><input type="radio" name="q1" id="q1-2" value="2"> The coast</label>
+        </div>
+      </fieldset>
+      <label class="q">
+        <span>2. One thing we should change</span>
+        <textarea id="q2" name="q2">Fewer slides, longer walks.</textarea>
+      </label>
+      <p class="note">Type here. The answer is re-sealed on every keystroke with a fresh one-time key, which is why the whole blob changes at once.</p>
+    </form>
+
+    <div class="views">
+      <article class="view" aria-live="polite">
+        <header>
+          <h3>What the network sees</h3>
+          <span class="label" id="size">309 bytes</span>
+        </header>
+        <div class="blob" id="blob"><span class="v">01</span><span class="k">02ea54694b1e522fff67763b7ecc8fb182df867b18f7da14b1d6189ba28b8f2f2e</span><span class="n">96393302f1141714f205b918</span><span class="c">20b52be58fb942f1695076611ba38f774dd3d81631a82641780586cc260ee83e6a8e49e9ca10ef61f5b5211398599a5b8021e8e792aa85493a35e2cb5e73b269e8da87193a440bcd3e69e27aff128413aeb6829de683af6724ad65c574fe4529f66ed0a1c17ccf9ee5c26867636bda2137d018605043ea28326ad974d8821a3325c583124b18a6d26cdf5c24c8dbb4aefcede09ec52056f47f15e6e66081448733a61da9b5ad7772291f47968541a79c98dbdc2e144161fbbe4931680aaacaeb38591ae2efb01f143c788f9f9174c82b3ccac6e279e00704040dd0cdddfe51eaa82e43ee598c414c18564b8bdd64f8a7ed6cbfa783ee0e</span><span class="t">9febb13fa1b6dba866a3f79f119c227c</span></div>
+        <div class="legend">
+          <span class="v"><i></i>version 1 B</span>
+          <span class="k"><i></i>one-time key 33 B</span>
+          <span class="n"><i></i>nonce 12 B</span>
+          <span class="c"><i></i>ciphertext</span>
+          <span class="t"><i></i>tag 16 B</span>
+        </div>
+        <p class="note">Every peer that relays or stores this response sees exactly this, on the topic <code>/whisperbox/1/all/proto</code>. The respondent's address is inside the ciphertext too.</p>
+      </article>
+
+      <article class="view">
+        <header>
+          <h3>What the creator opens</h3>
+          <div class="keys" role="group" aria-label="Open with">
+            <button type="button" id="k-creator" aria-pressed="true">Creator's key</button>
+            <button type="button" id="k-other" aria-pressed="false">Anyone else's key</button>
+          </div>
+        </header>
+        <div id="opened" class="opened">
+          <div><span class="status ok">Opened</span></div>
+          <dl>
+            <dt>From</dt><dd class="addr">0xcd0e8795adcc8c38daea611080b1ad39451b88eb</dd>
+            <dt>Where</dt><dd>The mountains</dd>
+            <dt>Change</dt><dd>Fewer slides, longer walks.</dd>
+            <dt>Receipt id</dt><dd class="addr">7f3a9c2e51d04b86</dd>
+          </dl>
+        </div>
+        <p class="note" id="proof">Uses WhisperBox's real sealing scheme: secp256k1 ECDH, HKDF-SHA256 and ChaCha20-Poly1305.</p>
+      </article>
+    </div>
+  </div>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p class="sub">Three messages on one shared topic, synced peer to peer over Logos Messaging. Every device keeps its own copy of the log, so late joiners catch up from whoever is online.</p>
+    <ol class="steps">
+      <li>
+        <h3>You publish a form</h3>
+        <p>The title, questions and your public key go out signed with your identity. Anyone with the link can load it; nobody can change it.</p>
+      </li>
+      <li>
+        <h3>Respondents seal their answers</h3>
+        <p>Their app encrypts the whole response, including who sent it, to your key before it leaves the device. One response per person.</p>
+      </li>
+      <li>
+        <h3>You open, confirm, export</h3>
+        <p>Your device decrypts the pool, sends each respondent a receipt, and exports a CSV. The receipt carries a random id only the respondent recognises.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section id="privacy">
+    <h2>What's public, what's sealed</h2>
+    <p class="sub">Forms are meant to be found, so their definitions are public. Everything about a response is sealed.</p>
+    <div class="ledger">
+      <table>
+        <thead><tr><th>Item</th><th>On the network</th><th>Who can read it</th></tr></thead>
+        <tbody>
+          <tr><td>Form title and questions</td><td><span class="pill pub">public</span></td><td>Anyone on the topic</td></tr>
+          <tr><td>Who may answer</td><td><span class="pill pub">public</span></td><td>Anyone; restricted forms list the allowed addresses</td></tr>
+          <tr><td>The answers</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator</td></tr>
+          <tr><td>Who answered</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator</td></tr>
+          <tr><td>Receipt</td><td><span class="pill pub">public</span></td><td>Anyone sees it was sent; only the respondent can tell it's theirs</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The network's store nodes keep sealed blobs so new devices can catch up. Without the form key they are useless; that's the trade for having no server.</p>
+  </section>
+
+  <section id="get">
+    <h2>Get it</h2>
+    <p class="sub">WhisperBox runs inside Logos Basecamp 0.2, or headless on any Linux box as an always-on hub.</p>
+    <div class="get">
+      <div>
+        <h3>In Basecamp</h3>
+        <p>Settings → Package Repositories → add this URL, then install WhisperBox from the package manager. It brings its core and the delivery module with it.</p>
+        <div class="copy">
+          <code id="repo">https://raw.githubusercontent.com/jimmy-claw/whisperbox-basecamp/main/logos-repo.json</code>
+          <button type="button" id="copy-repo">Copy</button>
+        </div>
+      </div>
+      <div>
+        <h3>As a headless hub</h3>
+        <p>The same core under <code>logoscore</code>, driven from the shell. Setup is in <a href="https://github.com/vpavlin/whisperbox-logos/tree/main/hub">hub/README.md</a>.</p>
+<pre><span class="c"># publish, share, read</span>
+whisperbox create --title "Lunch?" \
+  --question "radio:Where??Sushi|Tacos"
+whisperbox uri form-…
+whisperbox responses form-…</pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>A rebuild of <a href="https://github.com/whisperbox-org/whisperbox">whisperbox-org/whisperbox</a> for the Logos stack, on <a href="https://github.com/vpavlin/loam-sync">loam-sync</a> and Logos Messaging. MIT or Apache-2.0.</p>
+    <a href="https://github.com/vpavlin/whisperbox-logos">github.com/vpavlin/whisperbox-logos</a>
+  </footer>
+</div>
+
+<script type="module">
+// The demo seals with the same bytes as whisperbox_core (verified against the repo's golden vectors).
+const CREATOR = { priv: "900fe1a774c9fc2ad48d35a2d0555cb4ddf50b278f5d122e3edfdb779be3da08", pub: "02b78d4ae34d42e7a5915bf6a85978a91ebdaf93cb74e856f947af4af5d879fe9a" };
+const OTHER = "ae6de78d4d0b4be7a868d020d524eb9c486853ca29a173dfdf7b31250aac436d";
+const RESPONDENT = "0xcd0e8795adcc8c38daea611080b1ad39451b88eb";
+// One vector from packages/contract/test/fixtures/crypto-sealed.json (sealed to the same creator).
+const VECTOR = { sealed: "010235ef1ffe4a4ac141d7f5e885c30a82ed5da6e03bf03f14fe9797679c0d360dd422dc752effe88a79fea77b610d1fe02aec62d9649a434d104ddd13f1e31a5b936aa70f4fd08c92cd94c9f781", plain: "hello whisperbox" };
+const PLACES = ["The city", "The mountains", "The coast"];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+let wb = null, useOther = false, receipt = "7f3a9c2e51d04b86", last = null;
+
+function makeWb({ secp256k1, hkdf, sha256, chacha20poly1305 }) {
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  const unhex = (s) => Uint8Array.from(s.match(/../g) || [], (h) => parseInt(h, 16));
+  const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
+  const ecdhX = (priv, pub) => secp256k1.getSharedSecret(priv, pub, false).slice(1, 33);
+  const key = (x) => hkdf(sha256, x, enc.encode("whisperbox-ecies-v1"), new Uint8Array(0), 32);
+  const random = (n) => crypto.getRandomValues(new Uint8Array(n));
+  function seal(creatorPub, text) {
+    const ephPriv = secp256k1.utils.randomPrivateKey(), ephPub = secp256k1.getPublicKey(ephPriv, true), nonce = random(12);
+    const ct = chacha20poly1305(key(ecdhX(ephPriv, creatorPub)), nonce, cat(creatorPub, ephPub)).encrypt(enc.encode(text));
+    return cat(Uint8Array.of(1), ephPub, nonce, ct);
+  }
+  function open(priv, sealed) {
+    const ephPub = sealed.slice(1, 34), nonce = sealed.slice(34, 46), ct = sealed.slice(46);
+    const myPub = secp256k1.getPublicKey(priv, true);
+    return dec.decode(chacha20poly1305(key(ecdhX(priv, ephPub)), nonce, cat(myPub, ephPub)).decrypt(ct));
+  }
+  return { hex, unhex, seal, open };
+}
+
+function response() {
+  const picked = document.querySelector('input[name="q1"]:checked');
+  return JSON.stringify({
+    formId: "form-offsite", respondent: RESPONDENT, submittedAt: Date.now(),
+    answers: [{ questionId: "q1", value: picked ? Number(picked.value) : null }, { questionId: "q2", value: $("q2").value }],
+    confirmationId: receipt,
+  });
+}
+
+function renderBlob(b) {
+  const h = wb.hex(b), tagAt = h.length - 32;
+  $("blob").innerHTML = `<span class="v">${h.slice(0, 2)}</span><span class="k">${h.slice(2, 68)}</span><span class="n">${h.slice(68, 92)}</span><span class="c">${h.slice(92, tagAt)}</span><span class="t">${h.slice(tagAt)}</span>`;
+  $("size").textContent = b.length + " bytes";
+  $("blob").classList.remove("fresh"); void $("blob").offsetWidth; $("blob").classList.add("fresh");
+}
+
+function renderOpened() {
+  const box = $("opened");
+  try {
+    const r = JSON.parse(wb.open(wb.unhex(useOther ? OTHER : CREATOR.priv), last));
+    const where = PLACES[r.answers[0].value] ?? "(no answer)";
+    const change = r.answers[1].value || "(no answer)";
+    box.innerHTML = `<div><span class="status ok">Opened</span></div><dl>
+      <dt>From</dt><dd class="addr">${esc(r.respondent)}</dd>
+      <dt>Where</dt><dd>${esc(where)}</dd>
+      <dt>Change</dt><dd>${esc(change)}</dd>
+      <dt>Receipt id</dt><dd class="addr">${esc(r.confirmationId)}</dd></dl>`;
+  } catch {
+    box.innerHTML = `<div><span class="status bad">Refused</span></div>
+      <p class="refused">Authentication failed. This key can't derive the seal key, so the blob stays noise: no answers, no sender.</p>`;
+  }
+}
+
+function reseal() { if (!wb) return; last = wb.seal(wb.unhex(CREATOR.pub), response()); renderBlob(last); renderOpened(); }
+
+for (const [id, other] of [["k-creator", false], ["k-other", true]]) {
+  $(id).addEventListener("click", () => {
+    useOther = other;
+    $("k-creator").setAttribute("aria-pressed", String(!other));
+    $("k-other").setAttribute("aria-pressed", String(other));
+    if (wb && last) renderOpened();
+  });
+}
+$("form").addEventListener("input", reseal);
+$("form").addEventListener("submit", (e) => e.preventDefault());
+$("copy-repo").addEventListener("click", async () => {
+  const text = $("repo").textContent, btn = $("copy-repo");
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+  catch { const r = document.createRange(); r.selectNodeContents($("repo")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "Selected"; }
+  setTimeout(() => (btn.textContent = "Copy"), 1800);
+});
+
+try {
+  const [{ secp256k1 }, { hkdf }, { sha256 }, { chacha20poly1305 }] = await Promise.all([
+    import("https://cdn.jsdelivr.net/npm/@noble/curves@1.9.1/secp256k1/+esm"),
+    import("https://cdn.jsdelivr.net/npm/@noble/hashes@1.8.0/hkdf/+esm"),
+    import("https://cdn.jsdelivr.net/npm/@noble/hashes@1.8.0/sha256/+esm"),
+    import("https://cdn.jsdelivr.net/npm/@noble/ciphers@1.3.0/chacha/+esm"),
+  ]);
+  wb = makeWb({ secp256k1, hkdf, sha256, chacha20poly1305 });
+  receipt = wb.hex(crypto.getRandomValues(new Uint8Array(8)));
+  const vectorOk = wb.open(wb.unhex(CREATOR.priv), wb.unhex(VECTOR.sealed)) === VECTOR.plain;
+  $("proof").textContent = vectorOk
+    ? "Live in your browser with WhisperBox's real scheme (secp256k1 ECDH, HKDF-SHA256, ChaCha20-Poly1305). On load it opened a sealed test vector from the core's own test suite."
+    : "Live in your browser, but the reference test vector did not open. Please report this.";
+  reseal();
+} catch {
+  $("proof").textContent = "The live demo needs the crypto library from cdn.jsdelivr.net; this is a sealed sample answer.";
+}
+</script>
