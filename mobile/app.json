@@ -3,7 +3,7 @@
     "name": "WhisperBox",
     "slug": "whisperbox",
     "scheme": "whisperbox",
-    "version": "0.2.2",
+    "version": "0.3.0",
     "orientation": "portrait",
     "platforms": [
       "android",
@@ -14,7 +14,7 @@
     "backgroundColor": "#0b0b10",
     "android": {
       "package": "xyz.vpavlin.whisperbox",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0b0b10"
@@ -46,6 +46,7 @@
     "plugins": [
       "./plugins/withLogosDelivery",
       "./plugins/withReleaseSigning",
+      "./plugins/withKeycard",
       "expo-secure-store",
       [
         "expo-camera",

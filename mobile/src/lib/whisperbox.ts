@@ -47,7 +47,8 @@ export function boot(): Promise<void> {
       });
       net.started = true; net.status = "Connected";
       crumb("started " + (transport.usingServiceBackend() ? "shared node" : "own node"));
-      client.onConnected();
+      // Protocol errors must not be reported as "start failed" (the transport IS up).
+      try { client.onConnected(); } catch (e: any) { crumb("onConnected error " + (e?.message || e)); }
       crumb("store sync");
       transport.storeSync((t: string, c: Uint8Array[]) => { try { return t === TOPIC && client.ingest(c); } catch { return false; } })
         .then(() => crumb("store sync done log=" + client.log.length)).catch((e: any) => crumb("store sync failed " + (e?.message || e)));

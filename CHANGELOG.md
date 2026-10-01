@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased - per-form keys
+## Unreleased - per-form keys, Keycard (Android 0.3.0)
+
+- **Android: forms sealed with your Keycard.** "Answers open with: My Keycard" exports the
+  form's own key from the card's EIP-1581 subtree with one tap at publish; the PIN is used
+  for that tap only. After a reinstall, "Unlock answers with Keycard" restores every
+  missing form key in one tap. Identity screen: default for new forms + pairing password.
+  Tested against the real Keycard applet (3.1.2 and 4.0) in a simulator, incl. pulling
+  the card away at every command. Not yet tapped with a physical card.
 
 - **Each form is sealed to its own key** (`form.publicKey`), derived from the identity
   with HKDF (`whisperbox-formkey-v1`), no longer the identity key itself. A leaked

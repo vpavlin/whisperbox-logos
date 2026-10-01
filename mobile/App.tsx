@@ -13,6 +13,7 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import { SharedNodeStatus } from "./src/lib/loam-transport-pkg/src/SharedNodeStatus";
 import { boot, client, net, pullHistory, setSharedNode, parseLink } from "./src/lib/whisperbox";
 import { crumb, previousCrash, previousLog, currentLog, fatalError, onFatal, reportFatal, clearFatal } from "./src/lib/crashlog";
+import { registerSheet, requestCardKeys, getKeycardPrefs, setKeycardPrefs, type CardRequest } from "./src/lib/keycard/flow";
 
 // ── palette: the desktop view's indigo/charcoal ──
 const C = {
@@ -154,6 +155,7 @@ function Root() {
       {screen.k === "scan" && <ScanScreen {...ctx} />}
       {screen.k === "identity" && <IdentityScreen {...ctx} />}
       {screen.k === "csv" && <CsvScreen {...ctx} csv={screen.csv} />}
+      <KeycardSheet />
       {!!toastMsg && <Toast msg={toastMsg} />}
     </SafeAreaView>
   );
@@ -302,6 +304,68 @@ function CrashBanner() {
   );
 }
 
+// ── Keycard: PIN + "hold your card" sheet (one tap per request) ──────────────────
+// Rendered conditionally (not an RN <Modal>, whose body renders even when hidden). The PIN
+// stays in this component's state only for the request; it is never stored.
+function KeycardSheet() {
+  const [req, setReq] = useState<CardRequest | null>(null);
+  const [pin, setPin] = useState("");
+  const [phase, setPhase] = useState<"pin" | "tap">("pin");
+  const [err, setErr] = useState("");
+  const [nfc, setNfc] = useState<"ok" | "off" | "unsupported" | "">("");
+  useEffect(() => { registerSheet((r) => { setReq(r); setPin(""); setErr(""); setPhase("pin"); }); return () => registerSheet(null); }, []);
+  useEffect(() => {
+    if (!req) return;
+    import("./src/lib/keycard/nfc").then((m) => m.nfcStatus()).then(setNfc).catch(() => setNfc("unsupported"));
+  }, [req]);
+  if (!req) return null;
+  const close = (e?: Error) => { const r = req; setReq(null); setPin(""); if (e) r.reject(e); };
+  const go = async () => {
+    if (pin.length < 4) { setErr("Enter your Keycard PIN"); return; }
+    setErr(""); setPhase("tap");
+    try {
+      const nfcMod = await import("./src/lib/keycard/nfc");
+      const { pairing } = await getKeycardPrefs();
+      const res = await nfcMod.tapExportFormKeys({ pin, pairingPassword: pairing }, req.formIds);
+      crumb("keycard export ok n=" + res.keys.length + " app=" + res.appVersion);
+      const r = req; setReq(null); setPin(""); r.resolve(res.keys);
+    } catch (e: any) {
+      crumb("keycard error " + (e?.code || "") + " " + (e?.message || e));
+      if (e?.code === "cancelled") { close(e); return; }
+      setPhase("pin"); setErr(String(e?.message || e));
+      if (e?.code === "pin") setPin("");
+    }
+  };
+  const cancel = async () => { try { (await import("./src/lib/keycard/nfc")).cancelTap(); } catch { /* */ } close(Object.assign(new Error("Cancelled"), { code: "cancelled" })); };
+  return (
+    <View style={st.sheetWrap}>
+      <View style={st.sheet}>
+        <Text style={st.h2}>{req.title}</Text>
+        {nfc === "unsupported" ? <Banner tone="err" text="This phone has no NFC, so it can't talk to a Keycard." /> : null}
+        {nfc === "off" ? <><Banner tone="warn" text="NFC is turned off." /><Btn label="Open NFC settings" onPress={() => import("./src/lib/keycard/nfc").then((m) => m.openNfcSettings())} style={{ marginTop: 8 }} /></> : null}
+        {phase === "pin" ? (
+          <>
+            <Text style={[st.muted, { marginTop: 8 }]}>{req.formIds.length === 1 ? "The form's key comes from your card; " : `${req.formIds.length} forms' keys come from your card; `}your PIN is used for this tap only and never stored.</Text>
+            <TextInput value={pin} onChangeText={(t) => setPin(t.replace(/\D/g, "").slice(0, 6))} placeholder="Keycard PIN" placeholderTextColor={C.text3}
+              secureTextEntry keyboardType="number-pad" autoFocus style={[st.input, { marginTop: 14, letterSpacing: 6, fontSize: 20, textAlign: "center" }]} onSubmitEditing={go} />
+          </>
+        ) : (
+          <View style={{ alignItems: "center", paddingVertical: 22 }}>
+            <ActivityIndicator color={C.primary} size="large" />
+            <Text style={[st.h2, { marginTop: 16, textAlign: "center" }]}>Hold your Keycard to the back of the phone</Text>
+            <Text style={[st.muted, { marginTop: 6, textAlign: "center" }]}>Keep it still until this closes.</Text>
+          </View>
+        )}
+        {err ? <Banner tone="err" text={err} /> : null}
+        <View style={[st.joinRow, { marginTop: 16, justifyContent: "flex-end" }]}>
+          <Btn label="Cancel" onPress={cancel} />
+          {phase === "pin" ? <Btn label="Continue" primary disabled={nfc === "unsupported" || pin.length < 4} onPress={go} /> : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 // ── Form (creator + respondent) ─────────────────────────────────────────────────
 function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
   const f = snap.state.forms[id];
@@ -353,11 +417,26 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
           <View style={st.badges}>
             <Badge label={f.status === "closed" ? "Closed" : "Open"} fg={f.status === "closed" ? C.text2 : C.ok} bg={f.status === "closed" ? C.raised : C.okSubtle} />
             {f.mine ? <Badge label="Yours" fg={C.primary} bg={C.primarySubtle} /> : null}
+            {f.mine && f.keycard ? <Badge label="Keycard" fg={C.accent} bg={C.warnSubtle} /> : null}
             {f.whitelist?.type === "addresses" ? <Badge label="Members only" fg={C.accent} bg={C.warnSubtle} /> : null}
             {f.contested ? <Badge label="Contested id" fg={C.warn} bg={C.warnSubtle} /> : null}
           </View>
           <Text style={st.meta}>by {shortAddr(f.creator)}{f.createdAt ? "  ·  " + fmtTime(f.createdAt) : ""}</Text>
           {f.description ? <Text style={st.desc}>{f.description}</Text> : null}
+          {f.mine && f.keyMissing ? (
+            <View style={{ marginTop: 14 }}>
+              <Banner tone="warn" text="Answers to this form are sealed to a key from your Keycard, and that key isn't on this phone (new install?). Tap your card to unlock them - every form missing its key at once." />
+              <Btn label="Unlock answers with Keycard" primary onPress={async () => {
+                const ids: string[] = client.formsMissingKeys();
+                try {
+                  const keys = await requestCardKeys(ids, "Unlock answers with Keycard");
+                  let ok = 0, bad = 0;
+                  for (const k of keys) { const r = await client.addFormKey(k.formId, k.privHex); r.ok ? ok++ : bad++; }
+                  toast(bad ? `${ok} unlocked, ${bad} didn't match this card - a different Keycard?` : `Unlocked ${plural(ok, "form", "forms")}`);
+                } catch (e: any) { if (e?.code !== "cancelled") toast(String(e?.message || e)); }
+              }} style={{ marginTop: 8 }} />
+            </View>
+          ) : null}
 
           {f.mine ? (
             <View style={{ marginTop: 18 }}>
@@ -448,8 +527,12 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
   const [qs, setQs] = useState<Draft[]>([{ type: "text", text: "", required: true, optionsText: "" }]);
   const [restrict, setRestrict] = useState(false);
   const [allow, setAllow] = useState("");
+  const [useCard, setUseCard] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
-  const publish = () => {
+  const publish = async () => {
+    if (busy) return;
     if (!title.trim()) { toast("Give the form a title"); return; }
     const questions: any[] = [];
     for (const d of qs) {
@@ -468,12 +551,29 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
       if (!addrs.length) { toast("Add at least one 0x address, or allow anyone"); return; }
       whitelist = { type: "addresses", value: addrs.join(",") };
     }
-    const r = client.createForm({ title: title.trim(), description: desc.trim(), questions, whitelist });
-    if (r.ok) { toast("Form published"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+    const def = { title: title.trim(), description: desc.trim(), questions, whitelist };
+    if (!useCard) {
+      const r = client.createForm(def);
+      if (r.ok) { toast("Form published"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+      return;
+    }
+    // Keycard: the form's key is exported from the card BEFORE publishing, and stored here
+    // first - a form never goes out without its key on this phone.
+    setBusy(true);
+    try {
+      const id = client.newFormId();
+      const [k] = await requestCardKeys([id], "Seal this form with your Keycard");
+      const saved = await client.addFormKey(id, k.privHex);
+      if (!saved.ok) { toast(saved.error); return; }
+      const r = client.createForm({ ...def, id }, { publicKey: k.pubHex });
+      if (r.ok) { toast("Form published - answers open only with your Keycard's key"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+    } catch (e: any) {
+      if (e?.code !== "cancelled") toast(String(e?.message || e));
+    } finally { setBusy(false); }
   };
   return (
     <View style={st.fill}>
-      <Header title="New form" onBack={pop} right={<Btn label="Publish" primary onPress={publish} />} />
+      <Header title="New form" onBack={pop} right={<Btn label={busy ? "Publishing…" : "Publish"} primary disabled={busy} onPress={publish} />} />
       <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
           <Label>TITLE</Label>
@@ -518,7 +618,18 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
             ))}
           </View>
           {restrict ? <TextInput value={allow} onChangeText={setAllow} multiline autoCapitalize="none" placeholder="0x addresses, one per line (respondents find theirs under Identity)" placeholderTextColor={C.text3} style={[st.input, { minHeight: 80, textAlignVertical: "top", fontFamily: MONO, fontSize: 12, marginTop: 10 }]} /> : null}
-          <Text style={[st.muted, { marginTop: 14 }]}>The form (title, questions, who may answer) is public on the network. Answers are encrypted to your key.</Text>
+          <View style={{ marginTop: 22 }}><Label>ANSWERS OPEN WITH</Label></View>
+          <View style={st.chips}>
+            {[{ c: false, l: "A key on this phone" }, { c: true, l: "My Keycard" }].map((x) => (
+              <Pressable key={x.l} onPress={() => setUseCard(x.c)} style={[st.chip, useCard === x.c && st.chipOn]}>
+                <Text style={[st.chipT, useCard === x.c && { color: C.primary }]}>{x.l}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={[st.muted, { marginTop: 8 }]}>{useCard
+            ? "One tap when you publish. The form gets its own key from your card; reinstalling or switching phones only needs another tap. Other forms and your card's other keys stay on the card."
+            : "Each form gets its own key, derived from this phone's identity key."}</Text>
+          <Text style={[st.muted, { marginTop: 14 }]}>The form (title, questions, who may answer) is public on the network. Answers are encrypted to this form's key.</Text>
           <View style={{ height: 40 }} />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -616,6 +727,7 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
           </View>
           <Switch value={shared} onValueChange={async (v) => { setShared(v); await setSharedNode(v); toast("Applies after restarting WhisperBox"); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
         </View>
+        <KeycardSettings toast={toast} snap={snap} />
         <Btn label="Ask peers for anything I'm missing" onPress={() => { pullHistory(); toast("Catch-up requested"); }} style={{ marginTop: 12 }} />
         <Btn label="Copy debug log" onPress={async () => {
           await Clipboard.setStringAsync(`WhisperBox ${snap.deviceId}\nlastError: ${client.lastError || "-"}\ndiag: ${JSON.stringify(snap.diagnostics)}\n--- this session ---\n${currentLog()}\n--- previous session ---\n${previousLog()}`);
@@ -627,7 +739,36 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
   );
 }
 
+function KeycardSettings({ toast, snap }: { toast: (m: string) => void; snap: any }) {
+  const [use, setUse] = useState(false);
+  const [pairing, setPairing] = useState("");
+  const [showAdv, setShowAdv] = useState(false);
+  useEffect(() => { getKeycardPrefs().then((p) => { setUse(p.useForNewForms); setPairing(p.pairing); }).catch(() => {}); }, []);
+  const cardForms = Object.values(snap.state.forms).filter((f: any) => f.mine && f.keycard).length;
+  return (
+    <>
+      <View style={{ marginTop: 18 }}><Label>KEYCARD</Label></View>
+      <View style={[st.card, st.cardHead]}>
+        <View style={{ flex: 1, paddingRight: 12 }}>
+          <Text style={{ color: C.text, fontWeight: "600" }}>Seal new forms with my Keycard</Text>
+          <Text style={st.muted}>Each form's key is exported from your card's encryption keys (one tap when publishing). {cardForms ? `${plural(cardForms, "form uses", "forms use")} a Keycard key on this phone.` : ""}</Text>
+        </View>
+        <Switch value={use} onValueChange={async (v) => { setUse(v); await setKeycardPrefs({ useForNewForms: v }); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
+      </View>
+      <Pressable onPress={() => setShowAdv((x) => !x)}><Text style={[st.muted, { marginTop: 8 }]}>{showAdv ? "▾" : "▸"} Pairing password (older cards)</Text></Pressable>
+      {showAdv ? (
+        <View style={[st.joinRow, { marginTop: 6 }]}>
+          <TextInput value={pairing} onChangeText={setPairing} autoCapitalize="none" secureTextEntry placeholder="KeycardDefaultPairing" placeholderTextColor={C.text3} style={[st.input, { flex: 1 }]} />
+          <Btn label="Save" onPress={async () => { await setKeycardPrefs({ pairing: pairing.trim() }); toast("Pairing password saved"); }} />
+        </View>
+      ) : null}
+    </>
+  );
+}
+
 const st = StyleSheet.create({
+  sheetWrap: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: C.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: C.border, padding: 20, paddingBottom: 28 },
   fill: { flex: 1, backgroundColor: C.bg },
   center: { alignItems: "center", justifyContent: "center" },
   pad: { padding: 18 },

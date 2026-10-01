@@ -1,0 +1,29 @@
+diff --git a/node_modules/react-native-keycard/android/src/main/java/com/keycard/KeycardModule.kt b/node_modules/react-native-keycard/android/src/main/java/com/keycard/KeycardModule.kt
+index 74fae43..56041e8 100644
+--- a/node_modules/react-native-keycard/android/src/main/java/com/keycard/KeycardModule.kt
++++ b/node_modules/react-native-keycard/android/src/main/java/com/keycard/KeycardModule.kt
+@@ -70,7 +70,9 @@ class KeycardModule(reactContext: ReactApplicationContext) : NativeKeycardSpec(r
+       response.putString("data", @OptIn(kotlin.ExperimentalStdlibApi::class) if(resp != null) resp.toHexString() else "");
+       response.putString("state", state);
+       promise.resolve(response);
+-    } catch(e: IOException) {
++    } catch(e: Exception) {
++      // WhisperBox patch: was IOException only - a card pulled away mid-command left a null tag
++      // (NullPointerException) escaping a TurboModule method. Report it as a failed send instead.
+       promise.resolve(response);
+     }
+   }
+diff --git a/node_modules/react-native-keycard/android/src/main/java/com/keycard/NFCCardChannel.kt b/node_modules/react-native-keycard/android/src/main/java/com/keycard/NFCCardChannel.kt
+index 3a49cc2..56351bc 100644
+--- a/node_modules/react-native-keycard/android/src/main/java/com/keycard/NFCCardChannel.kt
++++ b/node_modules/react-native-keycard/android/src/main/java/com/keycard/NFCCardChannel.kt
+@@ -136,7 +136,8 @@ class NFCCardChannel(keycardEvents: Map<String, KFunction0<Unit>>): BroadcastRec
+       val apdu: ByteArray = @OptIn(kotlin.ExperimentalStdlibApi::class) cmd.hexToByteArray();
+ 
+       try {
+-        return this.isoDep!!.transceive(apdu);
++        val dep = this.isoDep ?: throw IOException("Tag was lost") // WhisperBox patch: was isoDep!!
++        return dep.transceive(apdu);
+       } catch(e: SecurityException) {
+         throw IOException("Tag disconnected", e);
+       } catch(e: IllegalArgumentException) {
