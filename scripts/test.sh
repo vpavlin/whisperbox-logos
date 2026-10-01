@@ -48,6 +48,6 @@ export WB_OUT="$WB_TMP/render"
 step "7/7 interop: JS client vs C++ core"
 ( cd "$ROOT/third_party/loam-sync" && { [ -d node_modules ] || npm install --silent --ignore-scripts; } )
 "$ROOT/whisperbox_core/test/run-bridge-build.sh" "$WB_TMP/wb-bridge" >/dev/null
-( cd "$ROOT/packages/client" && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
+( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
 
 printf '\nALL LAYERS GREEN\n'

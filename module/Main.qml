@@ -66,9 +66,19 @@ Item {
     ]
 
     // ── core plumbing ──
-    function callCore(m, a) {
-        if (typeof logos === "undefined" || !logos.callModule) return "";
-        return String(logos.callModule("whisperbox_core", m, a || []));
+    // The ONLY way this view talks to the core: async (logos.callModuleAsync), never the
+    // blocking callModule (a synchronous IPC with a 20 s timeout freezes the whole view).
+    // Hosts without the async API get a deferred call so at least the frame paints.
+    property int callTimeoutMs: 20000
+    function callVia(m, a, cb) {
+        var done = function (r) { try { cb(r === undefined || r === null ? "" : String(r)); } catch (e) { console.warn("whisperbox callback", m, e); } };
+        if (typeof logos === "undefined" || !logos) { Qt.callLater(function () { done(""); }); return; }
+        if (typeof logos.callModuleAsync === "function") {
+            try { logos.callModuleAsync("whisperbox_core", m, a || [], done, root.callTimeoutMs); }
+            catch (e) { Qt.callLater(function () { done(""); }); }
+            return;
+        }
+        Qt.callLater(function () { var r = ""; try { r = logos.callModule("whisperbox_core", m, a || []); } catch (e) {} done(r); });
     }
     // Host results may arrive JSON-string-wrapped (once or twice) - peel, then parse.
     function parse(raw) {
@@ -78,15 +88,37 @@ Item {
         try { return JSON.parse(s); } catch (e) { return null; }
     }
     function applySnapshot(o) { if (o && o.state) root.st = o; }
-    function refresh() { applySnapshot(parse(callCore("snapshot", []))); }
-    // Mutation: call, refresh, toast the outcome. Returns the result object on ok.
-    function act(m, a, okMsg) {
-        var r = parse(callCore(m, a));
-        refresh();
-        if (r && r.ok) { if (okMsg) toast(okMsg); return r; }
-        toast(r && r.error ? r.error : "Request failed - is whisperbox_core loaded?");
-        return null;
+    // Single-flight snapshot poll: never stack requests on a slow core; a stuck call is
+    // abandoned after 45 s so one lost reply can't stop the poll forever.
+    property bool refreshBusy: false
+    property bool refreshAgain: false
+    property double refreshSince: 0
+    property int refreshMisses: 0
+    function refresh() {
+        if (root.refreshBusy && Date.now() - root.refreshSince < 45000) { root.refreshAgain = true; return; }
+        root.refreshBusy = true; root.refreshSince = Date.now();
+        callVia("snapshot", [], function (raw) {
+            var o = parse(raw);
+            if (o && o.state) { root.st = o; root.refreshMisses = 0; } else root.refreshMisses++;
+            root.refreshBusy = false;
+            if (root.refreshAgain) { root.refreshAgain = false; refresh(); }
+        });
     }
+    // Mutation: call, then refresh and toast the outcome; cb(result) only on success.
+    // One in-flight call per action name guards against double taps.
+    property var inFlight: ({})
+    function act(m, a, okMsg, cb) {
+        if (root.inFlight[m]) return;
+        var f = Object.assign({}, root.inFlight); f[m] = true; root.inFlight = f;
+        callVia(m, a, function (raw) {
+            var g = Object.assign({}, root.inFlight); delete g[m]; root.inFlight = g;
+            var r = parse(raw);
+            refresh();
+            if (r && r.ok) { if (okMsg) toast(okMsg); if (cb) cb(r); return; }
+            toast(r && r.error ? r.error : (raw === "" ? "WhisperBox core did not answer - is whisperbox_core loaded?" : "Request failed"));
+        });
+    }
+    function busy(m) { return !!root.inFlight[m]; }
     function toast(msg) { root.toastMsg = String(msg); toastTimer.restart(); }
     function copyText(t, what) {
         clip.text = String(t || ""); clip.selectAll(); clip.copy(); clip.deselect();
@@ -162,12 +194,11 @@ Item {
         var t = String(joinField.text || "").trim();
         if (!t) return;
         var arg = t.indexOf("whisperbox://") === 0 ? t : "whisperbox://form?id=" + t;
-        var r = act("importForm", [arg], "");
-        if (r) {
+        act("importForm", [arg], "", function (r) {
             joinField.text = "";
             selectForm(String(r.formId || "").toLowerCase());
             toast(r.pending ? "Form added - waiting for it to sync" : "Form opened");
-        }
+        });
     }
     function setAnswer(qid, v) { var a = Object.assign({}, root.answers); a[qid] = v; root.answers = a; }
     function toggleChoice(qid, idx) {
@@ -191,30 +222,36 @@ Item {
             if (v === undefined) v = normType(q.type) === "checkbox" ? [] : (normType(q.type) === "radioButtons" ? null : "");
             arr.push({ questionId: q.id, value: v });
         }
-        if (act("submitResponse", [f.id, JSON.stringify(arr)], "Response sealed and sent")) {
+        act("submitResponse", [f.id, JSON.stringify(arr)], "Response sealed and sent", function () {
             root.answers = ({}); root.showErrors = false;
-        }
+        });
     }
     function confirmResponse(addr) { act("confirmResponse", [root.selectedId, addr], "Receipt sent"); }
     function closeSelected() { act("closeForm", [root.selectedId], "Form closed - no new responses"); }
     function openShare() {
-        var u = parse(callCore("shareUri", [root.selectedId]));
-        if (!u || !u.ok) { toast(u && u.error ? u.error : "Could not build link"); return; }
-        root.shareText = u.uri;
-        var q = parse(callCore("shareQr", [root.selectedId]));
-        root.qr = (q && q.ok) ? q : null;
-        root.showShare = true;
-        qrCanvas.requestPaint();
+        var id = root.selectedId;
+        callVia("shareUri", [id], function (raw) {
+            var u = parse(raw);
+            if (!u || !u.ok) { toast(u && u.error ? u.error : "Could not build link"); return; }
+            root.shareText = u.uri; root.qr = null; root.showShare = true;
+            callVia("shareQr", [id], function (rq) {
+                var q = parse(rq);
+                root.qr = (q && q.ok) ? q : null;
+                qrCanvas.requestPaint();
+            });
+        });
     }
     function openCsv() {
-        var r = parse(callCore("exportCsv", [root.selectedId]));
-        if (!r || !r.ok) { toast(r && r.error ? r.error : "Export failed"); return; }
-        root.csvText = r.csv; root.showCsv = true;
+        callVia("exportCsv", [root.selectedId], function (raw) {
+            var r = parse(raw);
+            if (!r || !r.ok) { toast(r && r.error ? r.error : "Export failed"); return; }
+            root.csvText = r.csv; root.showCsv = true;
+        });
     }
     function resync() { act("resync", [], "Asked peers for missing forms"); }
     function importKey() {
         var k = String(keyField.text || "").trim().replace(/^0x/, "");
-        if (act("importIdentity", [k], "Identity imported")) keyField.text = "";
+        act("importIdentity", [k], "Identity imported", function () { keyField.text = ""; });
     }
 
     // ── create-form draft ──
@@ -252,8 +289,9 @@ Item {
             if (addrs.length === 0) { toast("Add at least one 0x address, or turn off the restriction"); return; }
             wl = { type: "addresses", value: addrs.join(",").toLowerCase() };
         }
-        var r = act("createForm", [JSON.stringify({ title: title, description: root.draftDescription.trim(), questions: qs, whitelist: wl })], "Form published");
-        if (r) { root.showCreate = false; selectForm(String(r.formId || "").toLowerCase()); }
+        act("createForm", [JSON.stringify({ title: title, description: root.draftDescription.trim(), questions: qs, whitelist: wl })], "Form published", function (r) {
+            root.showCreate = false; selectForm(String(r.formId || "").toLowerCase());
+        });
     }
 
     Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
@@ -284,7 +322,7 @@ Item {
         color: primary ? (btnMa.containsMouse && active ? "#9187f9" : root.wbPrimary) : (btnMa.containsMouse && active ? root.wbBorder : root.wbSurfaceRaised)
         border.color: primary ? "transparent" : (danger ? root.wbError : root.wbBorder)
         border.width: 1
-        Text {
+        Text { textFormat: Text.PlainText;
             id: btnT
             anchors.centerIn: parent
             text: btn.label
@@ -302,9 +340,9 @@ Item {
         implicitHeight: 20
         radius: 10
         color: bg
-        Text { id: bT; anchors.centerIn: parent; text: parent.label; font.pixelSize: 10; font.weight: Font.DemiBold; color: parent.fg }
+        Text { textFormat: Text.PlainText; id: bT; anchors.centerIn: parent; text: parent.label; font.pixelSize: 10; font.weight: Font.DemiBold; color: parent.fg }
     }
-    component SectionLabel: Text { font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.6; color: root.wbTextTert }
+    component SectionLabel: Text { textFormat: Text.PlainText; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.6; color: root.wbTextTert }
     component LockIcon: Item {
         property color tint: root.wbPrimary
         implicitWidth: 16; implicitHeight: 19
@@ -351,8 +389,8 @@ Item {
                     LockIcon {}
                     ColumnLayout {
                         spacing: 0
-                        Text { text: "WhisperBox"; font.pixelSize: 16; font.weight: Font.Bold; color: root.wbText }
-                        Text { text: "end-to-end encrypted forms"; font.pixelSize: 11; color: root.wbTextTert }
+                        Text { textFormat: Text.PlainText; text: "WhisperBox"; font.pixelSize: 16; font.weight: Font.Bold; color: root.wbText }
+                        Text { textFormat: Text.PlainText; text: "end-to-end encrypted forms"; font.pixelSize: 11; color: root.wbTextTert }
                     }
                 }
 
@@ -419,7 +457,7 @@ Item {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 1
-                                    Text {
+                                    Text { textFormat: Text.PlainText;
                                         Layout.fillWidth: true
                                         text: row.f ? (row.f.title || "(untitled)") : (modelData.id || "")
                                         font.pixelSize: 13
@@ -427,7 +465,7 @@ Item {
                                         color: root.wbText
                                         elide: Text.ElideRight
                                     }
-                                    Text {
+                                    Text { textFormat: Text.PlainText;
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                         font.pixelSize: 11
@@ -451,7 +489,7 @@ Item {
                             MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selectForm(modelData.id) }
                         }
                     }
-                    Text {
+                    Text { textFormat: Text.PlainText;
                         visible: root.sidebarRows.length === 0
                         anchors.centerIn: parent
                         width: parent.width - 20
@@ -474,14 +512,14 @@ Item {
                         anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         spacing: 8
-                        Rectangle { width: 8; height: 8; radius: 4; color: root.nodeReady ? root.wbSuccess : root.wbWarning }
+                        Rectangle { width: 8; height: 8; radius: 4; color: root.refreshMisses >= 3 ? root.wbError : (root.nodeReady ? root.wbSuccess : root.wbWarning) }
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 0
-                            Text { text: root.nodeReady ? "Connected" : "Connecting..."; font.pixelSize: 11; font.weight: Font.DemiBold; color: root.wbTextSec }
-                            Text { text: "You: " + root.shortAddr(root.myAddress); font.pixelSize: 11; font.family: "monospace"; color: root.wbTextTert }
+                            Text { textFormat: Text.PlainText; text: root.refreshMisses >= 3 ? "Can't reach the WhisperBox core" : (root.nodeReady ? "Connected" : "Connecting..."); font.pixelSize: 11; font.weight: Font.DemiBold; color: root.refreshMisses >= 3 ? root.wbError : root.wbTextSec }
+                            Text { textFormat: Text.PlainText; text: "You: " + root.shortAddr(root.myAddress); font.pixelSize: 11; font.family: "monospace"; color: root.wbTextTert }
                         }
-                        Text { text: "Identity"; font.pixelSize: 11; color: root.wbPrimary }
+                        Text { textFormat: Text.PlainText; text: "Identity"; font.pixelSize: 11; color: root.wbPrimary }
                     }
                     MouseArea { id: footMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.showIdentity = true }
                 }
@@ -501,8 +539,8 @@ Item {
                 width: Math.min(420, parent.width - 48)
                 spacing: 10
                 LockIcon { Layout.alignment: Qt.AlignHCenter; tint: root.wbTextTert }
-                Text { Layout.alignment: Qt.AlignHCenter; text: "Select a form"; font.pixelSize: 18; font.weight: Font.DemiBold; color: root.wbTextSec }
-                Text {
+                Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter; text: "Select a form"; font.pixelSize: 18; font.weight: Font.DemiBold; color: root.wbTextSec }
+                Text { textFormat: Text.PlainText;
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
@@ -518,8 +556,8 @@ Item {
                 anchors.centerIn: parent
                 width: Math.min(440, parent.width - 48)
                 spacing: 12
-                Text { Layout.alignment: Qt.AlignHCenter; text: "Waiting for the form to sync"; font.pixelSize: 18; font.weight: Font.DemiBold; color: root.wbTextSec }
-                Text {
+                Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter; text: "Waiting for the form to sync"; font.pixelSize: 18; font.weight: Font.DemiBold; color: root.wbTextSec }
+                Text { textFormat: Text.PlainText;
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
@@ -550,7 +588,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 12
-                        Text {
+                        Text { textFormat: Text.PlainText;
                             Layout.fillWidth: true
                             text: root.sel ? (root.sel.title || "(untitled)") : ""
                             font.pixelSize: 24
@@ -574,7 +612,7 @@ Item {
                             label: "Members only"; fg: root.wbAccent; bg: root.wbWarningSubtle
                         }
                         Badge { visible: !!(root.sel && root.sel.contested); label: "Contested id"; fg: root.wbWarning; bg: root.wbWarningSubtle }
-                        Text {
+                        Text { textFormat: Text.PlainText;
                             height: 20
                             verticalAlignment: Text.AlignVCenter
                             text: root.sel ? "by " + root.shortAddr(root.sel.creator) + (root.sel.createdAt ? "  ·  " + root.fmtTime(root.sel.createdAt) : "") : ""
@@ -582,7 +620,7 @@ Item {
                             color: root.wbTextTert
                         }
                     }
-                    Text {
+                    Text { textFormat: Text.PlainText;
                         Layout.fillWidth: true
                         visible: !!(root.sel && root.sel.description)
                         text: root.sel ? (root.sel.description || "") : ""
@@ -614,8 +652,8 @@ Item {
                                     ColumnLayout {
                                         anchors.centerIn: parent
                                         spacing: 2
-                                        Text { Layout.alignment: Qt.AlignHCenter; text: String(modelData.n); font.pixelSize: 28; font.weight: Font.Bold; color: modelData.c }
-                                        Text { Layout.alignment: Qt.AlignHCenter; text: modelData.l; font.pixelSize: 11; color: root.wbTextTert }
+                                        Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter; text: String(modelData.n); font.pixelSize: 28; font.weight: Font.Bold; color: modelData.c }
+                                        Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter; text: modelData.l; font.pixelSize: 11; color: root.wbTextTert }
                                     }
                                 }
                             }
@@ -633,7 +671,7 @@ Item {
                         }
 
                         SectionLabel { text: "RESPONSES (" + root.selResponses.length + ")" }
-                        Text {
+                        Text { textFormat: Text.PlainText;
                             visible: root.selResponses.length === 0
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
@@ -665,14 +703,14 @@ Item {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: 8
-                                        Text {
+                                        Text { textFormat: Text.PlainText;
                                             text: root.shortAddr(respCard.resp.respondent)
                                             font.pixelSize: 12
                                             font.family: "monospace"
                                             color: root.wbTextSec
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(respCard.resp.respondent, "Address") }
                                         }
-                                        Text { text: root.fmtTime(respCard.resp.submittedAt); font.pixelSize: 11; color: root.wbTextTert }
+                                        Text { textFormat: Text.PlainText; text: root.fmtTime(respCard.resp.submittedAt); font.pixelSize: 11; color: root.wbTextTert }
                                         Item { Layout.fillWidth: true }
                                         Badge { visible: !!respCard.resp.confirmed; label: "Receipt sent" }
                                         WbButton {
@@ -688,14 +726,14 @@ Item {
                                             Layout.fillWidth: true
                                             spacing: 2
                                             property var q: root.questionFor(root.sel, modelData.questionId)
-                                            Text {
+                                            Text { textFormat: Text.PlainText;
                                                 Layout.fillWidth: true
                                                 text: parent.q ? parent.q.text : modelData.questionId
                                                 font.pixelSize: 11
                                                 color: root.wbTextTert
                                                 wrapMode: Text.WordWrap
                                             }
-                                            Text {
+                                            Text { textFormat: Text.PlainText;
                                                 Layout.fillWidth: true
                                                 property string v: root.answerText(parent.q, modelData.value)
                                                 text: v.length ? v : "(no answer)"
@@ -727,7 +765,7 @@ Item {
                             color: danger ? root.wbErrorSubtle : (good ? root.wbSuccessSubtle : root.wbSurfaceRaised)
                             border.color: danger ? root.wbError : (good ? "#2a4d3a" : root.wbBorder)
                             border.width: 1
-                            Text {
+                            Text { textFormat: Text.PlainText;
                                 id: bannerT
                                 anchors.fill: parent
                                 anchors.margins: 13
@@ -759,7 +797,7 @@ Item {
                                 property string qt: root.normType(modelData.type)
                                 property bool invalid: root.showErrors && root.isMissing(modelData)
 
-                                Text {
+                                Text { textFormat: Text.PlainText;
                                     Layout.fillWidth: true
                                     text: (index + 1) + ". " + qBlock.q.text + (qBlock.q.required ? "  *" : "")
                                     wrapMode: Text.WordWrap
@@ -829,7 +867,7 @@ Item {
                                                 border.width: 2
                                                 Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: opt.multi ? 2 : 4; color: root.wbPrimary; visible: opt.on }
                                             }
-                                            Text { Layout.fillWidth: true; text: String(modelData); font.pixelSize: 13; color: root.wbText; elide: Text.ElideRight }
+                                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: String(modelData); font.pixelSize: 13; color: root.wbText; elide: Text.ElideRight }
                                         }
                                         MouseArea {
                                             id: optMa
@@ -848,7 +886,8 @@ Item {
                             Layout.fillWidth: true
                             implicitHeight: 46
                             primary: true
-                            label: "Seal and send answers"
+                            label: root.busy("submitResponse") ? "Sealing..." : "Seal and send answers"
+                            active: !root.busy("submitResponse")
                             onClicked: root.doSubmit()
                         }
 
@@ -865,7 +904,7 @@ Item {
                                 anchors.margins: 12
                                 spacing: 10
                                 LockIcon { tint: root.wbSuccess; Layout.alignment: Qt.AlignTop }
-                                Text {
+                                Text { textFormat: Text.PlainText;
                                     Layout.fillWidth: true
                                     text: "Answers are encrypted to the creator's key before they leave this device. Everyone else on the network - including peers that relay and store them - sees only an opaque blob. The receipt the creator sends back can't be linked to your address."
                                     wrapMode: Text.WordWrap
@@ -909,7 +948,7 @@ Item {
             anchors.top: parent.top
             anchors.margins: 24
             spacing: 14
-            Text { text: "Share form"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
+            Text { textFormat: Text.PlainText; text: "Share form"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
             Rectangle {
                 Layout.alignment: Qt.AlignHCenter
                 width: 196; height: 196
@@ -936,7 +975,7 @@ Item {
             InputBox {
                 Layout.fillWidth: true
                 implicitHeight: 40
-                Text {
+                Text { textFormat: Text.PlainText;
                     anchors.fill: parent
                     anchors.leftMargin: 12
                     anchors.rightMargin: 12
@@ -948,7 +987,7 @@ Item {
                     elide: Text.ElideMiddle
                 }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
@@ -980,8 +1019,8 @@ Item {
             anchors.fill: parent
             anchors.margins: 24
             spacing: 12
-            Text { text: "Responses as CSV"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
-            Text {
+            Text { textFormat: Text.PlainText; text: "Responses as CSV"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
+            Text { textFormat: Text.PlainText;
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
@@ -1034,7 +1073,7 @@ Item {
             anchors.top: parent.top
             anchors.margins: 24
             spacing: 12
-            Text { text: "Identity & network"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
+            Text { textFormat: Text.PlainText; text: "Identity & network"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
             SectionLabel { text: "YOUR ADDRESS" }
             RowLayout {
                 Layout.fillWidth: true
@@ -1042,7 +1081,7 @@ Item {
                 InputBox {
                     Layout.fillWidth: true
                     implicitHeight: 38
-                    Text {
+                    Text { textFormat: Text.PlainText;
                         anchors.fill: parent
                         anchors.leftMargin: 12
                         anchors.rightMargin: 12
@@ -1056,7 +1095,7 @@ Item {
                 }
                 WbButton { label: "Copy"; onClicked: root.copyText(root.myAddress, "Address") }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
@@ -1079,8 +1118,8 @@ Item {
                     ]
                     ColumnLayout {
                         spacing: 0
-                        Text { text: modelData.k; font.pixelSize: 10; color: root.wbTextTert }
-                        Text { text: modelData.v; font.pixelSize: 12; font.family: "monospace"; color: root.wbTextSec }
+                        Text { textFormat: Text.PlainText; text: modelData.k; font.pixelSize: 10; color: root.wbTextTert }
+                        Text { textFormat: Text.PlainText; text: modelData.v; font.pixelSize: 12; font.family: "monospace"; color: root.wbTextSec }
                     }
                 }
             }
@@ -1111,7 +1150,7 @@ Item {
                 }
                 WbButton { label: "Import"; active: String(keyField.text || "").length >= 64; onClicked: root.importKey() }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
@@ -1144,7 +1183,7 @@ Item {
             anchors.margins: 22
             spacing: 12
 
-            Text { text: "New form"; font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
+            Text { textFormat: Text.PlainText; text: "New form"; font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
 
             Flickable {
                 id: createFlick
@@ -1226,7 +1265,7 @@ Item {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 8
-                                    Text { text: "Q" + (index + 1); font.pixelSize: 12; font.weight: Font.Bold; color: root.wbPrimary }
+                                    Text { textFormat: Text.PlainText; text: "Q" + (index + 1); font.pixelSize: 12; font.weight: Font.Bold; color: root.wbPrimary }
                                     InputBox {
                                         Layout.fillWidth: true
                                         implicitHeight: 36
@@ -1244,7 +1283,7 @@ Item {
                                             onTextChanged: if (text !== String(dq.d.text || "")) root.setDraft(dq.qi, "text", text)
                                         }
                                     }
-                                    Text {
+                                    Text { textFormat: Text.PlainText;
                                         text: "Remove"
                                         visible: root.draftQuestions.length > 1
                                         font.pixelSize: 11
@@ -1265,7 +1304,7 @@ Item {
                                             color: on ? root.wbPrimarySubtle : "transparent"
                                             border.color: on ? root.wbPrimary : root.wbBorder
                                             border.width: 1
-                                            Text { id: chipT; anchors.centerIn: parent; text: modelData.label; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                            Text { textFormat: Text.PlainText; id: chipT; anchors.centerIn: parent; text: modelData.label; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, "type", modelData.t) }
                                         }
                                     }
@@ -1276,7 +1315,7 @@ Item {
                                         color: dq.d.required ? root.wbWarningSubtle : "transparent"
                                         border.color: dq.d.required ? root.wbAccent : root.wbBorder
                                         border.width: 1
-                                        Text { id: reqT; anchors.centerIn: parent; text: dq.d.required ? "Required" : "Optional"; font.pixelSize: 11; color: dq.d.required ? root.wbAccent : root.wbTextSec }
+                                        Text { textFormat: Text.PlainText; id: reqT; anchors.centerIn: parent; text: dq.d.required ? "Required" : "Optional"; font.pixelSize: 11; color: dq.d.required ? root.wbAccent : root.wbTextSec }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, "required", !dq.d.required) }
                                     }
                                 }
@@ -1318,7 +1357,7 @@ Item {
                                 color: on ? root.wbPrimarySubtle : "transparent"
                                 border.color: on ? root.wbPrimary : root.wbBorder
                                 border.width: 1
-                                Text { id: wT; anchors.centerIn: parent; text: modelData.l; font.pixelSize: 12; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                Text { textFormat: Text.PlainText; id: wT; anchors.centerIn: parent; text: modelData.l; font.pixelSize: 12; color: parent.on ? root.wbPrimary : root.wbTextSec }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftRestrict = modelData.r }
                             }
                         }
@@ -1343,7 +1382,7 @@ Item {
                             }
                         }
                     }
-                    Text {
+                    Text { textFormat: Text.PlainText;
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         font.pixelSize: 12
@@ -1357,7 +1396,7 @@ Item {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Cancel"; onClicked: root.showCreate = false }
-                WbButton { primary: true; label: "Publish form"; onClicked: root.doCreate() }
+                WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish form"; active: !root.busy("createForm"); onClicked: root.doCreate() }
             }
         }
     }
@@ -1375,7 +1414,7 @@ Item {
         border.color: root.wbBorder
         border.width: 1
         z: 20
-        Text {
+        Text { textFormat: Text.PlainText;
             id: toastT
             anchors.centerIn: parent
             width: parent.width - 32

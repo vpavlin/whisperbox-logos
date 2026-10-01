@@ -47,6 +47,27 @@ static bool isHex(const std::string& s, size_t len) {
     return true;
 }
 
+// Crash-safe file write: write <path>.tmp, then rename over <path> (atomic on POSIX). A
+// module killed mid-write (Basecamp quitting during sync) leaves the old file intact
+// instead of a truncated one that the next start would read as corrupt.
+static bool writeAtomic(const std::string& path, const std::string& content) {
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
+        if (!f) return false;
+        f << content;
+        f.flush();
+        if (!f) return false;
+    }
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+// Move an unreadable file aside (never overwrite it): the data may still be recoverable.
+static void quarantine(const std::string& path) {
+    const std::string to = path + ".corrupt-" + std::to_string((long long)std::time(nullptr));
+    std::rename(path.c_str(), to.c_str());
+    fprintf(stderr, "WHISPERBOX moved unreadable %s to %s\n", path.c_str(), to.c_str());
+}
+
 static std::string sha16(const std::string& s) {
     // ONE named string: building Bytes from two separate temporaries' begin()/end()
     // mixes iterators of different objects (UB -> std::length_error in practice).
@@ -135,7 +156,7 @@ void WhisperboxCoreImpl::onContextReady() {
         d = trim(d);
         if (d.empty() || d == "whisperbox-core") {
             d = "wb-" + randomHex(6);
-            std::ofstream of(m_dataDir + "/device_id.txt", std::ios::trunc); if (of) of << d;
+            writeAtomic(m_dataDir + "/device_id.txt", d);
         }
         m_deviceId = d;
     }
@@ -207,9 +228,13 @@ void WhisperboxCoreImpl::loadIdentity() {
             json o = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
             m_signId = whisperbox::identityFromPriv(whisperbox::fromHex(o.value("privHex", "")));
             if (m_signId.valid) return;
-        } catch (...) { /* fall through to generate */ }
+        } catch (...) { /* unreadable */ }
+        // The file exists but is unreadable: it holds the ONLY key that opens every answer
+        // sealed to this creator. Move it aside (recoverable) - never overwrite it.
+        f.close();
+        quarantine(m_dataDir + "/identity.json");
     }
-    // First run: generate a keypair.
+    // First run (or the old file was quarantined): generate a keypair.
     std::string priv = randomHex(32);
     m_signId = whisperbox::identityFromPriv(whisperbox::fromHex(priv));
     if (!m_signId.valid) { fprintf(stderr, "WHISPERBOX identity generation failed\n"); return; }
@@ -218,7 +243,7 @@ void WhisperboxCoreImpl::loadIdentity() {
 }
 void WhisperboxCoreImpl::saveIdentity() {
     json o = {{"privHex", whisperbox::toHex(m_signId.priv)}, {"pubHex", m_signId.pubHex}, {"address", m_signId.address}};
-    std::ofstream f(m_dataDir + "/identity.json", std::ios::trunc); if (f) f << o.dump();
+    writeAtomic(m_dataDir + "/identity.json", o.dump());
 }
 void WhisperboxCoreImpl::loadLog() {
     std::ifstream f(m_dataDir + "/events.json");
@@ -226,7 +251,12 @@ void WhisperboxCoreImpl::loadLog() {
     try {
         json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
         if (a.is_array()) for (auto& e : a) if (e.is_object() && e.contains("id")) m_log.push_back(e);
-    } catch (...) { fprintf(stderr, "WHISPERBOX events.json corrupt — starting empty\n"); }
+    } catch (...) {
+        // Never let the next save overwrite it: keep the unreadable file for recovery.
+        f.close();
+        quarantine(m_dataDir + "/events.json");
+        m_log.clear();
+    }
     // Repair logs written by <= 0.1.x: (1) drop UNSIGNED form.publish placeholders
     // left by importForm — they shadowed the creator's signed event forever (same
     // id, first copy wins) so the form never got its questions/key; (2) re-sort
@@ -244,7 +274,7 @@ void WhisperboxCoreImpl::loadLog() {
     if (changed) { fprintf(stderr, "WHISPERBOX log repaired %zu -> %zu events\n", before, m_log.size()); saveLog(); }
 }
 void WhisperboxCoreImpl::saveLog() {
-    std::ofstream f(m_dataDir + "/events.json", std::ios::trunc); if (f) f << json(m_log).dump();
+    writeAtomic(m_dataDir + "/events.json", json(m_log).dump());
 }
 void WhisperboxCoreImpl::loadWatched() {
     m_watched.clear();
@@ -256,7 +286,7 @@ void WhisperboxCoreImpl::loadWatched() {
 }
 void WhisperboxCoreImpl::saveWatched() {
     json a = json::array(); for (auto& id : m_watched) a.push_back(id);
-    std::ofstream f(m_dataDir + "/watched.json", std::ios::trunc); if (f) f << a.dump();
+    writeAtomic(m_dataDir + "/watched.json", a.dump());
 }
 void WhisperboxCoreImpl::loadPins() {
     m_pinned.clear();
@@ -268,7 +298,7 @@ void WhisperboxCoreImpl::loadPins() {
 }
 void WhisperboxCoreImpl::savePins() {
     json o = json::object(); for (auto& kv : m_pinned) o[kv.first] = kv.second;
-    std::ofstream f(m_dataDir + "/pins.json", std::ios::trunc); if (f) f << o.dump();
+    writeAtomic(m_dataDir + "/pins.json", o.dump());
 }
 void WhisperboxCoreImpl::loadMySubmissions() {
     m_mySubmissions.clear(); m_myConfirmIds.clear();
@@ -286,7 +316,7 @@ void WhisperboxCoreImpl::loadMySubmissions() {
 void WhisperboxCoreImpl::saveMySubmissions() {
     json o = json::object();
     for (auto& id : m_mySubmissions) o[id] = m_myConfirmIds.count(id) ? m_myConfirmIds[id] : std::string();
-    std::ofstream f(m_dataDir + "/my_submissions.json", std::ios::trunc); if (f) f << o.dump();
+    writeAtomic(m_dataDir + "/my_submissions.json", o.dump());
 }
 
 // ── delivery bootstrap (mirrors qaku: logos.test fleet pinned, async only) ───────
@@ -881,7 +911,7 @@ std::string WhisperboxCoreImpl::setDeviceId(std::string deviceId) {
     if (deviceId.empty()) { json o = {{"ok", false}, {"error", "empty deviceId"}}; return o.dump(); }
     m_deviceId = deviceId;
     m_clock = whisperbox::Clock(m_deviceId);   // HLC dev identity changes with the device id
-    std::ofstream f(m_dataDir + "/device_id.txt", std::ios::trunc); if (f) f << m_deviceId;
+    writeAtomic(m_dataDir + "/device_id.txt", m_deviceId);
     json out = {{"ok", true}, {"deviceId", m_deviceId}};
     return out.dump();
 }

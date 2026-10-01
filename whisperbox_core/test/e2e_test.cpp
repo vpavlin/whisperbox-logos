@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fstream>
 #include <set>
+#include <filesystem>
 
 using whisperbox::json;
 
@@ -370,6 +371,27 @@ int main(int argc, char** argv) {
         CHECK(sorted, "repaired log is HLC-sorted on disk");
         F->node->online = true; F->core->resync();
         CHECK(waitUntil([&] { return hasForm(*F, wfid); }, 10000), "dropped form returns as the signed original via sync");
+    }
+
+    // Truncated files (module killed mid-write by an old version): never overwritten.
+    std::printf("corrupt files:\n");
+    {
+        auto K = mkPeer("K"); K->node->online = false;
+        std::string addrK = K->snap()["identity"]["address"];
+        K->stop();
+        { std::ofstream o(K->dir + "/events.json", std::ios::trunc); o << "[{\"v\":1,\"id\":\"form:x\",\"ty"; }      // truncated
+        { std::ofstream o(K->dir + "/identity.json", std::ios::trunc); o << "{\"privHex\":\"ab"; }                     // truncated
+        K->start();
+        bool kept = false, keptId = false;
+        for (const auto& de : std::filesystem::directory_iterator(K->dir)) {
+            std::string n = de.path().filename().string();
+            if (n.rfind("events.json.corrupt-", 0) == 0) kept = true;
+            if (n.rfind("identity.json.corrupt-", 0) == 0) keptId = true;
+        }
+        CHECK(kept, "unreadable events.json is moved aside, not overwritten");
+        CHECK(keptId, "unreadable identity.json is moved aside, not overwritten");
+        CHECK(K->snap()["identity"]["address"] != addrK, "a fresh identity is created next to the quarantined one");
+        CHECK(!std::filesystem::exists(K->dir + "/events.json.tmp"), "no temp file left behind");
     }
 
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);

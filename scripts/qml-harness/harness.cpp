@@ -83,6 +83,14 @@ public:
         return "{\"ok\":true}";
     }
 
+    // The view must use this (non-blocking) path; answered on the next event-loop turn,
+    // like the real host.
+    Q_INVOKABLE void callModuleAsync(const QString &mod, const QString &method, const QVariantList &args, const QJSValue &cb, int timeoutMs = 0) {
+        Q_UNUSED(timeoutMs);
+        const QString r = callModule(mod, method, args);
+        QJSValue c = cb;
+        QTimer::singleShot(0, this, [c, r]() mutable { if (c.isCallable()) c.call({QJSValue(r)}); });
+    }
     Q_INVOKABLE void onModuleEvent(const QString &mod, const QString &ev) {}
 
 signals:
