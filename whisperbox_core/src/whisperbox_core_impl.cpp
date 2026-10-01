@@ -18,6 +18,9 @@
 #include <algorithm>
 #include <typeinfo>
 #include <ctime>
+#include <filesystem>
+#include <pwd.h>
+#include <unistd.h>
 
 using whisperbox::json;
 using whisperbox::OrderedJson;
@@ -195,13 +198,66 @@ void WhisperboxCoreImpl::onContextReady() {
 }
 
 // ── data dir + persistence (~/.whisperbox-core, $WHISPERBOX_CORE_DATA override) ──
+// The data folder holds the identity key: losing it silently mints a new identity, and every
+// answer sealed to the old one is gone (seen in a real Basecamp: new address on each start).
+// So: never a relative path (the host's working dir can be an AppImage mount that changes
+// every launch), resolve home from the user database (HOME may be unset in a module host),
+// prove the folder is writable, and adopt existing data from any known location.
+static std::string realHome() {
+    // Tests: stand-in for the user database (never touch the real home from a test).
+    if (const char* t = std::getenv("WHISPERBOX_TEST_REAL_HOME")) return t;
+    if (struct passwd* pw = getpwuid(getuid())) if (pw->pw_dir && *pw->pw_dir) return pw->pw_dir;
+    const char* h = std::getenv("HOME");
+    return (h && *h == '/') ? h : "";
+}
+static bool dirWritable(const std::string& d) {
+    if (d.empty() || d[0] != '/') return false;
+    std::error_code ec;
+    std::filesystem::create_directories(d, ec);
+    const std::string probe = d + "/.write-test";
+    { std::ofstream f(probe, std::ios::trunc); if (!f) return false; f << "ok"; f.flush(); if (!f) return false; }
+    std::filesystem::remove(probe, ec);
+    return true;
+}
+static bool hasIdentityFile(const std::string& d) {
+    std::error_code ec;
+    return !d.empty() && std::filesystem::is_regular_file(d + "/identity.json", ec) && std::filesystem::file_size(d + "/identity.json", ec) > 0;
+}
 void WhisperboxCoreImpl::setupDataDir() {
-    if (const char* ov = std::getenv("WHISPERBOX_CORE_DATA")) { m_dataDir = ov; }
-    else {
-        const char* home = std::getenv("HOME");
-        m_dataDir = std::string(home ? home : ".") + "/.whisperbox-core";
+    m_storageOk = true; m_storageNote.clear();
+    if (const char* ov = std::getenv("WHISPERBOX_CORE_DATA")) {
+        m_dataDir = ov;
+        if (!dirWritable(m_dataDir)) { m_storageOk = false; m_storageNote = "Can't save to " + m_dataDir; }
+        return;
     }
-    system(("mkdir -p '" + m_dataDir + "' 2>/dev/null").c_str());
+    std::vector<std::string> cands;
+    const std::string rh = realHome();
+    if (!rh.empty()) cands.push_back(rh + "/.whisperbox-core");                       // survives reinstall
+    if (const char* eh = std::getenv("HOME"))
+        if (*eh == '/' && std::string(eh) + "/.whisperbox-core" != (cands.empty() ? "" : cands[0])) cands.push_back(std::string(eh) + "/.whisperbox-core");
+    if (!instancePersistencePath().empty()) cands.push_back(instancePersistencePath()); // host-owned; wiped on uninstall
+    m_dataDir.clear();
+    for (const auto& c : cands) if (dirWritable(c)) { m_dataDir = c; break; }
+    if (m_dataDir.empty()) {
+        m_storageOk = false;
+        m_dataDir = cands.empty() ? std::string("/tmp/whisperbox-core-") + std::to_string(getuid()) : cands[0];
+        m_storageNote = "Can't save anything (tried " + std::to_string(cands.size()) + " folders) - forms and your identity will not survive a restart";
+        fprintf(stderr, "WHISPERBOX STORAGE NOT WRITABLE: %s\n", m_storageNote.c_str());
+        return;
+    }
+    // Adopt an identity (and the rest) kept elsewhere instead of minting a new one.
+    if (!hasIdentityFile(m_dataDir)) {
+        for (const auto& c : cands) {
+            if (c == m_dataDir || !hasIdentityFile(c)) continue;
+            std::error_code ec;
+            for (const char* fn : {"identity.json", "device_id.txt", "events.json", "watched.json", "my_submissions.json", "pins.json"})
+                if (std::filesystem::exists(c + "/" + fn, ec))
+                    std::filesystem::copy_file(c + "/" + fn, m_dataDir + "/" + fn, std::filesystem::copy_options::skip_existing, ec);
+            fprintf(stderr, "WHISPERBOX adopted data from %s\n", c.c_str());
+            m_storageNote = "Moved your data from " + c;
+            break;
+        }
+    }
 }
 std::string WhisperboxCoreImpl::randomHex(int bytes) {
     // CSPRNG — never rand(): an unseeded rand() is deterministic per process,
@@ -633,6 +689,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["identity"] = m_signId.valid
         ? json({{"address", m_signId.address}, {"pubHex", m_signId.pubHex}}) : nullptr;
     snap["deviceId"] = m_deviceId;
+    snap["storage"] = json({{"dir", m_dataDir}, {"ok", m_storageOk}, {"note", m_storageNote}});
     snap["nodeReady"] = m_nodeReady;
     snap["state"] = state;
     snap["creatorView"] = creatorViewJson.is_null() ? nullptr : creatorViewJson;

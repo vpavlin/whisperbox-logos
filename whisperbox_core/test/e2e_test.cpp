@@ -21,6 +21,8 @@
 #include <fstream>
 #include <set>
 #include <filesystem>
+#include <pwd.h>
+#include <unistd.h>
 
 using whisperbox::json;
 
@@ -421,6 +423,52 @@ int main(int argc, char** argv) {
         A->stop(); A->start();
         CHECK(waitUntil([&] { return responsesOf(*A, f2).empty() && responsesOf(*A, lg).size() == 1 && responsesOf(*A, fid).size() == n1; }, 3000),
               "after a restart every form's answers still open (keys re-derived)");
+    }
+
+    // ── data folder: never relative, adopt an identity kept elsewhere ────────────
+    std::printf("data folder:\n");
+    {
+        // Simulate a module host with no usable WHISPERBOX_CORE_DATA and a HOME whose folder
+        // holds an existing identity: a core with HOME pointing at it must adopt, not mint.
+        auto K = mkPeer("H"); K->node->online = false;
+        std::string addrH = K->snap()["identity"]["address"];
+        std::string dirH = K->dir;
+        K->stop();
+        std::string fakeHome = g_base + "/home-h";
+        std::filesystem::create_directories(fakeHome + "/.whisperbox-core");
+        for (const char* fn : {"identity.json", "device_id.txt", "events.json"})
+            std::filesystem::copy_file(dirH + "/" + fn, fakeHome + "/.whisperbox-core/" + fn, std::filesystem::copy_options::overwrite_existing);
+        std::string savedData = std::getenv("WHISPERBOX_CORE_DATA") ? std::getenv("WHISPERBOX_CORE_DATA") : "";
+        std::string savedHome = std::getenv("HOME") ? std::getenv("HOME") : "";
+        std::string pwHome = g_base + "/pw-home";                 // the user-database home (empty)
+        std::filesystem::create_directories(pwHome);
+        auto startCore = [&](auto&& check) {
+            FakeNode n; n.name = "h"; n.online = false;
+            WhisperboxCoreImpl c; c.modules().delivery_module.node = &n;
+            FakeBus::get().nodes.push_back(&n);
+            c.fakeStart();
+            check(json::parse(c.snapshot()));
+            auto& v = FakeBus::get().nodes; v.erase(std::remove(v.begin(), v.end(), &n), v.end());
+        };
+        unsetenv("WHISPERBOX_CORE_DATA");
+        setenv("WHISPERBOX_TEST_REAL_HOME", pwHome.c_str(), 1);
+        setenv("HOME", fakeHome.c_str(), 1);                       // HOME differs and holds the identity
+        startCore([&](const json& s) {
+            CHECK(s["storage"]["dir"] == pwHome + "/.whisperbox-core", "the real home folder is used, never a relative path");
+            CHECK(s["storage"]["ok"].get<bool>(), "data folder is writable");
+            CHECK(s["identity"]["address"] == addrH, "an identity kept under HOME is adopted, not replaced");
+        });
+        unsetenv("HOME");                                          // module host without HOME
+        startCore([&](const json& s) {
+            CHECK(s["identity"]["address"] == addrH, "same identity after restart, even with HOME unset");
+        });
+        setenv("WHISPERBOX_CORE_DATA", "/proc/whisperbox-cannot-write", 1);
+        startCore([&](const json& s) {
+            CHECK(!s["storage"]["ok"].get<bool>() && !s["storage"]["note"].get<std::string>().empty(), "an unwritable data folder is reported in the snapshot");
+        });
+        unsetenv("WHISPERBOX_TEST_REAL_HOME");
+        setenv("HOME", savedHome.c_str(), 1);
+        if (!savedData.empty()) setenv("WHISPERBOX_CORE_DATA", savedData.c_str(), 1); else unsetenv("WHISPERBOX_CORE_DATA");
     }
 
     // Truncated files (module killed mid-write by an old version): never overwritten.

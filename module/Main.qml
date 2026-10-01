@@ -128,9 +128,13 @@ Item {
     // ── derived ──
     readonly property var forms: (st.state && st.state.forms) ? st.state.forms : ({})
     readonly property var pendingForms: st.pendingForms || []
+    readonly property var watchedIds: (st.watched || [])
     readonly property var creatorView: st.creatorView || null
     readonly property var diag: st.diagnostics || ({})
     readonly property string myAddress: (st.identity && st.identity.address) ? st.identity.address : ""
+    // Core can't persist (no writable folder): forms + identity would be lost on restart.
+    readonly property bool storageBad: !!(st.storage && st.storage.ok === false)
+    readonly property string storageNote: (st.storage && st.storage.note) ? st.storage.note : ""
     readonly property bool nodeReady: !!st.nodeReady
     readonly property var sel: forms[selectedId] || null
     readonly property bool selPending: !sel && selectedId !== "" && pendingForms.indexOf(selectedId) >= 0
@@ -172,9 +176,12 @@ Item {
         ids.sort(function (a, b) { return (root.forms[b].createdAt || 0) - (root.forms[a].createdAt || 0); });
         for (var i = 0; i < ids.length; i++) {
             var f = root.forms[ids[i]];
+            // No public directory: a form is listed only if it's yours, you answered it, or you
+            // opened its link. Everything else the node relays stays invisible (anyone can
+            // publish, so a public list would be a spam channel).
             if (f.mine) mine.push(f.id);
             else if (f.mySubmitted) answered.push(f.id);
-            else if (f.status === "open") open.push(f.id);
+            else if (root.watchedIds.indexOf(f.id) >= 0) open.push(f.id);
         }
         var add = function (label, list, kind) {
             if (list.length === 0) return;
@@ -184,7 +191,7 @@ Item {
         add("WAITING FOR SYNC", root.pendingForms, "p");
         add("MY FORMS", mine, "f");
         add("ANSWERED", answered, "f");
-        add("OPEN FORMS", open, "f");
+        add("OPENED FROM LINKS", open, "f");
         return rows;
     }
 
@@ -501,6 +508,22 @@ Item {
                     }
                 }
 
+                Rectangle {
+                    visible: root.storageBad
+                    Layout.fillWidth: true
+                    implicitHeight: storageT.implicitHeight + 16
+                    radius: 8
+                    color: Qt.rgba(0.97, 0.44, 0.44, 0.12)
+                    border.color: root.wbError
+                    Text {
+                        id: storageT
+                        textFormat: Text.PlainText
+                        anchors.fill: parent; anchors.margins: 8
+                        wrapMode: Text.WordWrap
+                        text: "Not saving: " + root.storageNote
+                        font.pixelSize: 11; color: root.wbError
+                    }
+                }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.wbBorderSubtle }
                 Rectangle {
                     Layout.fillWidth: true

@@ -215,7 +215,10 @@ function Home({ snap, push, openLink }: Ctx) {
   const ids = Object.keys(forms).sort((a, b) => (forms[b].createdAt || 0) - (forms[a].createdAt || 0));
   const mine = ids.filter((i) => forms[i].mine);
   const answered = ids.filter((i) => !forms[i].mine && forms[i].mySubmitted);
-  const open = ids.filter((i) => !forms[i].mine && !forms[i].mySubmitted && forms[i].status === "open");
+  // No public directory: only forms you own, answered, or opened from a link (anyone can
+  // publish a form, so listing everything on the network would be a spam channel).
+  const opened = new Set<string>(snap.watched || []);
+  const open = ids.filter((i) => !forms[i].mine && !forms[i].mySubmitted && opened.has(i));
   const pending: string[] = snap.pendingForms;
   const responsesFor = (id: string) => snap.creatorView?.responses?.[id]?.length || 0;
 
@@ -278,7 +281,7 @@ function Home({ snap, push, openLink }: Ctx) {
         <Section title="WAITING FOR SYNC" list={pending} pend />
         <Section title="MY FORMS" list={mine} />
         <Section title="ANSWERED" list={answered} />
-        <Section title="OPEN FORMS" list={open} />
+        <Section title="OPENED FROM LINKS" list={open} />
         <View style={{ height: 96 }} />
       </ScrollView>
       <Pressable onPress={() => push({ k: "create" })} style={({ pressed }) => [st.fab, pressed && { backgroundColor: C.primaryHover }]} accessibilityLabel="New form">

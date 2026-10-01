@@ -146,4 +146,8 @@ private:
     struct Opened { whisperbox::json dec; size_t nKeys = 0; };
     std::unordered_map<std::string, Opened> m_openCache;
     whisperbox::OrderedJson decryptView(const whisperbox::OrderedJson& state);
+    // Where data lives and whether it can be saved there (shown in the view when not).
+    // Appended last: layout rule above.
+    std::string m_storageNote;
+    bool m_storageOk = true;
 };

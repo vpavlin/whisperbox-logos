@@ -37,6 +37,8 @@ public:
     virtual ~LogosModuleContext() = default;
     FakeModules& modules() { return m_fakeModules; }
     void fakeStart() { onContextReady(); }
+    const std::string& instancePersistencePath() const { return m_fakePersist; }
+    std::string m_fakePersist;
     FakeModules m_fakeModules;
 protected:
     virtual void onContextReady() {}
