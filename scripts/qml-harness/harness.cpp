@@ -20,6 +20,9 @@
 #include <QMessageLogger>
 #include <QString>
 #include <QVariantList>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include "qrcodegen.hpp"   // whisperbox_core/src (vendored, MIT)
 #include <cstdio>
 
 static int g_qmlErrors = 0;
@@ -47,16 +50,27 @@ public:
         : QObject(parent), m_fixture(fixture) {}
 
     Q_INVOKABLE QString callModule(const QString &mod, const QString &method, const QVariantList &args) {
+        // Every call is logged so render.sh can assert the view's call contract
+        // (method name + argument count/shape) against the real core API.
+        if (method != "snapshot") {
+            QStringList a; for (const auto &v : args) a << v.toString();
+            fprintf(stderr, "CALL %s %s argc=%d args=%s\n", mod.toUtf8().constData(), method.toUtf8().constData(),
+                    (int)args.size(), a.join(" | ").toUtf8().constData());
+        }
         if (mod != "whisperbox_core") return "{\"error\":\"unknown module\"}";
         if (method == "snapshot" || method == "status") return m_fixture;
         // Canned mutation responses so click-through paths don't error.
         if (method == "createForm") return "{\"ok\":true,\"formId\":\"form-harness1\",\"event\":{}}";
-        if (method == "shareUri") return "{\"ok\":true,\"uri\":\"whisperbox://form?harness\"}";
+        if (method == "shareUri") return "{\"ok\":true,\"uri\":\"whisperbox://form?id=" + (args.isEmpty() ? QString() : args[0].toString()) + "\"}";
         if (method == "shareQr") {
-            // 5x5 all-dark matrix — exercises the Canvas paint path.
+            // Real encoder (the core's vendored qrcodegen) so the Canvas renders a
+            // scannable code, exactly what whisperbox_core.shareQr returns.
+            const QString uri = "whisperbox://form?id=" + (args.isEmpty() ? QString() : args[0].toString());
+            const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(uri.toUtf8().constData(), qrcodegen::QrCode::Ecc::MEDIUM);
             QString cells;
-            for (int i = 0; i < 25; i++) { cells += "true,"; }
-            return "{\"ok\":true,\"n\":5,\"cells\":[" + cells.mid(0, cells.size() - 1) + "]}";
+            for (int y = 0; y < qr.getSize(); y++) for (int x = 0; x < qr.getSize(); x++) cells += qr.getModule(x, y) ? "true," : "false,";
+            cells.chop(1);
+            return QString("{\"ok\":true,\"n\":%1,\"cells\":[%2]}").arg(qr.getSize()).arg(cells);
         }
         if (method == "exportCsv") return "{\"ok\":true,\"csv\":\"respondent,q1\\n0xabc,hi\"}";
         return "{\"ok\":true}";
@@ -112,6 +126,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "DEBUG: view=%dx%d root=%s w=%.0f h=%.0f\n",
                 (int)view.width(), (int)view.height(), r ? "ok" : "null",
                 r ? r->width() : -1, r ? r->height() : -1);
+    });
+
+    // WB_PROPS='{"selectedId":"form-x","showCreate":true}' sets root properties;
+    // WB_INVOKE="fnA,fnB" then calls root QML functions in order (no args).
+    QTimer::singleShot(600, [&view] {
+        QQuickItem *r = view.rootObject(); if (!r) return;
+        const QByteArray props = qgetenv("WB_PROPS");
+        if (!props.isEmpty()) {
+            const QJsonObject o = QJsonDocument::fromJson(props).object();
+            for (auto it = o.begin(); it != o.end(); ++it)
+                if (!r->setProperty(it.key().toUtf8().constData(), it.value().toVariant()))
+                    { fprintf(stderr, "[E] WB_PROPS: no property %s\n", it.key().toUtf8().constData()); g_qmlErrors++; }
+        }
+        const QByteArray inv = qgetenv("WB_INVOKE");
+        for (const QByteArray &fn : inv.split(',')) {
+            if (fn.trimmed().isEmpty()) continue;
+            if (!QMetaObject::invokeMethod(r, fn.trimmed().constData()))
+                { fprintf(stderr, "[E] WB_INVOKE: no function %s\n", fn.constData()); g_qmlErrors++; }
+        }
     });
 
     // Let the 2.5s poll + Qt.callLater deferrals run, then screenshot.

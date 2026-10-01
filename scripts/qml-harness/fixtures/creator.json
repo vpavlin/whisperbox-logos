@@ -1,218 +1,290 @@
 {
- "v": 1,
- "identity": {
-  "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-  "pubHex": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4"
- },
- "deviceId": "bosgame-A",
- "nodeReady": true,
- "state": {
+  "creatorView": {
+    "address": "0x070423641718a6a4fe776d97633c7e1f91960288",
+    "confirmations": {
+      "form-a7c1f936": [],
+      "form-cbdeb827": [
+        "813cf8555167a773"
+      ],
+      "form-d3617796": [
+        "df82fb8a9266d787"
+      ]
+    },
+    "dropped": {
+      "count": 1,
+      "reasons": {
+        "not-whitelisted": 1
+      }
+    },
+    "forms": [
+      "form-d3617796",
+      "form-a7c1f936",
+      "form-cbdeb827"
+    ],
+    "responses": {
+      "form-a7c1f936": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "yo"
+            }
+          ],
+          "confirmationId": "c03a0565d39270c4",
+          "confirmed": false,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-5e37d0bca5cc",
+            "wall": 1790836147937
+          },
+          "respondent": "0x0505ec6e5eaa2ac9b48f67ef6d77c35a4b0a2b04",
+          "signature": "4081898ca1e91470d99b2c7ebca8c88f33feaadc4d7c727f979d1fd1b7a89f2c1c9d3a8d52a2eb5f84f18eb277d146fba4274b0ff202dc1ce420e0f2f82770fc",
+          "submittedAt": 1790836147935
+        }
+      ],
+      "form-cbdeb827": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "old client"
+            }
+          ],
+          "confirmationId": null,
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "old",
+            "wall": 3
+          },
+          "respondent": "0x8e7360d334e1c6d0fec404053ac8616146a08b14",
+          "signature": null,
+          "submittedAt": 5
+        }
+      ],
+      "form-d3617796": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": 1
+            },
+            {
+              "questionId": "q2",
+              "value": [
+                0
+              ]
+            },
+            {
+              "questionId": "q3",
+              "value": "no olives, please"
+            }
+          ],
+          "confirmationId": "df82fb8a9266d787",
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-5e37d0bca5cc",
+            "wall": 1790836147904
+          },
+          "respondent": "0x0505ec6e5eaa2ac9b48f67ef6d77c35a4b0a2b04",
+          "signature": null,
+          "submittedAt": 1790836147903
+        }
+      ]
+    },
+    "undecrypted": 0
+  },
+  "deviceId": "wb-8a559e33b8c5",
+  "diagnostics": {
+    "admDropSig": 0,
+    "admDropType": 0,
+    "rxDup": 53,
+    "rxNew": 4,
+    "rxRaw": 60,
+    "rxSeen": 25,
+    "txTotal": 11
+  },
+  "identity": {
+    "address": "0x070423641718a6a4fe776d97633c7e1f91960288",
+    "pubHex": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900"
+  },
+  "mySubmissions": [],
+  "nodeReady": true,
+  "pendingForms": [],
+  "state": {
+    "closeHlc": {},
+    "creator": {
+      "address": "0x070423641718a6a4fe776d97633c7e1f91960288",
+      "forms": [
+        "form-d3617796",
+        "form-a7c1f936",
+        "form-cbdeb827"
+      ]
+    },
+    "dropped": {
+      "count": 0,
+      "reasons": {}
+    },
+    "feed": [
+      "form-d3617796",
+      "form-a7c1f936",
+      "form-cbdeb827"
+    ],
+    "forms": {
+      "form-a7c1f936": {
+        "allowed": false,
+        "canRespond": false,
+        "confirmations": [],
+        "createdAt": 1790836147926,
+        "creator": "0x070423641718a6a4fe776d97633c7e1f91960288",
+        "description": "",
+        "expiresAt": null,
+        "id": "form-a7c1f936",
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Hi?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Members only",
+        "whitelist": {
+          "type": "addresses",
+          "value": "0x0505ec6e5eaa2ac9b48f67ef6d77c35a4b0a2b04"
+        }
+      },
+      "form-cbdeb827": {
+        "allowed": true,
+        "canRespond": false,
+        "confirmations": [
+          "813cf8555167a773"
+        ],
+        "createdAt": 1790836149255,
+        "creator": "0x070423641718a6a4fe776d97633c7e1f91960288",
+        "description": "",
+        "expiresAt": null,
+        "id": "form-cbdeb827",
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
+        "questions": [
+          {
+            "id": "q1",
+            "text": "?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Legacy",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
+      "form-d3617796": {
+        "allowed": true,
+        "canRespond": false,
+        "confirmations": [
+          "df82fb8a9266d787"
+        ],
+        "createdAt": 1790836147897,
+        "creator": "0x070423641718a6a4fe776d97633c7e1f91960288",
+        "description": "Friday team lunch",
+        "expiresAt": null,
+        "id": "form-d3617796",
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
+        "questions": [
+          {
+            "id": "q1",
+            "options": [
+              "Sushi",
+              "Pizza",
+              "Tacos"
+            ],
+            "required": true,
+            "text": "Where?",
+            "type": "radioButtons"
+          },
+          {
+            "id": "q2",
+            "options": [
+              "Vegan",
+              "Gluten-free"
+            ],
+            "required": false,
+            "text": "Dietary",
+            "type": "checkbox"
+          },
+          {
+            "id": "q3",
+            "required": false,
+            "text": "Comments, \"quoted\"",
+            "type": "textarea"
+          }
+        ],
+        "status": "open",
+        "title": "Lunch poll",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      }
+    },
+    "pending": {
+      "count": 0,
+      "events": []
+    },
+    "responses": [
+      {
+        "encryptedPayload": "010284b63b4a4a0563d98e1e04ac8f3c8aba33413a122e614aced727a484912ae239dab6c04accda54d8e4fbf55883739cd45ba4914799cb105474a87c21c96a0b1cbe85ecd38f45d7b96da73f1601382404e1ee083b4b8eedd6243399e1660edec7a21e03d76d79cbe4cb6dea2ecf3f74371d8f1c3793bf4531e801b7997dc0285887dcecb95f40b0c95fe18c86d7b82723f37cfdbdb88b86f804b82113e86532b2c9b1f02bc11165dd6f5b4cfa851864f067e98342c2c3d104dbc6c718fd149ef9bdce1a22d54494921c2f49eb7de86c0fc03d4a00fc7d7ee888916b696affdb558438196e43d7858016cca8bd889fbff37f06ce67b61fd99b57c0fecaabfd11a83ab96cd0b7e4da337c4e05c263577494693b82d009d294f34cacafba58cdb2869a0247904b2f14c46044ead60dfe3195467bc5c66e42def66cd7c79a3f52f52f61baa14777c921894e0fd06f062b8a109549a7ef7eb29cfead9d8527e258beadf40be482efb0057bb0ac64e81947b3876f2591f00bba2c9cc36d32b5b08a234baa81bf0637b1cd7ebf4d9a2b42ce0770d1de9c1224be6eb57b18688781cf838bb79084cd0d958d",
+        "hlc": {
+          "ctr": 0,
+          "dev": "evil",
+          "wall": 2
+        },
+        "id": "resp:534cdd8e0e4b69be24a31a2ccdf330f6fc6795b241db4fe6dfd0a625eb85df6f"
+      },
+      {
+        "encryptedPayload": "0102098a3a87dbe707891e3f82cc744ecce37a5f1be9ceee54cbd32267015f0090358d9f5719ef436d7215f7f1b7be4a97f1ce334924dc1c360f955cf0e9416efbd3161b909ad63166be2a89714096719b38139b857241d461f260b388e248e9a68f046b2660ef7672b9492f9db24e430a979ab1a3beed1480c8056e8c668607714e7395b0f7d9d843ef83ab88a0968e6ab807ed06a75e9e91920dea1791a84eb865cb7510b6e2cc8f6a7525da3d148c30a7e2239d1c3d712455a367288ac5d9423b2ad13c3bf41ae094d1adcebdb5bd1398e90a49be53917ca46f7d8cb46560e0f40dac068e44e60fea37263650a7d1f6b2b8",
+        "hlc": {
+          "ctr": 0,
+          "dev": "old",
+          "wall": 3
+        },
+        "id": "resp:66ce494978e9086273f5cb863ddf9d058d8e3301c9056ce2957bc75616f26e7a"
+      },
+      {
+        "encryptedPayload": "0103397eaa7fb34a4400d536c319dd8aa20c00ab047d9286b0781f40784f0e236b5b804c32b34691421024f93331227f88c39a1e6868904e72aa1d4d9f5d950728ce8646ffdb78459d8de9f6a539df131e3aeaf9f7926388842b3971523faf275b0c1f7797d3e59a06ad61dc93a6ef709c8a99d3c412f54ab347dcfc683e441f3bc3a38c878879348e32466cb769d1c1955f86222787a7794d56fef831a36d1a4a5e0a0e70880d4d779736cf8055ad7d841f1d6a3740fcfb4957f3ab811b1038902097a0a1c9345f14fde0929faefae141164ae8597a64095cbd4197bfbb502b50a5f4dd674d4cd806752819e4a490a29e14af2d4ddb7e877246e5c772988836c1528f5cf9dedc2f559d17eb356f85909e61c8e40df3a46051c584a601c1fade5a7371f2eb06846180f3444f46575dd1bbaeac124e9b26f3c78eed4531e116d5ffddd88cfa53604df574bd66c09f44b573866cccb8c93f31a58895641589137354241af281bd1196",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-5e37d0bca5cc",
+          "wall": 1790836147904
+        },
+        "id": "resp:03a3c4c93f3dc5c7a5e083d1a4b49f3880aa0dacf2dd4ca8378f27c4a3f5ca8f"
+      },
+      {
+        "encryptedPayload": "010380973c80d736f7e2360402b667ec75d9796725ea280d6e31a907916a3b5f4b7ecadc798dc962bc7da1c0515eb6a1158ab46ecc097ec921632239b2aa29bf2a14f2c625af920fe3f0f5424d07ac41712c80b146677c51614d8b16b9575eba57981d3e2fc5e2844622be8f7e87717e00b461f71c27a7ff1110b8e850fdaff04f2c0da73c2afa27234829faf706674c862676d4ea6130eb1b71bee11345acf6693268da62b608049d434eb61519caf705893306fe152164c9e18f1c65cc6e9b94111741fd85bd0a8199e3125c6a2de1e261107b2c5d8f8e65da09fafb8a56979310b5dc956e4f479a06b6336f977d031e67a66bb0afef9dcb6d6c954616b50961a113da582c92ea3dffdeedc3092bde5827a261918528ac0757da910e54846de308eec693f303aef625b5c038e5833882afe86c5f9f7c81cea1512f9117e7b24c6f550ac5af1c9f6085439c18671502627a1e5b9c38ba2348d22c524484a9773fbff2d367316e5153820714d449508f1a96e826ffc01a8c527011693d7d25cebda78e0e5c9bc0b2811d7b4059b554e716840020d0d2082dbf642fc01975836f8b3b30d841e6431f111b656deb8deb13f8392f742cbcb009642d72a5bc6ccad7f9b5cb82cf723012467e43dee8d2e7a2c1a416f6104d21b54f",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-5e37d0bca5cc",
+          "wall": 1790836147937
+        },
+        "id": "resp:dd51fe94564a26b30f5bac1b70a890269bd7eed3bcebc9514ad3d6ba1cfc580d"
+      }
+    ],
+    "v": 1
+  },
   "v": 1,
-  "forms": {
-   "form-cafef00d": {
-    "id": "form-cafef00d",
-    "title": "Coffee Preference Survey",
-    "description": "Anonymous-ish: answers are sealed to the creator only.",
-    "creator": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-    "publicKey": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4",
-    "createdAt": 1755580000000,
-    "expiresAt": null,
-    "questions": [
-     {
-      "id": "question_1",
-      "type": "text",
-      "text": "What do you take in your coffee?",
-      "required": true
-     },
-     {
-      "id": "question_2",
-      "type": "radioButtons",
-      "text": "How many cups a day?",
-      "required": true,
-      "options": [
-       "1",
-       "2",
-       "3+"
-      ]
-     },
-     {
-      "id": "question_3",
-      "type": "checkbox",
-      "text": "Toppings you like",
-      "required": false,
-      "options": [
-       "sugar",
-       "milk",
-       "honey",
-       "nothing"
-      ]
-     }
-    ],
-    "whitelist": {
-     "type": "none",
-     "value": ""
-    },
-    "status": "open",
-    "confirmations": [
-     "deadbeefcafe0001"
-    ]
-   },
-   "form-deadbeef": {
-    "id": "form-deadbeef",
-    "title": "Old Poll (closed)",
-    "description": "",
-    "creator": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-    "publicKey": "02c0fa1eeab4560955e86888563abd9aea0cf7dfb4f4096ac5ceaa2eb9ed9ad3a4",
-    "createdAt": 1755493600000,
-    "expiresAt": null,
-    "questions": [
-     {
-      "id": "question_1",
-      "type": "text",
-      "text": "Ship it?",
-      "required": true
-     }
-    ],
-    "whitelist": {
-     "type": "none",
-     "value": ""
-    },
-    "status": "closed",
-    "confirmations": []
-   }
-  },
-  "feed": [
-   "form-cafef00d"
-  ],
-  "responses": [
-   {
-    "id": "resp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "hlc": {
-     "wall": 1755580100000,
-     "ctr": 1,
-     "dev": "bosgame-B"
-    },
-    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
-   },
-   {
-    "id": "resp:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "hlc": {
-     "wall": 1755580200000,
-     "ctr": 2,
-     "dev": "pi5"
-    },
-    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
-   },
-   {
-    "id": "resp:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "hlc": {
-     "wall": 1755580300000,
-     "ctr": 3,
-     "dev": "crib"
-    },
-    "encryptedPayload": "01abababababababababababababababababababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
-   }
-  ],
-  "closeHlc": {
-   "form-deadbeef": {
-    "wall": 1755494000000,
-    "ctr": 9,
-    "dev": "bosgame-A"
-   }
-  },
-  "creator": {
-   "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-   "forms": [
-    "form-cafef00d",
-    "form-deadbeef"
-   ]
-  },
-  "pending": {
-   "count": 0,
-   "events": []
-  },
-  "dropped": {}
- },
- "creatorView": {
-  "address": "0x1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-  "forms": [
-   "form-cafef00d",
-   "form-deadbeef"
-  ],
-  "responses": {
-   "form-cafef00d": [
-    {
-     "respondent": "0xaabbccddeeff00112233445566778899aabbccdd",
-     "submittedAt": 1755580100000,
-     "answers": [
-      {
-       "questionId": "question_1",
-       "value": "black, no sugar"
-      },
-      {
-       "questionId": "question_2",
-       "value": 2
-      },
-      {
-       "questionId": "question_3",
-       "value": [
-        0,
-        2
-       ]
-      }
-     ],
-     "signature": null,
-     "hlc": {
-      "wall": 1755580100000,
-      "ctr": 1,
-      "dev": "bosgame-B"
-     },
-     "confirmed": true
-    },
-    {
-     "respondent": "0x0123456789abcdef0123456789abcdef01234567",
-     "submittedAt": 1755580200000,
-     "answers": [
-      {
-       "questionId": "question_1",
-       "value": "oat milk latte"
-      },
-      {
-       "questionId": "question_2",
-       "value": 0
-      }
-     ],
-     "signature": null,
-     "hlc": {
-      "wall": 1755580200000,
-      "ctr": 2,
-      "dev": "pi5"
-     },
-     "confirmed": false
-    }
-   ],
-   "form-deadbeef": []
-  },
-  "confirmations": {
-   "form-cafef00d": [
-    "deadbeefcafe0001"
-   ],
-   "form-deadbeef": []
-  },
-  "undecrypted": 0,
-  "dropped": {}
- },
- "watched": [
-  "form-cafef00d"
- ],
- "mySubmissions": [],
- "diagnostics": {
-  "rxRaw": 42,
-  "rxSeen": 40,
-  "rxNew": 38,
-  "rxDup": 2,
-  "txTotal": 7,
-  "admDropSig": 0,
-  "admDropType": 1
- }
+  "watched": []
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Render-harness runner for the whisperbox view (runs on Bosgame).
+# Render-harness runner for the whisperbox view (nix-store Qt on Bosgame, or
+# system Qt6 elsewhere: needs qt6-qtbase-devel + qt6-qtdeclarative-devel).
 # Compiles harness.cpp against the nix-store Qt6, points QML_IMPORT_PATH at the
 # design system the module flake pulls in, then renders Main.qml offscreen with
 # each fixture and reports QML errors + screenshots.
@@ -13,48 +14,50 @@ QML="$ROOT/module/Main.qml"
 OUTDIR="${WB_OUT:-/tmp/wb-harness}"
 mkdir -p "$OUTDIR"
 
-# ── locate Qt6 in the nix store (prefer 6.9.x — the rev the builder closure uses) ──
+# ── locate Qt6: nix store (Bosgame) or system Qt via pkg-config (any distro) ──
 pick() { for d in /nix/store/*-qt$1-6.9.*; do [ -e "$d$2" ] && { echo "$d"; return; }; done; for d in /nix/store/*-qt$1-6.*; do [ -e "$d$2" ] && { echo "$d"; return; }; done; }
-QTBASE=$(pick base '/lib/libQt6Core.so')
-QTDCL=$(pick declarative '/lib/libQt6Quick.so')
-if [ -z "$QTBASE" ] || [ -z "$QTDCL" ]; then
-    echo "FATAL: qtbase/qtdeclarative not found in /nix/store" >&2
-    exit 2
-fi
-echo "qtbase:      $QTBASE"
-echo "qtdeclarative: $QTDCL"
-
-# Design system QML dir (transitive dep of the module flake). Prefer the BUILT
-# output (has Logos/Theme/qmldir), not a -src checkout.
-DS=""
-for d in /nix/store/*-logos-design-system-*/lib; do
-    if [ -f "$d/Logos/Theme/qmldir" ]; then DS="$d"; break; fi
-done
-[ -z "$DS" ] && DS=$(find /nix/store -maxdepth 4 -path "*logos-design-system*" -name qmldir 2>/dev/null | grep "Logos/Theme/qmldir" | head -1 | xargs -r dirname | xargs -r dirname)
-echo "design sys:  ${DS:-NOT FOUND}"
-
-# ── compile the harness (moc first) ──
-MOC=$(for d in /nix/store/*-qtbase-6.*; do [ -x "$d/bin/moc" ] && { echo "$d/bin/moc"; break; }; done)
-[ -z "$MOC" ] && MOC=$(find /nix/store -maxdepth 3 -name moc -type f 2>/dev/null | head -1)
 CXXFLAGS="-std=c++17 -fPIC -O1"
-INCS="-I$QTBASE/include -I$QTBASE/include/QtCore -I$QTBASE/include/QtGui -I$QTDCL/include -I$QTDCL/include/QtQml -I$QTDCL/include/QtQuick"
-LIBS="-L$QTBASE/lib -L$QTDCL/lib -lQt6Quick -lQt6Qml -lQt6Gui -lQt6Core"
-
+QTBASE=""; QTDCL=""
+[ -d /nix/store ] && { QTBASE=$(pick base '/lib/libQt6Core.so'); QTDCL=$(pick declarative '/lib/libQt6Quick.so'); }
 cd "$HDIR"
+if [ -n "$QTBASE" ] && [ -n "$QTDCL" ]; then
+    echo "qt (nix):    $QTBASE | $QTDCL"
+    MOC=$(for d in /nix/store/*-qtbase-6.*; do [ -x "$d/bin/moc" ] && { echo "$d/bin/moc"; break; }; done)
+    INCS="-I$QTBASE/include -I$QTBASE/include/QtCore -I$QTBASE/include/QtGui -I$QTDCL/include -I$QTDCL/include/QtQml -I$QTDCL/include/QtQuick"
+    LIBS="-L$QTBASE/lib -L$QTDCL/lib -lQt6Quick -lQt6Qml -lQt6Gui -lQt6Core"
+    export LD_LIBRARY_PATH="$QTBASE/lib:$QTDCL/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    QMLPATH="$QTDCL/lib/qt-6/qml"
+elif pkg-config --exists Qt6Quick 2>/dev/null; then
+    echo "qt (system): $(pkg-config --modversion Qt6Quick)"
+    MOC="$(pkg-config --variable=libexecdir Qt6Core)/moc"
+    INCS="$(pkg-config --cflags Qt6Quick Qt6Qml Qt6Gui Qt6Core)"
+    LIBS="$(pkg-config --libs Qt6Quick Qt6Qml Qt6Gui Qt6Core)"
+    QMLPATH="$(qmake6 -query QT_INSTALL_QML 2>/dev/null)"
+else
+    echo "FATAL: no Qt6 (nix store or pkg-config Qt6Quick)" >&2; exit 2
+fi
+
+# Design system QML dir (Logos/Theme/qmldir). WB_DS overrides (e.g. a
+# logos-design-system checkout's src/qml); else the nix-built output.
+DS="${WB_DS:-}"
+if [ -z "$DS" ] && [ -d /nix/store ]; then
+    for d in /nix/store/*-logos-design-system-*/lib; do
+        if [ -f "$d/Logos/Theme/qmldir" ]; then DS="$d"; break; fi
+    done
+fi
+echo "design sys:  ${DS:-NOT FOUND (set WB_DS=<logos-design-system>/src/qml)}"
+
 "$MOC" harness.cpp -o harness.moc || { echo "FATAL: moc failed" >&2; exit 2; }
-g++ $CXXFLAGS $INCS harness.cpp -o harness $LIBS || { echo "FATAL: g++ failed" >&2; exit 2; }
+g++ $CXXFLAGS $INCS -I"$ROOT/whisperbox_core/src" harness.cpp "$ROOT/whisperbox_core/src/qrcodegen.cpp" -o harness $LIBS || { echo "FATAL: g++ failed" >&2; exit 2; }
 echo "harness built: $HDIR/harness"
+
+[ -n "$DS" ] && QMLPATH="$DS:$QMLPATH"
+export QML_IMPORT_PATH="${QML_IMPORT_PATH:+$QML_IMPORT_PATH:}$QMLPATH"
 
 # ── run against fixtures ──
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=("$HDIR"/fixtures/*.json)
 
-export LD_LIBRARY_PATH="$QTBASE/lib:$QTDCL/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-# QML plugin roots: QtQuick.{Controls,Layouts,...} live under lib/qt-6/qml in this
-# store layout; the design system is a pure-QML module under its lib/ dir.
-QMLPATH="$QTDCL/lib/qt-6/qml"
-[ -n "$DS" ] && QMLPATH="$DS:$QMLPATH"
-export QML_IMPORT_PATH="${QML_IMPORT_PATH:+$QML_IMPORT_PATH:}$QMLPATH"
 
 FAIL=0
 for F in "${FIXTURES[@]}"; do

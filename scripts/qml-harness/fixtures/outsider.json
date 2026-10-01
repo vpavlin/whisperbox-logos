@@ -1,22 +1,21 @@
 {
   "creatorView": null,
-  "deviceId": "wb-5e37d0bca5cc",
+  "deviceId": "wb-403d1abd40b6",
   "diagnostics": {
     "admDropSig": 0,
     "admDropType": 0,
-    "rxDup": 53,
-    "rxNew": 7,
-    "rxRaw": 62,
-    "rxSeen": 27,
+    "rxDup": 9,
+    "rxNew": 2,
+    "rxRaw": 11,
+    "rxSeen": 1,
     "txTotal": 8
   },
   "identity": {
-    "address": "0x0505ec6e5eaa2ac9b48f67ef6d77c35a4b0a2b04",
-    "pubHex": "02f06bb4fd8f190db2b812c26676cc4768e4c2940daa9d8089cc7c58926937799e"
+    "address": "0x8e7360d334e1c6d0fec404053ac8616146a08b14",
+    "pubHex": "02f81726e723f2c2544ac8540df9614aaad1a0c2b31c2be12ffde392557f58e9a3"
   },
   "mySubmissions": [
-    "form-a7c1f936",
-    "form-d3617796"
+    "form-cbdeb827"
   ],
   "nodeReady": true,
   "pendingForms": [],
@@ -34,7 +33,7 @@
     ],
     "forms": {
       "form-a7c1f936": {
-        "allowed": true,
+        "allowed": false,
         "canRespond": false,
         "confirmations": [],
         "createdAt": 1790836147926,
@@ -44,7 +43,7 @@
         "id": "form-a7c1f936",
         "mine": false,
         "myConfirmed": false,
-        "mySubmitted": true,
+        "mySubmitted": false,
         "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
         "questions": [
           {
@@ -63,7 +62,7 @@
       },
       "form-cbdeb827": {
         "allowed": true,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [
           "813cf8555167a773"
         ],
@@ -73,8 +72,8 @@
         "expiresAt": null,
         "id": "form-cbdeb827",
         "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
+        "myConfirmed": true,
+        "mySubmitted": true,
         "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
         "questions": [
           {
@@ -92,7 +91,7 @@
       },
       "form-d3617796": {
         "allowed": true,
-        "canRespond": false,
+        "canRespond": true,
         "confirmations": [
           "df82fb8a9266d787"
         ],
@@ -102,8 +101,8 @@
         "expiresAt": null,
         "id": "form-d3617796",
         "mine": false,
-        "myConfirmed": true,
-        "mySubmitted": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
         "publicKey": "022def2932fb4edf99e17a4bff5529635e8c6d82e46e84a79370d847cbdd3b3900",
         "questions": [
           {
