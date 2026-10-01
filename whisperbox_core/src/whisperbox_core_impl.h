@@ -126,5 +126,9 @@ private:
 
     std::recursive_mutex m_mtx;
     QTimer* m_hubTimer = nullptr;
-    std::set<std::string> m_mySubmissions; // NOTE: appended at end of class on purpose — see commit message (host SDK layout mismatch clobbers shifted offsets)
+    std::set<std::string> m_mySubmissions; // NOTE: appended at end of class on purpose - see commit message (host SDK layout mismatch clobbers shifted offsets)
+    // formId -> my random confirmationId (sealed in my response; lets me spot the
+    // creator's public receipt without the receipt being linkable to my address).
+    // Appended LAST for the same layout reason as m_mySubmissions.
+    std::map<std::string, std::string> m_myConfirmIds;
 };

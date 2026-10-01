@@ -16,6 +16,7 @@
 #include <fstream>
 #include <algorithm>
 #include <typeinfo>
+#include <ctime>
 
 using whisperbox::json;
 using whisperbox::OrderedJson;
@@ -45,6 +46,70 @@ static bool isHex(const std::string& s, size_t len) {
     return true;
 }
 
+static std::string sha16(const std::string& s) {
+    // ONE named string: building Bytes from two separate temporaries' begin()/end()
+    // mixes iterators of different objects (UB -> std::length_error in practice).
+    whisperbox::Bytes b(s.begin(), s.end());
+    return whisperbox::toHex(whisperbox::sha256(b).data(), 8);
+}
+// Pre-0.2 receipt id: deterministic hash of (form, respondent). Kept only to
+// confirm/recognise LEGACY responses — it is linkable (anyone can recompute it
+// for a candidate address), which is why 0.2 seals a random id instead.
+static std::string legacyConfirmId(const std::string& formId, const std::string& respondent) {
+    return sha16(lc(formId) + "|" + lc(respondent));
+}
+static std::string confirmIdOf(const json& r, const std::string& formId) {
+    if (r.contains("confirmationId") && r["confirmationId"].is_string() && !r["confirmationId"].get<std::string>().empty())
+        return r["confirmationId"].get<std::string>();
+    return legacyConfirmId(formId, r.value("respondent", ""));
+}
+static bool containsStr(const json& arr, const std::string& v) {
+    if (!arr.is_array()) return false;
+    for (const auto& x : arr) if (x.is_string() && x.get<std::string>() == v) return true;
+    return false;
+}
+static bool emptyAnswer(const json& v) {
+    if (v.is_null()) return true;
+    if (v.is_string()) return trim(v.get<std::string>()).empty();
+    if (v.is_array()) return v.empty();
+    return false;
+}
+// Decrypt + interpret the response pool for `id` (the creator). One place for the
+// open/verify hooks shared by snapshot, getDecryptedResponses, exportCsv, confirm.
+static OrderedJson decryptView(const OrderedJson& state, const whisperbox::SignId& id) {
+    auto open = [&id](const std::string& hexBlob) -> json {
+        try {
+            whisperbox::Bytes pt = whisperbox::eciesOpen(id.priv, whisperbox::fromHex(hexBlob));
+            return json::parse(std::string(pt.begin(), pt.end()));
+        } catch (...) { return json(); }
+    };
+    auto verifyResponse = [](const json& pseudo) -> bool {
+        // Inner signature over the DECRYPTED content (whitelist != none):
+        // canonical "whisperbox-inner-v1|{formId,respondent,submittedAt,answers}",
+        // ECDSA low-S, and address(pub) must equal respondent.
+        const json p = pseudo.value("payload", json::object());
+        std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
+        if (pubHex.empty() || sigHex.empty()) return false;
+        OrderedJson m = OrderedJson::object();
+        m["formId"] = lc(p.value("formId", ""));
+        m["respondent"] = lc(p.value("respondent", ""));
+        m["submittedAt"] = p.value("submittedAt", 0LL);
+        m["answers"] = p.value("answers", json::array());
+        std::string msg = "whisperbox-inner-v1|" + m.dump();
+        whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
+        if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
+        whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
+        return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
+    };
+    return whisperbox::creatorView(state, id.address, open, verifyResponse);
+}
+static std::string isoUtc(long long ms) {
+    if (ms <= 0) return "";
+    time_t t = (time_t)(ms / 1000); struct tm tmv; gmtime_r(&t, &tmv);
+    char buf[32]; strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    return buf;
+}
+
 WhisperboxCoreImpl::~WhisperboxCoreImpl() {
     // Parentless QTimer (LogosModuleContext is NOT a QObject in this builder rev)
     // — stop + delete explicitly.
@@ -60,6 +125,20 @@ void WhisperboxCoreImpl::onContextReady() {
     fprintf(stderr, "WHISPERBOX dataDir=%s\n", m_dataDir.c_str());
     loadIdentity();
     fprintf(stderr, "WHISPERBOX identity valid=%d addr=%s\n", (int)m_signId.valid, m_signId.address.c_str());
+    // Per-install device id (HLC dev + SDS senderId + SYNC_REQ "from"). It MUST be
+    // unique: with a shared default every peer ignored the others' SYNC_REQ as its
+    // own and SDS dropped their channel frames as self-echo.
+    {
+        std::ifstream df(m_dataDir + "/device_id.txt");
+        std::string d; if (df) std::getline(df, d);
+        d = trim(d);
+        if (d.empty() || d == "whisperbox-core") {
+            d = "wb-" + randomHex(6);
+            std::ofstream of(m_dataDir + "/device_id.txt", std::ios::trunc); if (of) of << d;
+        }
+        m_deviceId = d;
+    }
+    fprintf(stderr, "WHISPERBOX deviceId=%s\n", m_deviceId.c_str());
     m_clock = whisperbox::Clock(m_deviceId);
     loadLog();
     fprintf(stderr, "WHISPERBOX log events=%zu\n", m_log.size());
@@ -144,6 +223,21 @@ void WhisperboxCoreImpl::loadLog() {
         json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
         if (a.is_array()) for (auto& e : a) if (e.is_object() && e.contains("id")) m_log.push_back(e);
     } catch (...) { fprintf(stderr, "WHISPERBOX events.json corrupt — starting empty\n"); }
+    // Repair logs written by <= 0.1.x: (1) drop UNSIGNED form.publish placeholders
+    // left by importForm — they shadowed the creator's signed event forever (same
+    // id, first copy wins) so the form never got its questions/key; (2) re-sort
+    // (the old incremental merge inserted out of HLC order).
+    size_t before = m_log.size();
+    std::vector<json> kept;
+    for (auto& e : m_log) {
+        if (e.value("type", "") == FORM_PUBLISH && (!e.contains("sig") || !e["sig"].is_string() || e["sig"].get<std::string>().empty())) continue;
+        kept.push_back(e);
+    }
+    std::vector<std::vector<json>> logs; logs.push_back(kept);
+    std::vector<json> repaired = whisperbox::mergeWhisperbox(logs);
+    bool changed = repaired.size() != before || json(repaired).dump() != json(m_log).dump();
+    m_log = std::move(repaired);
+    if (changed) { fprintf(stderr, "WHISPERBOX log repaired %zu -> %zu events\n", before, m_log.size()); saveLog(); }
 }
 void WhisperboxCoreImpl::saveLog() {
     std::ofstream f(m_dataDir + "/events.json", std::ios::trunc); if (f) f << json(m_log).dump();
@@ -161,16 +255,22 @@ void WhisperboxCoreImpl::saveWatched() {
     std::ofstream f(m_dataDir + "/watched.json", std::ios::trunc); if (f) f << a.dump();
 }
 void WhisperboxCoreImpl::loadMySubmissions() {
-    m_mySubmissions.clear();
+    m_mySubmissions.clear(); m_myConfirmIds.clear();
     std::ifstream f(m_dataDir + "/my_submissions.json"); if (!f) return;
     try {
         json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
+        // <= 0.1.x: ["formId", ...] (legacy receipt id); 0.2+: {"formId": "<confirmationId>"}
         if (a.is_array()) for (auto& x : a) if (x.is_string()) m_mySubmissions.insert(lc(x.get<std::string>()));
+        if (a.is_object()) for (auto it = a.begin(); it != a.end(); ++it) {
+            m_mySubmissions.insert(lc(it.key()));
+            if (it.value().is_string() && !it.value().get<std::string>().empty()) m_myConfirmIds[lc(it.key())] = it.value().get<std::string>();
+        }
     } catch (...) { /* ignore */ }
 }
 void WhisperboxCoreImpl::saveMySubmissions() {
-    json a = json::array(); for (auto& id : m_mySubmissions) a.push_back(id);
-    std::ofstream f(m_dataDir + "/my_submissions.json", std::ios::trunc); if (f) f << a.dump();
+    json o = json::object();
+    for (auto& id : m_mySubmissions) o[id] = m_myConfirmIds.count(id) ? m_myConfirmIds[id] : std::string();
+    std::ofstream f(m_dataDir + "/my_submissions.json", std::ios::trunc); if (f) f << o.dump();
 }
 
 // ── delivery bootstrap (mirrors qaku: logos.test fleet pinned, async only) ───────
@@ -407,60 +507,47 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     auto verify = [](const json& e) { return whisperbox::verifyEventJson(e); };
     OrderedJson state = whisperbox::computeState(m_log, me, verify);
 
-    // Creator view: decrypt the response pool with our key.
+    // Creator view: decrypt the response pool with our key, then mark each
+    // response confirmed by matching its receipt id against the public set
+    // (module layer, NOT the engine - keeps the TS/C++ engine parity intact).
     json creatorViewJson;
     if (state["creator"] != nullptr && m_signId.valid) {
-        auto open = [this](const std::string& hexBlob) -> json {
-            try {
-                whisperbox::Bytes blob = whisperbox::fromHex(hexBlob);
-                whisperbox::Bytes pt = whisperbox::eciesOpen(m_signId.priv, blob);
-                return json::parse(std::string(pt.begin(), pt.end()));
-            } catch (...) { return json(); }
-        };
-        auto verifyResponse = [](const json& pseudo) -> bool {
-            // Inner signature over the DECRYPTED content (whitelist != none):
-            // canonical "whisperbox-inner-v1|formId|respondent|submittedAt|cjson(answers)",
-            // ECDSA low-S, and address(pub) must equal respondent.
-            const json p = pseudo.value("payload", json::object());
-            std::string pubHex = p.value("pub", "");
-            std::string sigHex = p.value("signature", "");
-            if (pubHex.empty() || sigHex.empty()) return false;
-            long long submittedAt = p.value("submittedAt", 0LL);
-            OrderedJson m = OrderedJson::object();
-            m["formId"] = lc(p.value("formId", ""));
-            m["respondent"] = lc(p.value("respondent", ""));
-            m["submittedAt"] = submittedAt;
-            m["answers"] = p.value("answers", json::array());
-            std::string msg = "whisperbox-inner-v1|" + m.dump();
-            whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
-            if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
-            whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
-            return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
-        };
-        creatorViewJson = whisperbox::creatorView(state, me, open, verifyResponse);
-
-        // Module-layer post-process (NOT the engine — keeps byte-parity intact):
-        // mark each decrypted response confirmed/not by matching the deterministic
-        // confirmationId = hex(sha256(formId|respondent))[0:16] against the public
-        // confirmations set. The view can't hash, so we surface it here.
-        if (creatorViewJson.contains("responses") && creatorViewJson.contains("confirmations")) {
-            const json& confs = creatorViewJson["confirmations"];
-            for (auto it = creatorViewJson["responses"].begin(); it != creatorViewJson["responses"].end(); ++it) {
-                std::string fid = it.key();
-                if (!confs.contains(fid)) continue;
-                const json& cids = confs[fid];
-                for (auto& r : it.value()) {
-                    if (!r.is_object() || !r.contains("respondent")) continue;
-                    std::string respAddr = lc(r["respondent"].get<std::string>());
-                    whisperbox::Bytes h = whisperbox::sha256(
-                        whisperbox::Bytes((fid + "|" + respAddr).begin(), (fid + "|" + respAddr).end()));
-                    std::string cid = whisperbox::toHex(h.data(), 8);
-                    bool confirmed = false;
-                    for (auto& c : cids) if (c.is_string() && c.get<std::string>() == cid) { confirmed = true; break; }
-                    r["confirmed"] = confirmed;
-                }
+        OrderedJson cv = decryptView(state, m_signId);
+        for (auto it = cv["responses"].begin(); it != cv["responses"].end(); ++it) {
+            const std::string fid = it.key();
+            const json confs = cv["confirmations"].contains(fid) ? json(cv["confirmations"][fid]) : json::array();
+            for (auto& r : it.value()) {
+                if (!r.is_object()) continue;
+                r["confirmed"] = containsStr(confs, confirmIdOf(r, fid));
             }
         }
+        creatorViewJson = json::parse(cv.dump());
+    }
+
+    // Per-form flags for THIS device (module layer): has the local identity
+    // answered / been confirmed / may it answer at all.
+    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) {
+        const std::string fid = it.key();
+        auto& f = it.value();
+        const bool mine = m_signId.valid && f["creator"].get<std::string>() == m_signId.address;
+        const bool submitted = m_mySubmissions.count(fid) > 0;
+        bool confirmed = false;
+        if (submitted && m_signId.valid) {
+            std::string cid = m_myConfirmIds.count(fid) ? m_myConfirmIds[fid] : legacyConfirmId(fid, m_signId.address);
+            confirmed = containsStr(f["confirmations"], cid);
+        }
+        std::string wlType = f["whitelist"].is_object() ? f["whitelist"].value("type", "none") : "none";
+        bool allowed = true;
+        if (wlType == "addresses") {
+            auto list = whisperbox::whitelistAddresses(f["whitelist"]);
+            allowed = m_signId.valid && std::find(list.begin(), list.end(), m_signId.address) != list.end();
+        } else if (wlType != "none") allowed = false;   // nft: unsupported in v1
+        f["mine"] = mine;
+        f["mySubmitted"] = submitted;
+        f["myConfirmed"] = confirmed;
+        f["allowed"] = allowed;
+        f["canRespond"] = !mine && !submitted && allowed && f["status"].get<std::string>() == "open"
+                          && f["publicKey"].is_string() && !f["publicKey"].get<std::string>().empty();
     }
 
     OrderedJson snap = OrderedJson::object();
@@ -473,6 +560,9 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["creatorView"] = creatorViewJson.is_null() ? nullptr : creatorViewJson;
     json watchedArr = json::array(); for (auto& id : m_watched) watchedArr.push_back(id);
     snap["watched"] = watchedArr;
+    json pendingArr = json::array();
+    for (auto& id : m_watched) if (!state["forms"].contains(id)) pendingArr.push_back(id);
+    snap["pendingForms"] = pendingArr;
     json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
@@ -560,10 +650,15 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
-    // confirmationId is a deterministic function of (form, respondent) so re-
-    // confirmation is idempotent under union-by-id merge.
-    whisperbox::Bytes h = whisperbox::sha256(whisperbox::Bytes((formId + "|" + respondentAddr).begin(), (formId + "|" + respondentAddr).end()));
-    std::string confirmationId = whisperbox::toHex(h.data(), 8);
+    // The receipt id is the one the respondent SEALED inside its response (random,
+    // unlinkable); legacy responses fall back to the old (form, respondent) hash.
+    // Same id every time -> re-confirmation is idempotent under union-by-id.
+    OrderedJson cv = decryptView(state, m_signId);
+    std::string confirmationId;
+    if (cv["responses"].contains(formId))
+        for (const auto& r : cv["responses"][formId])
+            if (lc(r.value("respondent", "")) == respondentAddr) { confirmationId = confirmIdOf(json::parse(r.dump()), formId); break; }
+    if (confirmationId.empty()) { out["ok"] = false; out["error"] = "no decrypted response from that respondent"; return out.dump(); }
 
     OrderedJson p = OrderedJson::object();
     p["formId"] = formId;
@@ -591,6 +686,24 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     const auto& f = state["forms"][formId];
     if (f["status"].get<std::string>() != "open") { out["ok"] = false; out["error"] = "form is closed"; return out.dump(); }
+    if (m_mySubmissions.count(formId)) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
+    if (!f["publicKey"].is_string() || f["publicKey"].get<std::string>().empty()) { out["ok"] = false; out["error"] = "form not synced yet - try again in a moment"; return out.dump(); }
+    {
+        std::string wl = f["whitelist"].is_object() ? f["whitelist"].value("type", "none") : "none";
+        if (wl == "addresses") {
+            auto list = whisperbox::whitelistAddresses(f["whitelist"]);
+            if (std::find(list.begin(), list.end(), m_signId.address) == list.end()) { out["ok"] = false; out["error"] = "this form only accepts listed addresses"; return out.dump(); }
+        } else if (wl != "none") { out["ok"] = false; out["error"] = "whitelist type '" + wl + "' is not supported"; return out.dump(); }
+    }
+    {   // required questions must be answered (the creator can't ask again)
+        std::map<std::string, json> byQ;
+        for (const auto& a : answers) if (a.is_object()) byQ[a.value("questionId", "")] = a.contains("value") ? a["value"] : json();
+        for (const auto& q : f["questions"]) {
+            if (!q.value("required", false)) continue;
+            auto it = byQ.find(q.value("id", ""));
+            if (it == byQ.end() || emptyAnswer(it->second)) { out["ok"] = false; out["error"] = "required: " + q.value("text", q.value("id", "")); return out.dump(); }
+        }
+    }
 
     // The FULL response JSON is sealed to the creator — nothing appears in plaintext.
     long long submittedAt = nowMs();
@@ -599,6 +712,10 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     resp["respondent"] = m_signId.address;
     resp["submittedAt"] = submittedAt;
     resp["answers"] = answers;
+    // Random receipt id, sealed: the creator echoes it publicly on confirm; only
+    // this device (which keeps it) can tell the receipt is its own.
+    const std::string confirmationId = randomHex(8);
+    resp["confirmationId"] = confirmationId;
     std::string wlType = f["whitelist"].value("type", "none");
     if (wlType != "none") {
         // Inner signature over the canonical content (verified by the creator when
@@ -629,6 +746,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         broadcastEvent(e);
         publishState();
         m_mySubmissions.insert(formId);   // local, private: "I already answered this"
+        m_myConfirmIds[formId] = confirmationId;
         saveMySubmissions();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
     } catch (const std::exception& ex) {
@@ -647,28 +765,9 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
-    auto open = [this](const std::string& hexBlob) -> json {
-        try {
-            whisperbox::Bytes pt = whisperbox::eciesOpen(m_signId.priv, whisperbox::fromHex(hexBlob));
-            return json::parse(std::string(pt.begin(), pt.end()));
-        } catch (...) { return json(); }
-    };
-    auto verifyResponse = [](const json& pseudo) -> bool {
-        const json p = pseudo.value("payload", json::object());
-        std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
-        if (pubHex.empty() || sigHex.empty()) return false;
-        OrderedJson m = OrderedJson::object();
-        m["formId"] = lc(p.value("formId", ""));
-        m["respondent"] = lc(p.value("respondent", ""));
-        m["submittedAt"] = p.value("submittedAt", 0LL);
-        m["answers"] = p.value("answers", json::array());
-        std::string msg = "whisperbox-inner-v1|" + m.dump();
-        whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
-        if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
-        whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
-        return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
-    };
-    OrderedJson view = whisperbox::creatorView(state, m_signId.address, open, verifyResponse);
+    OrderedJson view = decryptView(state, m_signId);
+    if (view["responses"].contains(formId))
+        for (auto& r : view["responses"][formId]) r["confirmed"] = containsStr(state["forms"][formId]["confirmations"], confirmIdOf(json::parse(r.dump()), formId));
     out["ok"] = true;
     out["responses"] = view["responses"].contains(formId) ? json(view["responses"][formId]) : json::array();
     return out.dump();
@@ -796,30 +895,16 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
     std::string formId = lc(def.value("id", ""));
     if (formId.empty()) { out["ok"] = false; out["error"] = "missing id"; return out.dump(); }
 
-    // Optimistic local adoption so the UI renders before sync catches up. The
-    // canonical signed event from the topic wins later under union-by-id (same id).
+    // No local placeholder event: an unsigned form.publish with the canonical id
+    // would shadow the creator's signed event forever (union-by-id keeps the first
+    // copy). Watch the id and pull; the view shows it as pending until it lands.
     OrderedJson state = whisperbox::computeState(m_log, m_signId.valid ? m_signId.address : "");
-    if (!state["forms"].contains(formId)) {
-        OrderedJson p = OrderedJson::object();
-        p["id"] = formId;
-        p["title"] = def.value("title", "");
-        p["description"] = def.value("description", "");
-        p["creator"] = lc(def.value("creator", ""));
-        p["publicKey"] = def.value("publicKey", "");
-        p["createdAt"] = def.value("createdAt", 0LL);
-        p["expiresAt"] = def.contains("expiresAt") ? def["expiresAt"] : nullptr;
-        p["questions"] = def.value("questions", json::array());
-        p["whitelist"] = def.value("whitelist", json({{"type", "none"}, {"value", ""}}));
-        // Unsigned local placeholder (we are not the creator) — admitted locally only.
-        OrderedJson e = OrderedJson::object();
-        e["v"] = 1; e["id"] = whisperbox::formPublishId(formId); e["type"] = FORM_PUBLISH;
-        e["hlc"] = m_clock.send(nowMs()); e["dev"] = m_deviceId; e["payload"] = p;
-        adoptLocal(e);
-    }
+    const bool have = state["forms"].contains(formId);
+    if (!have && m_nodeReady) requestSync();
     m_watched.insert(formId);
     saveWatched();
     publishState();
-    out["ok"] = true; out["formId"] = formId;
+    out["ok"] = true; out["formId"] = formId; out["pending"] = !have;
     return out.dump();
 }
 
@@ -832,51 +917,52 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
 
-    auto open = [this](const std::string& hexBlob) -> json {
-        try {
-            whisperbox::Bytes pt = whisperbox::eciesOpen(m_signId.priv, whisperbox::fromHex(hexBlob));
-            return json::parse(std::string(pt.begin(), pt.end()));
-        } catch (...) { return json(); }
-    };
-    auto verifyResponse = [](const json& pseudo) -> bool {
-        const json p = pseudo.value("payload", json::object());
-        std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
-        if (pubHex.empty() || sigHex.empty()) return false;
-        OrderedJson m = OrderedJson::object();
-        m["formId"] = lc(p.value("formId", ""));
-        m["respondent"] = lc(p.value("respondent", ""));
-        m["submittedAt"] = p.value("submittedAt", 0LL);
-        m["answers"] = p.value("answers", json::array());
-        std::string msg = "whisperbox-inner-v1|" + m.dump();
-        whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
-        if (!whisperbox::ecdsaVerify(whisperbox::fromHex(pubHex), digest, whisperbox::fromHex(sigHex))) return false;
-        whisperbox::Bytes h = whisperbox::sha256(whisperbox::fromHex(pubHex));
-        return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
-    };
-    OrderedJson view = whisperbox::creatorView(state, m_signId.address, open, verifyResponse);
+    OrderedJson view = decryptView(state, m_signId);
 
-    auto csvCell = [](const std::string& s) {
-        if (s.find_first_of(",\"\n") != std::string::npos) {
-            std::string o = "\""; for (char c : s) { if (c == '"') o += "\"\""; else o += c; } return o + "\"";
+    auto csvCell = [](const std::string& v) {
+        if (v.find_first_of(",\"\r\n") != std::string::npos) {
+            std::string o = "\""; for (char c : v) { if (c == '"') o += "\"\""; else o += c; } return o + "\"";
         }
-        return s;
+        return v;
+    };
+    // Choice answers travel as option INDICES (hub + every view); render the
+    // option text so the spreadsheet is readable. Checkbox -> "a; b".
+    auto cellOf = [](const json& q, const json& v) -> std::string {
+        const json opts = q.contains("options") && q["options"].is_array() ? q["options"] : json::array();
+        auto one = [&opts](const json& x) -> std::string {
+            if (x.is_number_integer()) {
+                long long k = x.get<long long>();
+                if (k >= 0 && k < (long long)opts.size() && opts[k].is_string()) return opts[k].get<std::string>();
+            }
+            if (x.is_string()) return x.get<std::string>();
+            return x.is_null() ? "" : x.dump();
+        };
+        if (v.is_array()) {
+            std::string o;
+            for (const auto& x : v) { if (!o.empty()) o += "; "; o += one(x); }
+            return o;
+        }
+        return one(v);
     };
     const auto& f = state["forms"][formId];
-    std::string csv = "respondent,submittedAt,";
-    json qids = json::array();
-    for (const auto& q : f["questions"]) { csv += csvCell(q.value("text", q.value("id", ""))) + ","; qids.push_back(q.value("id", "")); }
-    csv += "\n";
+    const json confs = f["confirmations"];
+    std::vector<std::string> header = {"respondent", "submittedAt", "confirmed"};
+    std::vector<json> qs;
+    for (const auto& q : f["questions"]) { header.push_back(q.value("text", q.value("id", ""))); qs.push_back(json::parse(q.dump())); }
+    auto line = [&](const std::vector<std::string>& cells) {
+        std::string l; for (size_t k = 0; k < cells.size(); ++k) { if (k) l += ","; l += csvCell(cells[k]); } return l + "\n";
+    };
+    std::string csv = line(header);
     if (view["responses"].contains(formId)) {
-        for (const auto& r : view["responses"][formId]) {
-            csv += csvCell(r["respondent"].get<std::string>()) + "," + std::to_string(r.value("submittedAt", 0LL)) + ",";
-            json byQ = json::object();
-            for (const auto& a : r["answers"]) byQ[a.value("questionId", "")] = a.value("value", "");
-            for (const auto& qid : qids) {
-                std::string v = byQ.contains(qid.get<std::string>()) ? json(byQ[qid.get<std::string>()]).dump() : "";
-                if (v.rfind("\"", 0) == 0 && v.size() >= 2) v = v.substr(1, v.size() - 2); // strip JSON quoting for plain strings
-                csv += csvCell(v) + ",";
-            }
-            csv += "\n";
+        for (const auto& ro : view["responses"][formId]) {
+            json r = json::parse(ro.dump());
+            std::map<std::string, json> byQ;
+            for (const auto& a : r["answers"]) if (a.is_object()) byQ[a.value("questionId", "")] = a.contains("value") ? a["value"] : json();
+            std::vector<std::string> row = {r.value("respondent", ""),
+                isoUtc(r.contains("submittedAt") && r["submittedAt"].is_number() ? r["submittedAt"].get<long long>() : 0),
+                containsStr(confs, confirmIdOf(r, formId)) ? "yes" : "no"};
+            for (const auto& q : qs) { std::string qid = q.value("id", ""); row.push_back(byQ.count(qid) ? cellOf(q, byQ[qid]) : ""); }
+            csv += line(row);
         }
     }
     out["ok"] = true; out["csv"] = csv;
