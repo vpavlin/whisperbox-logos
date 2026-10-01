@@ -10,9 +10,8 @@ FX="$HDIR/fixtures"
 OUT="${WB_OUT:-/tmp/wb-harness}/scenarios"
 mkdir -p "$OUT"
 [ -x "$HDIR/harness" ] || { echo "build the harness first: render.sh" >&2; exit 2; }
-QMLPATH="$(qmake6 -query QT_INSTALL_QML 2>/dev/null || true)"
-[ -n "${WB_DS:-}" ] && QMLPATH="$WB_DS:$QMLPATH"
-export QML_IMPORT_PATH="${QML_IMPORT_PATH:+$QML_IMPORT_PATH:}$QMLPATH"
+# shellcheck disable=SC1091
+. "$HDIR/harness.env"   # written by render.sh: the Qt runtime the harness was linked against
 
 # form id lookup: fid <fixture> <title>
 fid() { python3 -c "import json,sys; d=json.load(open('$FX/$1.json')); print(next(k for k,v in d['state']['forms'].items() if v['title']=='$2'))"; }
@@ -22,7 +21,7 @@ FAIL=0
 # run <name> <fixture> <props-json> [invoke] ; then optional expectations via expect/deny
 run() {
     local name=$1 fx=$2 props=$3 inv=${4:-}
-    WB_PROPS="$props" WB_INVOKE="$inv" "$HDIR/harness" "$QML" "$FX/$fx.json" "$OUT/$name.png" > /dev/null 2> "$OUT/$name.log"
+    WB_PROPS="$props" WB_INVOKE="$inv" WB_CLICKS="${WB_CLICKS:-}" WB_DUMP="${WB_DUMP:-}" "$HDIR/harness" "$QML" "$FX/$fx.json" "$OUT/$name.png" > /dev/null 2> "$OUT/$name.log"
     local rc=$?
     local warn; warn=$(grep -cE '^\[(W|E)\]' "$OUT/$name.log")
     if [ $rc -ne 0 ] || [ "$warn" -ne 0 ]; then
@@ -51,6 +50,11 @@ run create-publish   creator   '{"draftTitle":"Team offsite","draftDescription":
 expect 'CALL whisperbox_core createForm argc=1 args=\{"title":"Team offsite","description":"Where next\?","questions":\[\{"id":"q1","type":"radioButtons","text":"Place","required":true,"options":\["Alps","Sea"\]\},\{"id":"q2","type":"textarea","text":"Why\?","required":false\}\],"whitelist":\{"type":"addresses","value":"0x1111111111111111111111111111111111111111"\}\}$' "publish -> createForm(def) with options + filtered allow-list"
 run create-bad-choice creator  '{"draftTitle":"x","draftQuestions":[{"type":"checkbox","text":"Pick","required":true,"optionsText":"only one"}]}' "doCreate"
 deny "CALL whisperbox_core createForm" "choice question with <2 options is not published"
+# Real clicks on the builder's type/required chips (dialog at 1280x800: Q1 chips row
+# y=381; "Single choice" x=548, "Required" x=732). Regression: chip handlers used the
+# CHIP repeater's index, so a click appended a phantom question instead.
+WB_DUMP=draftQuestions WB_CLICKS="548,381;732,381" run create-chips creator "{}" "openCreate"
+expect 'DUMP draftQuestions \[\{"optionsText":"","required":false,"text":"","type":"radioButtons"\}\]' "chip clicks edit Q1 in place (single choice, now optional) - no phantom question"
 run respondent-done  respondent "{\"selectedId\":\"$LUNCH_B\"}"
 run respondent-form  respondent "{\"selectedId\":\"$LEGACY_B\"}"
 run submit-missing   outsider  "{\"selectedId\":\"$LUNCH_C\"}" "doSubmit"

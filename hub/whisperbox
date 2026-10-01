@@ -138,13 +138,17 @@ def parse_question(spec):
     if not qtype:
         die(f"unknown question type {qtype!r} — text|textarea|radio|checkbox")
     options = None
-    if "?" in rest:
-        text, optstr = rest.split("?", 1)
+    if qtype in ("radioButtons", "checkbox"):
+        # Options follow the LAST '?' so the question text may contain '?' too:
+        # "radio:Which one??A|B" -> text "Which one?", options [A, B].
+        if "?" not in rest:
+            die(f"choice question needs options: {spec!r} - want TYPE:TEXT?OPT|OPT")
+        text, optstr = rest.rsplit("?", 1)
         options = [o.strip() for o in optstr.split("|") if o.strip()]
         if len(options) < 2:
             die(f"choice questions need at least 2 options (got {options})")
     else:
-        text = rest
+        text = rest   # text/textarea: the whole rest is the question, '?' included
     q = {"type": qtype, "text": text.strip(), "required": required}
     if options:
         q["options"] = options
@@ -359,7 +363,7 @@ def main():
     sp.add_argument("--title")
     sp.add_argument("--desc")
     sp.add_argument("--question", action="append",
-                    help='TYPE:TEXT[?OPT|OPT|...] — text|textarea|radio|checkbox; leading "-" = optional')
+                    help='TYPE:TEXT[?OPT|OPT|...] — text|textarea|radio|checkbox; leading "-" = optional (write --question=-text:... so argparse keeps it)')
     sp.add_argument("--def", dest="def_file", help="full form definition JSON file (instead of flags)")
     sp = sub.add_parser("join", help="follow a form by URI or id")
     sp.add_argument("uri_or_id")

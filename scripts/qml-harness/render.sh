@@ -22,16 +22,18 @@ QTBASE=""; QTDCL=""
 cd "$HDIR"
 if [ -n "$QTBASE" ] && [ -n "$QTDCL" ]; then
     echo "qt (nix):    $QTBASE | $QTDCL"
-    MOC=$(for d in /nix/store/*-qtbase-6.*; do [ -x "$d/bin/moc" ] && { echo "$d/bin/moc"; break; }; done)
-    INCS="-I$QTBASE/include -I$QTBASE/include/QtCore -I$QTBASE/include/QtGui -I$QTDCL/include -I$QTDCL/include/QtQml -I$QTDCL/include/QtQuick"
-    LIBS="-L$QTBASE/lib -L$QTDCL/lib -lQt6Quick -lQt6Qml -lQt6Gui -lQt6Core"
+    MOC=""
+    for c in "$QTBASE/libexec/moc" "$QTBASE/bin/moc"; do [ -x "$c" ] && { MOC="$c"; break; }; done
+    [ -z "$MOC" ] && MOC=$(for d in /nix/store/*-qtbase-6.*; do [ -d "$d" ] || continue; for c in "$d/libexec/moc" "$d/bin/moc"; do [ -x "$c" ] && { echo "$c"; break 2; }; done; done)
+    INCS="-I$QTBASE/include -I$QTBASE/include/QtCore -I$QTBASE/include/QtGui -I$QTBASE/include/QtTest -I$QTDCL/include -I$QTDCL/include/QtQml -I$QTDCL/include/QtQuick"
+    LIBS="-L$QTBASE/lib -L$QTDCL/lib -lQt6Quick -lQt6Qml -lQt6Gui -lQt6Test -lQt6Core"
     export LD_LIBRARY_PATH="$QTBASE/lib:$QTDCL/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     QMLPATH="$QTDCL/lib/qt-6/qml"
 elif pkg-config --exists Qt6Quick 2>/dev/null; then
     echo "qt (system): $(pkg-config --modversion Qt6Quick)"
     MOC="$(pkg-config --variable=libexecdir Qt6Core)/moc"
-    INCS="$(pkg-config --cflags Qt6Quick Qt6Qml Qt6Gui Qt6Core)"
-    LIBS="$(pkg-config --libs Qt6Quick Qt6Qml Qt6Gui Qt6Core)"
+    INCS="$(pkg-config --cflags Qt6Quick Qt6Qml Qt6Gui Qt6Test Qt6Core)"
+    LIBS="$(pkg-config --libs Qt6Quick Qt6Qml Qt6Gui Qt6Test Qt6Core)"
     QMLPATH="$(qmake6 -query QT_INSTALL_QML 2>/dev/null)"
 else
     echo "FATAL: no Qt6 (nix store or pkg-config Qt6Quick)" >&2; exit 2
@@ -53,6 +55,8 @@ echo "harness built: $HDIR/harness"
 
 [ -n "$DS" ] && QMLPATH="$DS:$QMLPATH"
 export QML_IMPORT_PATH="${QML_IMPORT_PATH:+$QML_IMPORT_PATH:}$QMLPATH"
+# scenarios.sh reuses exactly this runtime (same Qt as the harness was linked to).
+printf 'export LD_LIBRARY_PATH=%q\nexport QML_IMPORT_PATH=%q\n' "${LD_LIBRARY_PATH:-}" "$QML_IMPORT_PATH" > "$HDIR/harness.env"
 
 # ── run against fixtures ──
 FIXTURES=("$@")

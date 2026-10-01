@@ -225,7 +225,7 @@ Item {
     }
     function addDraftQuestion() { root.draftQuestions = root.draftQuestions.concat([{ type: "text", text: "", required: false, optionsText: "" }]); }
     function removeDraftQuestion(i) { var a = root.draftQuestions.slice(); a.splice(i, 1); root.draftQuestions = a; }
-    function setDraft(i, prop, v) { var a = root.draftQuestions.slice(); var q = Object.assign({}, a[i]); q[prop] = v; a[i] = q; root.draftQuestions = a; }
+    function setDraft(i, prop, v) { if (i < 0 || i >= root.draftQuestions.length) return; var a = root.draftQuestions.slice(); var q = Object.assign({}, a[i]); q[prop] = v; a[i] = q; root.draftQuestions = a; }
     function draftOptions(q) {
         var out = [], lines = String(q.optionsText || "").split("\n");
         for (var i = 0; i < lines.length; i++) { var s = lines[i].trim(); if (s) out.push(s); }
@@ -1206,6 +1206,9 @@ Item {
                             color: root.wbSurfaceRaised
                             border.color: root.wbBorder
                             border.width: 1
+                            // The question's index, captured here: inside the nested type-chip
+                            // Repeater below, a bare `index` is the CHIP's index, not the question's.
+                            readonly property int qi: index
                             property var d: root.draftQuestions[index] || ({})
                             property bool choice: d.type === "radioButtons" || d.type === "checkbox"
 
@@ -1234,7 +1237,7 @@ Item {
                                             background: null
                                             placeholderText: "Question"
                                             text: String(dq.d.text || "")
-                                            onTextChanged: if (text !== String(dq.d.text || "")) root.setDraft(index, "text", text)
+                                            onTextChanged: if (text !== String(dq.d.text || "")) root.setDraft(dq.qi, "text", text)
                                         }
                                     }
                                     Text {
@@ -1242,7 +1245,7 @@ Item {
                                         visible: root.draftQuestions.length > 1
                                         font.pixelSize: 11
                                         color: root.wbTextTert
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.removeDraftQuestion(index) }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.removeDraftQuestion(dq.qi) }
                                     }
                                 }
                                 Flow {
@@ -1259,7 +1262,7 @@ Item {
                                             border.color: on ? root.wbPrimary : root.wbBorder
                                             border.width: 1
                                             Text { id: chipT; anchors.centerIn: parent; text: modelData.label; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(index, "type", modelData.t) }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, "type", modelData.t) }
                                         }
                                     }
                                     Rectangle {
@@ -1270,7 +1273,7 @@ Item {
                                         border.color: dq.d.required ? root.wbAccent : root.wbBorder
                                         border.width: 1
                                         Text { id: reqT; anchors.centerIn: parent; text: dq.d.required ? "Required" : "Optional"; font.pixelSize: 11; color: dq.d.required ? root.wbAccent : root.wbTextSec }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(index, "required", !dq.d.required) }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, "required", !dq.d.required) }
                                     }
                                 }
                                 InputBox {
@@ -1289,7 +1292,7 @@ Item {
                                             background: null
                                             placeholderText: "One option per line"
                                             text: String(dq.d.optionsText || "")
-                                            onTextChanged: if (text !== String(dq.d.optionsText || "")) root.setDraft(index, "optionsText", text)
+                                            onTextChanged: if (text !== String(dq.d.optionsText || "")) root.setDraft(dq.qi, "optionsText", text)
                                         }
                                     }
                                 }

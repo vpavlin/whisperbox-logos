@@ -155,9 +155,10 @@ void WhisperboxCoreImpl::onContextReady() {
         if (!m_nodeReady) bootstrapDelivery();
         else {
             if (nowMs() - m_lastSeedMs >= 60000 && !m_log.empty()) seedBroadcast();
-            // Catchup retries while the log is still empty: 3s, 10s, 25s after the
-            // node-up request, then every 60s (self-heals late joiners on a sparse mesh).
-            if (m_log.empty() && m_nodeReady) {
+            // Catchup retries: ALWAYS 3s, 10s, 25s after the node-up request (the
+            // first peer to answer may hold only part of the log, or be inside its
+            // 3s re-serve throttle), then every 60s while the log is still empty.
+            if (m_nodeReady && (m_syncReqTries <= 3 || m_log.empty())) {
                 static const long long kBackoffMs[] = {3000, 10000, 25000};
                 long long delay = m_syncReqTries <= 3 ? kBackoffMs[m_syncReqTries - 1] : 60000;
                 if (nowMs() - m_lastSyncReqMs >= delay) requestSync();

@@ -57,9 +57,29 @@ this release fixes them and finishes the Phase 6 feature set. Both packages
   identity & network dialog (copy address, counters, resync, key import).
 - No emoji glyphs (they rendered as missing-glyph boxes).
 
+- Fix (found in the real Basecamp GUI): the builder's type/required chips
+  sit in a nested Repeater, where `index` is the CHIP's index - clicking
+  "Single choice" on Q2 appended a phantom question instead. Handlers now use
+  the question's captured index.
+
 ### Hub
 - `whisperbox join` uses `importForm` (pulls immediately); new
   `whisperbox confirm <form> <respondent>`; `list` shows receipts.
+- Fix: text questions containing `?` ("Name?") were parsed as choice
+  questions with no options; options now follow the LAST `?` and only for
+  radio/checkbox. README shows the `--question=-...` form argparse needs.
+
+### Verified 2026-10-01 (Atlas)
+- `nix build .#whisperbox_core .#whisperbox` -> portable `linux-amd64`
+  packages, manifest 0.3.0, all 16 core methods exposed.
+- Real network (logos.test fleet), three headless hubs on the built core:
+  create -> join by link -> sealed answer -> decrypt -> receipt -> CSV,
+  cold-start catch-up via SYNC_REQ, privacy checks, close.
+- Basecamp 0.2.0 AppImage: installed from a package repo through the
+  package manager (dependency chain resolves), then both directions against
+  a hub over the network - GUI creates/shares (QR decodes, copy works),
+  decrypts, sends receipt, exports CSV; GUI opens a link before sync, answers
+  all question types, sees the receipt.
 
 ### Tests (all runnable without nix: `scripts/test.sh`)
 - C++ engine parity against the TS golden vectors (merge/fold/creator view);

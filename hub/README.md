@@ -10,7 +10,7 @@ whisperbox up                          # daemon + load whisperbox_core
 whisperbox identity new                # keypair in the hub's data dir
 whisperbox create --title "Lunch?" \
     --question "radio:Pick?Sushi|Pizza|Tacos" \
-    --question "-text:Allergies?"       # leading "-" = optional question
+    --question=-text:Allergies?         # leading "-" = optional (needs the = form)
 whisperbox list
 whisperbox join whisperbox://form?id=form-...
 whisperbox answer form-... -q question_1=0

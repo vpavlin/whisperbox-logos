@@ -22,6 +22,13 @@
 #include <QVariantList>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QJSValue>
+// QTest only declares the QWindow mouse helpers when QT_GUI_LIB is defined.
+#ifndef QT_GUI_LIB
+#define QT_GUI_LIB
+#endif
+#include <QTest>
 #include "qrcodegen.hpp"   // whisperbox_core/src (vendored, MIT)
 #include <cstdio>
 
@@ -144,6 +151,34 @@ int main(int argc, char **argv) {
             if (fn.trimmed().isEmpty()) continue;
             if (!QMetaObject::invokeMethod(r, fn.trimmed().constData()))
                 { fprintf(stderr, "[E] WB_INVOKE: no function %s\n", fn.constData()); g_qmlErrors++; }
+        }
+    });
+
+    // WB_CLICKS="x,y;x,y" real mouse clicks (window coords), 400 ms apart, after
+    // WB_PROPS/WB_INVOKE - exercises the actual delegates/handlers, not just functions.
+    {
+        const QList<QByteArray> clicks = qgetenv("WB_CLICKS").split(';');
+        int t = 1000;
+        for (const QByteArray &c : clicks) {
+            const QList<QByteArray> xy = c.split(',');
+            if (xy.size() != 2) continue;
+            const QPointF p(xy[0].toDouble(), xy[1].toDouble());
+            // QTest goes through the platform input path (hand-built QMouseEvents
+            // via sendEvent are not delivered to MouseAreas on Qt 6.9 offscreen).
+            QTimer::singleShot(t, [&view, p] { QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier, p.toPoint()); });
+            t += 400;
+        }
+    }
+    // WB_DUMP="propA,propB": print root properties as JSON at the end (DUMP <name> <json>).
+    QTimer::singleShot(4300, [&view] {
+        QQuickItem *r = view.rootObject(); if (!r) return;
+        for (const QByteArray &n : qgetenv("WB_DUMP").split(',')) {
+            if (n.isEmpty()) continue;
+            const QJsonValue v = QJsonValue::fromVariant(r->property(n.constData()).value<QJSValue>().toVariant());
+            const QByteArray j = v.isArray() ? QJsonDocument(v.toArray()).toJson(QJsonDocument::Compact)
+                               : v.isObject() ? QJsonDocument(v.toObject()).toJson(QJsonDocument::Compact)
+                               : QJsonDocument(QJsonArray{v}).toJson(QJsonDocument::Compact);
+            fprintf(stderr, "DUMP %s %s\n", n.constData(), j.constData());
         }
     });
 
