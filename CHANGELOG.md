@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.2.0 (2026-10-01) - core + view in lockstep
+
+Review of everything shipped so far found several bugs that hit every install;
+this release fixes them and finishes the Phase 6 feature set. Both packages
+(`whisperbox_core`, `whisperbox`) MUST be updated together.
+
+### Core (`whisperbox_core`)
+- **Fix: creator snapshot crashed once a response was decrypted.** The confirmed-
+  flag hash built its byte buffer from two *different* temporary strings
+  (`Bytes((a+b).begin(), (a+b).end())`), which is undefined behaviour and in
+  practice threw `std::length_error` from `snapshot()` / `confirmResponse()`.
+- **Fix: incremental merge inserted events in reverse HLC order.** `mergeOne`
+  walked back while `prev < e`, so every newer event landed at the FRONT of the
+  log. Fold order (e.g. "earliest response per respondent wins") could differ
+  between replicas. Existing logs are re-sorted on load.
+- **Fix: batch merge comparator.** `mergeWhisperbox` passed the 3-way
+  `totalOrder` (-1/0/1) straight to `std::sort` (invalid strict-weak-order, UB).
+- **Fix: every install shared the device id `whisperbox-core`.** It was never
+  loaded from `device_id.txt`, so all peers ignored each other's `SYNC_REQ` as
+  self-sent (cold start waited for the 60 s re-seed) and SDS saw identical
+  sender ids. Now a random `wb-<hex>` id is generated once and persisted.
+- **Fix: opening a share link before sync left the form empty forever.**
+  `importForm` adopted an unsigned placeholder under the canonical event id,
+  which the creator's signed event could never replace. It now only watches
+  the id and asks peers to sync; old placeholders are dropped on load.
+- **Privacy: receipts are no longer linkable to respondents.** The public
+  confirmation id was `sha256(formId|respondentAddress)`, so anyone could test
+  whether a given address had answered. Respondents now seal a random
+  `confirmationId` inside their response and keep it locally. Legacy
+  responses still confirm via the old hash.
+- **Whitelist `addresses` is enforced.** Previously only the inner signature
+  was checked; now the creator also drops responses from unlisted addresses
+  (`not-whitelisted`). The respondent's core refuses up front.
+- Respondent state in the snapshot: each form carries `mine`, `mySubmitted`,
+  `myConfirmed`, `allowed`, `canRespond`; `pendingForms` lists imported ids
+  whose definition hasn't synced yet.
+- `submitResponse` rejects double submissions, missing required answers,
+  unsupported whitelist types and forms whose key hasn't synced.
+- `exportCsv`: proper columns (no trailing empty column), ISO timestamps, a
+  `confirmed` column, choice answers rendered as option text.
+
+### View (`whisperbox`)
+- Rewired to the real core API (0.1.3 called `submitResponse` with one
+  argument and read non-existent fields, so submitting and the creator's
+  response list did not work; it also failed the render harness).
+- All four question types in the builder and the answer view (short text,
+  paragraph, single/multiple choice), required flag, options editor, and an
+  optional "only listed addresses" restriction.
+- Creator: response cards with question text and option labels, "Send
+  receipt", "Close form", CSV export dialog with real clipboard copy.
+- Respondent: sent / receipt-received / closed / not-on-the-list states.
+- Share dialog with the short `whisperbox://form?id=` link + a scannable QR,
+  and real clipboard copy (0.1.3 only showed a toast).
+- Sidebar grouped into waiting-for-sync / my forms / answered / open forms;
+  identity & network dialog (copy address, counters, resync, key import).
+- No emoji glyphs (they rendered as missing-glyph boxes).
+
+### Hub
+- `whisperbox join` uses `importForm` (pulls immediately); new
+  `whisperbox confirm <form> <respondent>`; `list` shows receipts.
+
+### Tests (all runnable without nix: `scripts/test.sh`)
+- C++ engine parity against the TS golden vectors (merge/fold/creator view);
+  the golden creator view is now non-empty (it was `{}`, so the projection was
+  never pinned).
+- End-to-end test of the real `whisperbox_core_impl.cpp` over a fake
+  delivery bus (`whisperbox_core/test/fakesdk`): Phase 6 scenarios A
+  (create/respond/decrypt/receipt/CSV), B (cold start) and C (privacy), plus
+  whitelist, forged-response, legacy-compat, close, restart and log-repair
+  checks.
+- QML harness works with system Qt6, renders fixtures generated from the real
+  core, and asserts the view->core call contract per screen.
+
 ## 0.1.3 (2026-08-23)
 - **QML v0.3: Form detail views.** Respondent view (questions + text inputs + submit
   wired to core + privacy note) and creator view (stats row, share card with URI,

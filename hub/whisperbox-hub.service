@@ -1,0 +1,23 @@
+# systemd USER unit for an always-on WhisperBox hub (PLAN 7.1).
+# Install:  cp hub/whisperbox-hub.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now whisperbox-hub
+#           loginctl enable-linger $USER     # keep it running without a session
+# Assumes the setup in hub/README.md: ~/whisperbox-hub/{whisperbox,logos-hub,...}.
+# NOTE: written 2026-10-01 without a hub host to try it on - verify `whisperbox
+# status` counters move after enabling.
+[Unit]
+Description=WhisperBox headless hub (whisperbox_core under logoscore)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=WHISPERBOX_HUB_HOME=%h/whisperbox-hub
+Environment=WHISPERBOX_HUB=%h/whisperbox-hub/logos-hub
+WorkingDirectory=%h/whisperbox-hub
+ExecStart=%h/whisperbox-hub/whisperbox up
+ExecStop=%h/whisperbox-hub/whisperbox down
+
+[Install]
+WantedBy=default.target

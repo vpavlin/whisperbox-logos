@@ -16,7 +16,8 @@ whisperbox join whisperbox://form?id=form-...
 whisperbox answer form-... -q question_1=0
 whisperbox responses form-...          # creator only: decrypts the pool
 whisperbox uri form-...                # share URI for Basecamp respondents
-whisperbox raw confirmResponse form-... 0xabc...   # escape hatch (any method)
+whisperbox confirm form-... 0xabc...  # send the respondent a receipt
+whisperbox raw <method> [args...]      # escape hatch (any method)
 ```
 
 ## Architecture
@@ -91,3 +92,10 @@ whisperbox up                  # writes ~/.logos-hub/profiles/whisperbox.json, s
   see cerebrum docs/infrastructure/logoscore-cli-event-gap.md). The pinned
   source build above is the fix; verify with `whisperbox status` counters
   (rxRaw must move when peers broadcast) before trusting a hub.
+
+## Always-on (systemd)
+
+`hub/whisperbox-hub.service` is a user unit wrapping `whisperbox up/down`
+(install steps in its header). A hub keeps the topic's history served to
+late joiners even when every creator's desktop is offline - it holds only
+sealed response blobs, never a key that opens them.

@@ -183,12 +183,17 @@ def cmd_create(a):
 
 def cmd_join(a):
     target = a.uri_or_id.strip()
-    if "id=" in target:
-        target = target.split("id=", 1)[1]
-    r = call("joinForm", target)
+    if not target.startswith("whisperbox://"):
+        target = "whisperbox://form?id=" + target
+    # importForm (core >= 0.2) watches the id AND asks peers for the log right away.
+    r = call("importForm", target)
     if not isinstance(r, dict) or not r.get("ok"):
-        die(f"joinForm failed: {r}")
-    print(f"joined {target} — it will appear in `whisperbox list` once its publish event lands")
+        die(f"importForm failed: {r}")
+    fid = r.get("formId", target)
+    if r.get("pending"):
+        print(f"joined {fid} — it will appear in `whisperbox list` once its publish event lands")
+    else:
+        print(f"joined {fid}")
 
 
 def cmd_list(_a):
@@ -208,7 +213,7 @@ def cmd_list(_a):
         if fid in watched:
             badges.append("watched")
         if fid in mine_sub:
-            badges.append("answered")
+            badges.append("answered, receipt received" if f.get("myConfirmed") else "answered")
         nq = len(f.get("questions") or [])
         print(f"{fid}  {f.get('status','?'):6}  q={nq}  {f.get('title','')}"
               + (f"   [{', '.join(badges)}]" if badges else ""))
@@ -307,6 +312,13 @@ def cmd_uri(a):
     print(r["uri"])
 
 
+def cmd_confirm(a):
+    r = call("confirmResponse", a.form_id, a.respondent)
+    if not isinstance(r, dict) or not r.get("ok"):
+        die(f"confirmResponse failed: {r}")
+    print(f"receipt sent to {a.respondent} for {a.form_id}")
+
+
 def cmd_close(a):
     r = call("closeForm", a.form_id)
     if not isinstance(r, dict) or not r.get("ok"):
@@ -360,6 +372,9 @@ def main():
     sp.add_argument("form_id")
     sp = sub.add_parser("uri", help="print the share URI for a form")
     sp.add_argument("form_id")
+    sp = sub.add_parser("confirm", help="send a receipt for a response (creator only)")
+    sp.add_argument("form_id")
+    sp.add_argument("respondent", help="respondent 0x address (from `responses`)")
     sp = sub.add_parser("close", help="close a form (creator only)")
     sp.add_argument("form_id")
     sub.add_parser("status", help="identity + node + counters at a glance")
@@ -370,7 +385,7 @@ def main():
     a = ap.parse_args()
     {"up": cmd_up, "down": cmd_down, "identity": cmd_identity, "create": cmd_create,
      "join": cmd_join, "list": cmd_list, "answer": cmd_answer, "responses": cmd_responses,
-     "uri": cmd_uri, "close": cmd_close, "status": cmd_status, "raw": cmd_raw}[a.cmd](a)
+     "uri": cmd_uri, "confirm": cmd_confirm, "close": cmd_close, "status": cmd_status, "raw": cmd_raw}[a.cmd](a)
 
 
 if __name__ == "__main__":

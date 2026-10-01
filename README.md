@@ -18,7 +18,7 @@ module wrapper) libraries. Template: [qaku-logos](https://github.com/vpavlin/qak
 - **`whisperbox_core/`** - the universal C++ core module (engine mirror, ECIES crypto,
   identity, delivery wiring, persistence). Runs behind the view AND headless as a hub.
 - **`module/`** - the desktop `ui_qml` view (pure QML over the Logos design system).
-- **`hub/`** - headless always-on runner (post-v1).
+- **`hub/`** - headless CLI/runner over logoscore (`hub/README.md`).
 
 ## Protocol (one shared topic, `/whisperbox/1/all/proto`)
 | event | who | notes |
@@ -32,7 +32,30 @@ Append-only event log, union-by-id merge, HLC ordering, RBSR cold-start catchup.
 One response per (form, respondent) falls out of deterministic event ids.
 
 ## Install (Basecamp 0.2.x)
-_(pending first release - see CHANGELOG.md)_
+Add the package repository in Basecamp and install **WhisperBox** (it pulls
+`whisperbox_core` and `delivery_module`):
+`https://raw.githubusercontent.com/jimmy-claw/whisperbox-basecamp/main/logos-repo.json`
+
+Always update `whisperbox` and `whisperbox_core` together (same version).
+
+## Privacy model
+- Form definitions (title, questions, who may answer) are public on the topic.
+- A response is ECIES-sealed to the form creator's key; on the wire and in the
+  fleet store it is an opaque blob with no respondent identity.
+- The creator's receipt carries a random id the respondent sealed inside its
+  response, so a receipt can't be linked to an address.
+- "Only listed addresses" forms: respondents sign inside the sealed payload;
+  the creator drops unsigned or unlisted responses.
+- Delta vs. the original whisperbox: Logos delivery keeps channel history in the
+  fleet store (that's how late joiners catch up). Sealed bytes are useless without
+  the form key; form metadata was public by design.
+
+## Development
+`scripts/test.sh` runs every layer that doesn't need nix: TS engine
+(convergence + golden vectors), C++ crypto + engine parity, an end-to-end test of
+the real core module over a fake delivery bus, and the QML render harness +
+interaction scenarios. Packages are built with nix on the build host:
+`nix build .#whisperbox_core .#whisperbox` (portable `.lgx`).
 
 ## License
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
