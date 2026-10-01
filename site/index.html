@@ -72,7 +72,26 @@ h1, h2, h3 { font-family: var(--display); font-weight: 400; text-wrap: balance; 
 .bar nav a:hover { color: var(--ink); }
 
 /* ── hero ── */
-.hero { padding-block: clamp(28px, 6vw, 64px) 40px; display: grid; gap: 18px; }
+.hero { padding-block: clamp(28px, 6vw, 64px) 40px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 24px 40px; align-items: center; }
+.hero .copy-col { display: grid; gap: 18px; min-width: 0; }
+@media (max-width: 760px) { .hero { grid-template-columns: minmax(0, 1fr); } .whisper { max-width: 260px; } }
+.whisper { width: 100%; height: auto; overflow: visible; }
+.whisper .lean { transform-origin: 70px 190px; animation: lean 4.8s ease-in-out infinite; }
+.whisper .b2 { animation: reply 4.8s ease-in-out infinite; }
+@keyframes lean { 0%, 100% { transform: rotate(0deg); } 30%, 70% { transform: rotate(7deg); } }
+@keyframes reply { 0%, 45% { opacity: 0; } 55%, 92% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .whisper .lean, .whisper .b2 { animation: none; } }
+
+/* ── overheard strip ── */
+.overheard { margin-top: 20px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 20px; align-items: baseline;
+  border-block: 1px dashed var(--line); padding-block: 16px; }
+@media (max-width: 640px) { .overheard { grid-template-columns: minmax(0, 1fr); } }
+.overheard .lines { display: grid; gap: 4px; min-width: 0; }
+.overheard .say { font: 400 1.15rem/1.4 var(--display); color: var(--ink); margin: 0; }
+.overheard .heard { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.overheard .heard code { font: 400 0.8rem/1.4 var(--mono); color: var(--wax); }
+.overheard .lines.swap { animation: reseal 420ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .overheard .lines.swap { animation: none; } }
 .hero h1 { font-size: var(--step-3); line-height: 1.02; max-width: 15ch; }
 .hero h1 em { font-style: normal; color: var(--seal); }
 .lede { font-size: var(--step-1); color: var(--ink-2); max-width: 58ch; margin: 0; }
@@ -187,9 +206,31 @@ footer p { margin: 0; max-width: 70ch; }
   </div>
 
   <header class="hero" id="top">
-    <span class="label">Encrypted forms for Logos Basecamp</span>
-    <h1>Ask in public. <em>Read in private.</em></h1>
-    <p class="lede">Publish a form anyone can find. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
+    <div class="copy-col">
+      <span class="label">Encrypted forms for Logos Basecamp</span>
+      <h1>Ask in public. <em>Read in private.</em></h1>
+      <p class="lede">Publish a form anyone can find. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
+    </div>
+    <svg class="whisper" viewBox="0 0 300 230" role="img" aria-label="Two people whispering. One says: psst, have you heard? The other: heard what?">
+      <g class="lean">
+        <circle cx="78" cy="118" r="30" style="fill:var(--seal)"/>
+        <rect x="40" y="152" width="76" height="70" rx="34" style="fill:var(--seal)"/>
+        <ellipse cx="114" cy="122" rx="9" ry="15" style="fill:var(--seal)"/>
+      </g>
+      <circle cx="210" cy="122" r="30" style="fill:var(--ink-3)"/>
+      <rect x="172" y="156" width="76" height="66" rx="34" style="fill:var(--ink-3)"/>
+      <circle cx="182" cy="122" r="6" style="fill:var(--paper)"/>
+      <g>
+        <rect x="6" y="14" width="150" height="46" rx="16" style="fill:var(--desk-2);stroke:var(--line)"/>
+        <path d="M60 60 L72 78 L80 60 Z" style="fill:var(--desk-2)"/>
+        <text x="81" y="43" text-anchor="middle" style="fill:var(--ink);font:400 17px var(--display)">psst… have you heard?</text>
+      </g>
+      <g class="b2">
+        <rect x="176" y="40" width="112" height="38" rx="14" style="fill:var(--desk-2);stroke:var(--line)"/>
+        <path d="M214 78 L218 92 L230 78 Z" style="fill:var(--desk-2)"/>
+        <text x="232" y="64" text-anchor="middle" style="fill:var(--ink-2);font:italic 400 14px var(--body)">…heard what?</text>
+      </g>
+    </svg>
   </header>
 
   <div class="desk" aria-label="Live demo">
@@ -253,6 +294,14 @@ footer p { margin: 0; max-width: 70ch; }
     </div>
   </div>
 
+  <div class="overheard" aria-live="polite">
+    <span class="label">Overheard on the network</span>
+    <div class="lines" id="gossip">
+      <p class="say">“Psst… did you hear what Jana put for the offsite?”</p>
+      <p class="heard">“Apparently she wrote <code>9c41e07a…b2f6</code>. That's all anyone got.”</p>
+    </div>
+  </div>
+
   <section id="how">
     <h2>How it works</h2>
     <p class="sub">Three messages on one shared topic, synced peer to peer over Logos Messaging. Every device keeps its own copy of the log, so late joiners catch up from whoever is online.</p>
@@ -273,6 +322,7 @@ footer p { margin: 0; max-width: 70ch; }
   </section>
 
   <section id="privacy">
+    <span class="label">Who gets to gossip about what</span>
     <h2>What's public, what's sealed</h2>
     <p class="sub">Forms are meant to be found, so their definitions are public. Everything about a response is sealed.</p>
     <div class="ledger">
@@ -315,7 +365,7 @@ whisperbox responses form-…</pre>
   </section>
 
   <footer>
-    <p>A rebuild of <a href="https://github.com/whisperbox-org/whisperbox">whisperbox-org/whisperbox</a> for the Logos stack, on <a href="https://github.com/vpavlin/loam-sync">loam-sync</a> and Logos Messaging. MIT or Apache-2.0.</p>
+    <p><strong>Ssshhh.</strong> You didn't hear it from us. A rebuild of <a href="https://github.com/whisperbox-org/whisperbox">whisperbox-org/whisperbox</a> for the Logos stack, on <a href="https://github.com/vpavlin/loam-sync">loam-sync</a> and Logos Messaging. MIT or Apache-2.0.</p>
     <a href="https://github.com/vpavlin/whisperbox-logos">github.com/vpavlin/whisperbox-logos</a>
   </footer>
 </div>
@@ -383,9 +433,31 @@ function renderOpened() {
       <dt>Receipt id</dt><dd class="addr">${esc(r.confirmationId)}</dd></dl>`;
   } catch {
     box.innerHTML = `<div><span class="status bad">Refused</span></div>
-      <p class="refused">Authentication failed. This key can't derive the seal key, so the blob stays noise: no answers, no sender.</p>`;
+      <p class="refused">Authentication failed. This key can't open the seal, so there's nothing to gossip about: no answers, no sender. Ssshhh.</p>`;
   }
 }
+
+// Gossip: the juicy part is sealed to a random key we immediately forget, so even we can't read it.
+const GOSSIP = [
+  ["Psst… did you hear what Jana put for the offsite?", "Apparently she wrote", "That's all anyone got."],
+  ["Don't tell anyone, but the team finally voted on the new logo.", "The winner is", "Riveting stuff."],
+  ["Word is somebody answered ‘fewer meetings’ in the feedback form.", "Who? It came from", "So, nobody knows."],
+  ["Have you heard the anonymous survey is actually anonymous?", "Proof:", "Only the person who asked can read it."],
+  ["I heard the budget form got a very honest answer.", "Quote:", "Bold. Allegedly."],
+];
+let gi = 0;
+function sealedSnippet() {
+  if (!wb) return "9c41e07a…b2f6";
+  const h = wb.hex(wb.seal(wb.unhex(CREATOR.pub), "nice try"));
+  return h.slice(2, 10) + "…" + h.slice(-4);
+}
+function nextGossip() {
+  gi = (gi + 1) % GOSSIP.length;
+  const [say, lead, tail] = GOSSIP[gi], el = $("gossip");
+  el.innerHTML = `<p class="say">“${esc(say)}”</p><p class="heard">“${esc(lead)} <code>${sealedSnippet()}</code>. ${esc(tail)}”</p>`;
+  el.classList.remove("swap"); void el.offsetWidth; el.classList.add("swap");
+}
+if (!matchMedia("(prefers-reduced-motion: reduce)").matches) setInterval(nextGossip, 5200);
 
 function reseal() { if (!wb) return; last = wb.seal(wb.unhex(CREATOR.pub), response()); renderBlob(last); renderOpened(); }
 
