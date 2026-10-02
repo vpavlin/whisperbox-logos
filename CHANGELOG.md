@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 desktop / 0.3.3 Android (2026-10-02) - responses viewer, receipts, lifecycle, drafts
+
+- **Responses in three modes**: Summary (bars per choice / yes-no question, recent text
+  answers), Table (one row per response, search, click to open), One by one (prev/next,
+  jump to a number, number strip; arrow / Home / End keys on desktop).
+- **Send all receipts** in one go (one event per 100 receipts), and **automatic receipts**
+  per form. Respondent apps can show the receipt count ("N responses received so far")
+  when the form enables it.
+- **Yes / No** question type.
+- **Close, re-open, auto-close**: re-open a closed form (answers sealed while it was closed
+  stay rejected); close automatically after N answers (the first N in time order count,
+  identically everywhere) or at a date.
+- **Drafts and scheduled publishing**: forms autosave as drafts (Drafts section); publish
+  now or at a time (goes out when the app is running then). Half-filled answers autosave
+  and come back after a crash or restart.
+- **Duplicate** any form into a new draft; move / copy questions in the builder.
+- Wire: `form.reopen`, `maxResponses`, `showResponseCount`, batch receipts
+  (`confirmationIds[]`), `boolean` answers; pinned by golden-lifecycle.json (JS = C++).
+
 ## 0.3.1 desktop / 0.3.2 Android (2026-10-02)
 
 - **Hide forms** (both apps): Hide/Unhide on any form; hidden forms move to a collapsed

@@ -25,14 +25,34 @@ const C = {
 const MONO: string = Platform.OS === "android" ? "monospace" : "Courier";
 
 type Screen =
-  | { k: "home" } | { k: "form"; id: string } | { k: "create" } | { k: "share"; id: string }
+  | { k: "home" } | { k: "form"; id: string } | { k: "create"; draftId?: string; fromForm?: string } | { k: "share"; id: string }
   | { k: "scan" } | { k: "identity" } | { k: "csv"; id: string; csv: string };
 
 const QTYPES = [
   { t: "text", label: "Short text" }, { t: "textarea", label: "Paragraph" },
   { t: "radioButtons", label: "Single choice" }, { t: "checkbox", label: "Multiple choice" },
+  { t: "boolean", label: "Yes / No" },
 ];
-const normType = (t: any) => (["text", "textarea", "radioButtons", "checkbox"].includes(String(t)) ? String(t) : "text");
+const normType = (t: any) => (["text", "textarea", "radioButtons", "checkbox", "boolean"].includes(String(t)) ? String(t) : "text");
+const answerOf = (r: any, qid: string) => (r?.answers || []).find((a: any) => a.questionId === qid)?.value;
+// Per-question aggregate (same as the desktop Summary).
+function summarize(q: any, rs: any[]) {
+  const t = normType(q.type);
+  const labels: string[] = t === "boolean" ? ["Yes", "No"] : q.options || [];
+  if (t === "radioButtons" || t === "checkbox" || t === "boolean") {
+    const counts = labels.map(() => 0); let answered = 0;
+    for (const r of rs) {
+      const v = answerOf(r, q.id); let hit = false;
+      if (t === "boolean") { if (v === true) { counts[0]++; hit = true; } else if (v === false) { counts[1]++; hit = true; } }
+      else for (const x of Array.isArray(v) ? v : typeof v === "number" ? [v] : []) if (x >= 0 && x < counts.length) { counts[x]++; hit = true; }
+      if (hit) answered++;
+    }
+    const max = Math.max(1, ...counts);
+    return { bars: labels.map((l, i) => ({ label: String(l), n: counts[i], pct: answered ? Math.round((100 * counts[i]) / answered) : 0, w: counts[i] / max })), answered, samples: [] as string[] };
+  }
+  const samples = rs.map((r) => answerText(q, answerOf(r, q.id))).filter(Boolean).reverse();
+  return { bars: [] as any[], answered: samples.length, samples: samples.slice(0, 5) };
+}
 const shortAddr = (a?: string) => (!a ? "-" : a.length > 14 ? a.slice(0, 6) + "…" + a.slice(-4) : a);
 const fmtTime = (ms?: number) => {
   if (!ms) return "";
@@ -43,7 +63,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 const answerText = (q: any, v: any): string => {
   if (v === null || v === undefined || v === "") return "";
   const opts: string[] = q?.options || [];
-  const one = (x: any) => (typeof x === "number" && opts[x] !== undefined ? String(opts[x]) : String(x));
+  const one = (x: any) => (typeof x === "boolean" ? (x ? "Yes" : "No") : typeof x === "number" && opts[x] !== undefined ? String(opts[x]) : String(x));
   return Array.isArray(v) ? v.map(one).join(", ") : one(v);
 };
 
@@ -150,7 +170,7 @@ function Root() {
     <SafeAreaView style={st.fill} edges={["top", "bottom"]}>
       {screen.k === "home" && <Home {...ctx} />}
       {screen.k === "form" && <FormScreen {...ctx} id={screen.id} />}
-      {screen.k === "create" && <CreateScreen {...ctx} />}
+      {screen.k === "create" && <CreateScreen {...ctx} draftId={screen.draftId} fromForm={screen.fromForm} />}
       {screen.k === "share" && <ShareScreen {...ctx} id={screen.id} />}
       {screen.k === "scan" && <ScanScreen {...ctx} />}
       {screen.k === "identity" && <IdentityScreen {...ctx} />}
@@ -244,7 +264,7 @@ function Home({ snap, push, openLink }: Ctx) {
     list.length ? (<View style={{ marginTop: 18 }}><Label>{title}  {list.length}</Label>{list.map((id) => pend ? <Row key={id} id={id} /> : <Row key={id} id={id} />)}</View>) : null;
 
   const onRefresh = async () => { setRefreshing(true); try { await pullHistory(); } finally { setRefreshing(false); } };
-  const empty = !mine.length && !answered.length && !open.length && !pending.length;
+  const empty = !mine.length && !answered.length && !open.length && !pending.length && !(snap.drafts || []).length;
 
   return (
     <View style={st.fill}>
@@ -279,6 +299,20 @@ function Home({ snap, push, openLink }: Ctx) {
           <View style={st.empty}>
             <Text style={st.emptyT}>Psst… nothing to whisper about yet.</Text>
             <Text style={st.emptyS}>{net.started ? "Create a form, or open a link someone shared with you. Answers are sealed so only the person who asked can read them." : "Connecting to the network…"}</Text>
+          </View>
+        ) : null}
+        {(snap.drafts || []).length ? (
+          <View style={{ marginTop: 18 }}>
+            <Label>DRAFTS  {snap.drafts.length}</Label>
+            {snap.drafts.map((d: any) => (
+              <Pressable key={d.id} onPress={() => push({ k: "create", draftId: d.id })} style={({ pressed }) => [st.row, pressed && { backgroundColor: C.raised }]}>
+                <View style={[st.glyph, { opacity: 0.6 }]}>{[14, 10, 12].map((w, i) => <View key={i} style={{ width: w, height: 2, borderRadius: 1, backgroundColor: C.text2, marginVertical: 1.5 }} />)}</View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={st.rowT} numberOfLines={1}>{d.def?.title || "Untitled draft"}</Text>
+                  <Text style={st.rowS} numberOfLines={1}>{d.publishAt ? "scheduled  ·  " + fmtTime(d.publishAt) : "draft  ·  edited " + fmtTime(d.updatedAt)}</Text>
+                </View>
+              </Pressable>
+            ))}
           </View>
         ) : null}
         <Section title="WAITING FOR SYNC" list={pending} pend />
@@ -384,9 +418,25 @@ function KeycardSheet() {
 function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
   const f = snap.state.forms[id];
   const pending = !f;
-  const [answers, setAnswers] = useState<Record<string, any>>({});
+  // unsent answers saved while typing come back (crash, restart, leaving the screen)
+  const [answers, setAnswers] = useState<Record<string, any>>(() => {
+    const a: Record<string, any> = {};
+    if (f?.answerDraft && !f.mySubmitted) for (const x of f.answerDraft) a[x.questionId] = x.value;
+    return a;
+  });
+  const [restored] = useState(() => !!(f?.answerDraft && !f.mySubmitted));
   const [showErrors, setShowErrors] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [mode, setMode] = useState<"summary" | "table" | "one">("summary");
+  const [idx, setIdx] = useState(0);
+  const [filter, setFilter] = useState("");
+  const [jump, setJump] = useState("");
+  const typed = useRef(false);
+  useEffect(() => {
+    if (!typed.current || !f || f.mine || f.mySubmitted) return;
+    const t = setTimeout(() => client.saveAnswerDraft(id, Object.entries(answers).map(([questionId, value]) => ({ questionId, value }))), 700);
+    return () => clearTimeout(t);
+  }, [answers]);
 
   if (pending) {
     return (
@@ -404,14 +454,31 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
   const responses: any[] = snap.creatorView?.responses?.[id] || [];
   const confirmed = responses.filter((r) => r.confirmed).length;
   const qOf = (qid: string) => (f.questions || []).find((q: any) => q.id === qid);
-  const set = (qid: string, v: any) => setAnswers((a) => ({ ...a, [qid]: v }));
+  const set = (qid: string, v: any) => { typed.current = true; setAnswers((a) => ({ ...a, [qid]: v })); };
   const missing = (q: any) => { const v = answers[q.id]; return !!q.required && (v === undefined || v === null || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && !v.length)); };
   const submit = () => {
     for (const q of f.questions) if (missing(q)) { setShowErrors(true); toast("Please answer: " + q.text); return; }
-    const arr = f.questions.map((q: any) => ({ questionId: q.id, value: answers[q.id] ?? (normType(q.type) === "checkbox" ? [] : normType(q.type) === "radioButtons" ? null : "") }));
+    const arr = f.questions.map((q: any) => ({ questionId: q.id, value: answers[q.id] ?? (normType(q.type) === "checkbox" ? [] : normType(q.type) === "radioButtons" || normType(q.type) === "boolean" ? null : "") }));
+    typed.current = false;   // submitting drops the answer draft (client)
     const r = client.submitResponse(id, arr);
     if (r.ok) { toast("Answers sealed and sent"); setAnswers({}); setShowErrors(false); } else toast(r.error);
   };
+  const unconfirmed = responses.length - confirmed;
+  const list = (() => {
+    const t = filter.trim().toLowerCase();
+    if (!t) return responses;
+    return responses.filter((r) => (r.respondent + " " + (r.answers || []).map((a: any) => answerText(qOf(a.questionId), a.value)).join(" ")).toLowerCase().includes(t));
+  })();
+  const at = Math.max(0, Math.min(idx, list.length - 1));
+  const cur = list[at];
+  const atCap = !!(f.maxResponses && responses.length >= f.maxResponses);
+  const ended = !!(f.expiresAt && Date.now() > f.expiresAt);
+  const info = [
+    f.showResponseCount ? plural((f.confirmations || []).length, "response", "responses") + (f.mine ? " visible to respondents" : " received so far") : null,
+    f.maxResponses ? (f.mine ? "closes automatically at " : "limited to ") + f.maxResponses : null,
+    f.expiresAt ? (f.status === "closed" || ended ? "closed " : "closes ") + fmtTime(f.expiresAt) : null,
+    restored && !f.mine && !f.mySubmitted ? "your unsent answers were restored" : null,
+  ].filter(Boolean).join("  ·  ");
   const banner = (() => {
     if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it.` } as const;
     if (f.contested && !f.mine && f.pinnedCreator !== f.creator) return { tone: "warn", text: "Two different people published a form with this id. Open it from the creator's own link to answer - your answers are only ever sealed to the creator that link names." } as const;
@@ -467,39 +534,121 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
                   <View key={x.l} style={st.stat}><Text style={[st.statN, { color: x.c }]}>{x.n}</Text><Text style={st.statL}>{x.l}</Text></View>
                 ))}
               </View>
-              <View style={[st.joinRow, { marginTop: 12 }]}>
-                <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} style={{ flex: 1 }} />
+              <View style={[st.chips, { marginTop: 12 }]}>
                 {f.status === "open" ? <Btn label={confirmClose ? "Tap again to close" : "Close form"} danger onPress={() => {
                   if (!confirmClose) { setConfirmClose(true); setTimeout(() => setConfirmClose(false), 3000); return; }
                   const r = client.closeForm(id); toast(r.ok ? "Form closed - no new answers" : r.error); setConfirmClose(false);
-                }} style={{ flex: 1 }} /> : null}
+                }} /> : null}
+                {f.status === "closed" && !atCap && !ended ? <Btn label="Re-open" onPress={() => { const r = client.reopenForm(id); toast(r.ok ? "Re-opened - answers sealed while it was closed still don't count" : r.error); }} /> : null}
+                {unconfirmed > 0 ? <Btn label={`Send all receipts (${unconfirmed})`} primary onPress={() => { const r = client.confirmAll(id); toast(r.ok ? `Receipts sent for ${plural(r.confirmed, "response", "responses")}` : r.error); }} /> : null}
+                <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} />
+                <Btn label="Duplicate" onPress={() => push({ k: "create", fromForm: id })} />
               </View>
-              <View style={{ marginTop: 20 }}><Label>RESPONSES ({responses.length})</Label></View>
-              {!responses.length ? <Text style={st.muted}>No responses yet. Share the link - answers arrive sealed and only this phone can open them.</Text> : null}
-              {responses.map((r: any) => (
-                <View key={r.respondent + r.hlc?.wall} style={st.card}>
-                  <View style={st.cardHead}>
-                    <Pressable onPress={async () => { await Clipboard.setStringAsync(r.respondent); toast("Address copied"); }}>
-                      <Text style={st.addr}>{shortAddr(r.respondent)}</Text>
-                    </Pressable>
-                    <Text style={st.time}>{fmtTime(r.submittedAt)}</Text>
-                    <View style={{ flex: 1 }} />
-                    {r.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, r.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
-                  </View>
-                  {(r.answers || []).map((a: any) => {
-                    const q = qOf(a.questionId); const v = answerText(q, a.value);
-                    return (
-                      <View key={a.questionId} style={{ marginTop: 8 }}>
-                        <Text style={st.qSmall}>{q ? q.text : a.questionId}</Text>
-                        <Text style={[st.answer, !v && { color: C.text3 }]}>{v || "(no answer)"}</Text>
-                      </View>
-                    );
-                  })}
+              <View style={[st.card, st.cardHead]}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={{ color: C.text, fontWeight: "600" }}>Automatic receipts</Text>
+                  <Text style={st.muted}>Send a receipt as each answer arrives (while this phone is online).</Text>
                 </View>
-              ))}
+                <Switch value={!!f.autoReceipts} onValueChange={(v) => { client.setAutoReceipts(id, v); toast(v ? "Receipts now go out automatically" : "Automatic receipts off"); }} trackColor={{ true: C.ok, false: C.border }} thumbColor="#fff" />
+              </View>
+              {info ? <Text style={[st.muted, { marginTop: 8 }]}>{info}</Text> : null}
+
+              {responses.length ? (
+                <View style={[st.chips, { marginTop: 16 }]}>
+                  {([["summary", "Summary"], ["table", "Table"], ["one", "One by one"]] as const).map(([m, l]) => (
+                    <Pressable key={m} onPress={() => setMode(m)} style={[st.chip, mode === m && st.chipOn]}><Text style={[st.chipT, mode === m && { color: C.primary }]}>{l}</Text></Pressable>
+                  ))}
+                </View>
+              ) : <Text style={[st.muted, { marginTop: 16 }]}>No responses yet. Share the link - answers arrive sealed and only this phone can open them.</Text>}
+              {responses.length && mode !== "summary" ? (
+                <TextInput value={filter} onChangeText={(t) => { setFilter(t); setIdx(0); }} placeholder="Search answers or address" placeholderTextColor={C.text3} style={[st.input, { marginTop: 10 }]} />
+              ) : null}
+              {responses.length && mode !== "summary" && !list.length ? <Text style={[st.muted, { marginTop: 10 }]}>Nothing matches "{filter}".</Text> : null}
+
+              {responses.length && mode === "summary" ? (f.questions || []).map((q: any, qi: number) => {
+                const sm = summarize(q, responses);
+                return (
+                  <View key={q.id} style={st.card}>
+                    <Text style={st.q}>{qi + 1}. {q.text}</Text>
+                    <Text style={[st.time, { marginBottom: 6 }]}>{sm.answered} of {responses.length} answered</Text>
+                    {sm.bars.map((b) => (
+                      <View key={b.label} style={{ marginTop: 6 }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                          <Text style={[st.optT, { flex: 1 }]} numberOfLines={1}>{b.label}</Text>
+                          <Text style={st.time}>{b.n}  ({b.pct}%)</Text>
+                        </View>
+                        <View style={st.barTrack}><View style={[st.barFill, { width: `${Math.max(b.n ? 3 : 0, b.w * 100)}%` }]} /></View>
+                      </View>
+                    ))}
+                    {sm.samples.map((t, i) => <Text key={i} style={[st.answer, { color: C.text2, marginTop: 6 }]}>“{t}”</Text>)}
+                    {!sm.bars.length && sm.answered > sm.samples.length ? <Text style={[st.time, { marginTop: 6 }]}>+ {sm.answered - sm.samples.length} more - see Table or One by one</Text> : null}
+                  </View>
+                );
+              }) : null}
+
+              {mode === "table" && list.length ? (
+                <ScrollView horizontal style={[st.card, { padding: 0 }]} contentContainerStyle={{ flexDirection: "column" }}>
+                  <View style={st.trow}>
+                    {["#", "From", ...(f.questions || []).map((q: any) => q.text), "Receipt"].map((h, i) => (
+                      <Text key={i} style={[st.th, { width: i === 0 ? 36 : i === 1 ? 110 : 160 }]} numberOfLines={1}>{h}</Text>
+                    ))}
+                  </View>
+                  {list.map((r, ri) => (
+                    <Pressable key={r.respondent + ri} onPress={() => { setIdx(ri); setMode("one"); }} style={[st.trow, ri % 2 ? { backgroundColor: C.raised } : null]}>
+                      <Text style={[st.td, { width: 36 }]}>{ri + 1}</Text>
+                      <Text style={[st.td, { width: 110, fontFamily: MONO }]} numberOfLines={1}>{shortAddr(r.respondent)}</Text>
+                      {(f.questions || []).map((q: any) => <Text key={q.id} style={[st.td, { width: 160 }]} numberOfLines={2}>{answerText(q, answerOf(r, q.id))}</Text>)}
+                      <Text style={[st.td, { width: 160, color: r.confirmed ? C.ok : C.warn }]}>{r.confirmed ? "sent" : "pending"}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : null}
+              {mode === "table" && list.length ? <Text style={[st.time, { marginTop: 6 }]}>Tap a row to open it. Swipe sideways for more questions.</Text> : null}
+
+              {mode === "one" && cur ? (
+                <View style={{ marginTop: 12 }}>
+                  <View style={[st.joinRow, { justifyContent: "space-between" }]}>
+                    <Btn label="‹ Prev" disabled={at === 0} onPress={() => setIdx(at - 1)} />
+                    <View style={[st.joinRow, { gap: 6 }]}>
+                      <TextInput value={jump} onChangeText={setJump} placeholder={String(at + 1)} placeholderTextColor={C.text2} keyboardType="number-pad"
+                        onSubmitEditing={() => { const n = parseInt(jump, 10); if (n >= 1) setIdx(Math.min(list.length, n) - 1); setJump(""); }}
+                        style={[st.input, { width: 56, textAlign: "center", paddingVertical: 6 }]} />
+                      <Text style={st.muted}>of {list.length}</Text>
+                    </View>
+                    <Btn label="Next ›" disabled={at >= list.length - 1} onPress={() => setIdx(at + 1)} />
+                  </View>
+                  {list.length > 1 && list.length <= 60 ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
+                      {list.map((r, i) => (
+                        <Pressable key={i} onPress={() => setIdx(i)} style={[st.numChip, i === at && { backgroundColor: C.primary, borderColor: C.primary }, r.confirmed && i !== at && { borderColor: C.ok }]}>
+                          <Text style={{ color: i === at ? "#fff" : C.text2, fontSize: 11 }}>{i + 1}</Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  ) : null}
+                  <View style={st.card}>
+                    <View style={st.cardHead}>
+                      <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}</Text></Pressable>
+                      <Text style={st.time}>{fmtTime(cur.submittedAt)}</Text>
+                      <View style={{ flex: 1 }} />
+                      {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
+                    </View>
+                    {(f.questions || []).map((q: any, qi: number) => {
+                      const v = answerText(q, answerOf(cur, q.id));
+                      return (
+                        <View key={q.id} style={{ marginTop: 12 }}>
+                          <Text style={st.qSmall}>{qi + 1}. {q.text}</Text>
+                          <Text style={[st.answer, { fontSize: 16 }, !v && { color: C.text3 }]}>{v || "(no answer)"}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : null}
             </View>
           ) : (
             <View style={{ marginTop: 18 }}>
+              {info ? <Text style={[st.muted, { marginBottom: 8 }]}>{info}</Text> : null}
               {banner ? <Banner tone={banner.tone} text={banner.text} /> : null}
               {f.mySubmitted ? (
                 <View style={{ marginTop: 16 }}>
@@ -531,12 +680,13 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
                         placeholder="Your answer" placeholderTextColor={C.text3}
                         style={[st.input, qt === "textarea" && { minHeight: 104, textAlignVertical: "top" }, invalid && { borderColor: C.err }]} />
                     ) : (
-                      (q.options || []).map((o: string, oi: number) => {
+                      (qt === "boolean" ? ["Yes", "No"] : q.options || []).map((o: string, oi: number) => {
                         const multi = qt === "checkbox";
-                        const on = multi ? (answers[q.id] || []).includes(oi) : answers[q.id] === oi;
+                        const val = qt === "boolean" ? oi === 0 : oi;   // yes/no answers are true / false
+                        const on = multi ? (answers[q.id] || []).includes(oi) : answers[q.id] === val;
                         return (
                           <Pressable key={oi} accessibilityRole={multi ? "checkbox" : "radio"} accessibilityState={{ checked: on }}
-                            onPress={() => multi ? set(q.id, on ? (answers[q.id] || []).filter((x: number) => x !== oi) : [...(answers[q.id] || []), oi].sort((a, b) => a - b)) : set(q.id, oi)}
+                            onPress={() => multi ? set(q.id, on ? (answers[q.id] || []).filter((x: number) => x !== oi) : [...(answers[q.id] || []), oi].sort((a, b) => a - b)) : set(q.id, val)}
                             style={[st.opt, on && { borderColor: C.primary, backgroundColor: C.primarySubtle }, invalid && !on && { borderColor: C.err }]}>
                             <View style={[st.tick, { borderRadius: multi ? 4 : 9, borderColor: on ? C.primary : C.text3 }]}>{on ? <View style={[st.tickIn, { borderRadius: multi ? 2 : 5 }]} /> : null}</View>
                             <Text style={st.optT}>{o}</Text>
@@ -563,40 +713,109 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
 
 // ── Create ─────────────────────────────────────────────────────────────────────
 type Draft = { type: string; text: string; required: boolean; optionsText: string };
-function CreateScreen({ replace, pop, toast }: Ctx) {
-  const [title, setTitle] = useState("");
-  const [desc, setDesc] = useState("");
-  const [qs, setQs] = useState<Draft[]>([{ type: "text", text: "", required: true, optionsText: "" }]);
-  const [restrict, setRestrict] = useState(false);
-  const [allow, setAllow] = useState("");
+// "yyyy-MM-dd HH:mm" (local) -> ms, or NaN
+function parseLocal(t: string) {
+  const m = /^\s*(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?\s*$/.exec(t || "");
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 23, m[5] ? +m[5] : 59).getTime() : NaN;
+}
+const fmtInput = (ms: number) => { const d = new Date(ms); const z = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; };
+type Builder = { title: string; description: string; questions: Draft[]; restrict: boolean; allowList: string; max: string; closeAt: string; showCount: boolean };
+function CreateScreen({ replace, pop, toast, draftId, fromForm }: Ctx & { draftId?: string; fromForm?: string }) {
+  // Start from: a saved draft, a form to duplicate, or empty.
+  const init = useMemo<Builder>(() => {
+    const d = draftId ? client.drafts[draftId] : null;
+    if (d?.def?._builder) return d.def._builder as Builder;
+    const f = fromForm ? client.snapshot().state.forms[fromForm] : null;
+    if (f) return {
+      title: (f.title || "") + " (copy)", description: f.description || "",
+      questions: (f.questions || []).map((q: any) => ({ type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n") })),
+      restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
+      max: f.maxResponses ? String(f.maxResponses) : "", closeAt: "", showCount: !!f.showResponseCount,
+    };
+    return { title: "", description: "", questions: [{ type: "text", text: "", required: true, optionsText: "" }], restrict: false, allowList: "", max: "", closeAt: "", showCount: false };
+  }, []);
+  const [title, setTitle] = useState(init.title);
+  const [desc, setDesc] = useState(init.description);
+  const [qs, setQs] = useState<Draft[]>(init.questions);
+  const [restrict, setRestrict] = useState(init.restrict);
+  const [allow, setAllow] = useState(init.allowList);
+  const [max, setMax] = useState(init.max);
+  const [closeAt, setCloseAt] = useState(init.closeAt);
+  const [showCount, setShowCount] = useState(init.showCount);
+  const [scheduling, setScheduling] = useState(!!(draftId && client.drafts[draftId]?.publishAt));
+  const [publishAt, setPublishAt] = useState(draftId && client.drafts[draftId]?.publishAt ? fmtInput(client.drafts[draftId].publishAt) : "");
   const [useCard, setUseCard] = useState(false);
   const [busy, setBusy] = useState(false);
+  const did = useRef<string | undefined>(draftId);
+  const dirty = useRef(!!fromForm);
   useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
-  const publish = async () => {
-    if (busy) return;
-    if (!title.trim()) { toast("Give the form a title"); return; }
+  const move = (i: number, d: number) => setQs((a) => { const j = i + d; if (j < 0 || j >= a.length) return a; const b = a.slice(); [b[i], b[j]] = [b[j], b[i]]; return b; });
+  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount };
+  const empty = !title.trim() && !desc.trim() && !qs.some((q) => q.text.trim());
+
+  // -> {ok, def} | {ok:false, error}. strict=false never fails (autosave of a half-done form).
+  const buildDef = (strict: boolean): { ok: true; def: any } | { ok: false; error: string } => {
+    const fail = (error: string) => ({ ok: false as const, error });
+    if (strict && !title.trim()) return fail("Give the form a title");
     const questions: any[] = [];
     for (const d of qs) {
       const text = d.text.trim(); if (!text) continue;
       const q: any = { id: "q" + (questions.length + 1), type: d.type, text, required: d.required };
       if (d.type === "radioButtons" || d.type === "checkbox") {
-        q.options = d.optionsText.split("\n").map((s) => s.trim()).filter(Boolean);
-        if (q.options.length < 2) { toast(`"${text}" needs at least two options`); return; }
+        q.options = d.optionsText.split("\n").map((x) => x.trim()).filter(Boolean);
+        if (strict && q.options.length < 2) return fail(`"${text}" needs at least two options`);
       }
       questions.push(q);
     }
-    if (!questions.length) { toast("Add at least one question"); return; }
+    if (strict && !questions.length) return fail("Add at least one question");
     let whitelist = { type: "none", value: "" };
     if (restrict) {
       const addrs = allow.split(/[\s,]+/).filter((a) => /^0x[0-9a-fA-F]{40}$/.test(a)).map((a) => a.toLowerCase());
-      if (!addrs.length) { toast("Add at least one 0x address, or allow anyone"); return; }
+      if (strict && !addrs.length) return fail("Add at least one 0x address, or allow anyone");
       whitelist = { type: "addresses", value: addrs.join(",") };
     }
-    const def = { title: title.trim(), description: desc.trim(), questions, whitelist };
+    const def: any = { title: title.trim(), description: desc.trim(), questions, whitelist };
+    if (max.trim()) { const n = parseInt(max, 10); if (strict && (!(n > 0) || String(n) !== max.trim())) return fail("Max answers must be a whole number"); if (n > 0) def.maxResponses = n; }
+    if (closeAt.trim()) { const t = parseLocal(closeAt); if (strict && isNaN(t)) return fail("Close date: use yyyy-MM-dd HH:mm"); if (strict && t <= Date.now()) return fail("Close date is in the past"); if (!isNaN(t)) def.expiresAt = t; }
+    if (showCount) def.showResponseCount = true;
+    return { ok: true, def };
+  };
+  const saveDraft = (publishAtMs?: number | null) => {
+    const b = buildDef(!!publishAtMs);
+    if (!b.ok) { toast(b.error); return false; }
+    const r = client.saveDraft({ id: did.current, def: { ...b.def, _builder: builder }, publishAt: publishAtMs ?? null });
+    if (r.ok) { did.current = r.draftId; dirty.current = false; }
+    return r.ok;
+  };
+  // Autosave: drafts never get lost to a crash or an unfinished form.
+  useEffect(() => {
+    if (!dirty.current) { dirty.current = true; return; }   // skip the initial render
+    if (empty) return;
+    const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
+    return () => clearTimeout(t);
+  }, [title, desc, qs, restrict, allow, max, closeAt, showCount]);
+  const leave = () => {
+    if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
+    else if (empty && did.current) client.deleteDraft(did.current);
+    pop();
+  };
+  const schedule = () => {
+    if (useCard) { toast("Keycard forms need a tap when they go out - publish now instead"); return; }
+    const t = parseLocal(publishAt);
+    if (isNaN(t)) { toast("Publish time: use yyyy-MM-dd HH:mm"); return; }
+    if (t <= Date.now()) { toast("That time has passed - use Publish"); return; }
+    if (saveDraft(t)) { toast(`Scheduled for ${fmtTime(t)} - goes out when WhisperBox is open then (or the next time you open it)`); pop(); }
+  };
+  const done = (formId: string) => { if (did.current) client.deleteDraft(did.current); replace({ k: "form", id: formId }); };
+  const publish = async () => {
+    if (busy) return;
+    const b = buildDef(true);
+    if (!b.ok) { toast(b.error); return; }
+    const def = b.def;
     if (!useCard) {
       const r = client.createForm(def);
-      if (r.ok) { toast("Form published"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+      if (r.ok) { toast("Form published"); done(r.formId); } else toast(r.error);
       return;
     }
     // Keycard: the form's key is exported from the card BEFORE publishing, and stored here
@@ -608,14 +827,15 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
       const saved = await client.addFormKey(id, k.privHex);
       if (!saved.ok) { toast(saved.error); return; }
       const r = client.createForm({ ...def, id }, { publicKey: k.pubHex });
-      if (r.ok) { toast("Form published - answers open only with your Keycard's key"); replace({ k: "form", id: r.formId }); } else toast(r.error);
+      if (r.ok) { toast("Form published - answers open only with your Keycard's key"); done(r.formId); } else toast(r.error);
     } catch (e: any) {
       if (e?.code !== "cancelled") toast(String(e?.message || e));
     } finally { setBusy(false); }
   };
+
   return (
     <View style={st.fill}>
-      <Header title="New form" onBack={pop} right={<Btn label={busy ? "Publishing…" : "Publish"} primary disabled={busy} onPress={publish} />} />
+      <Header title={draftId ? "Edit draft" : fromForm ? "Duplicate form" : "New form"} onBack={leave} right={<Btn label={busy ? "Publishing…" : "Publish"} primary disabled={busy} onPress={publish} />} />
       <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
           <Label>TITLE</Label>
@@ -640,6 +860,11 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
                   <Pressable onPress={() => upd(i, { required: !q.required })} style={[st.chip, q.required && { borderColor: C.accent, backgroundColor: C.warnSubtle }]}>
                     <Text style={[st.chipT, q.required && { color: C.accent }]}>{q.required ? "Required" : "Optional"}</Text>
                   </Pressable>
+                </View>
+                <View style={[st.chips, { marginTop: 6 }]}>
+                  {i > 0 ? <Pressable onPress={() => move(i, -1)} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Move question ${i + 1} up`}><Text style={st.chipT}>↑ Up</Text></Pressable> : null}
+                  {i < qs.length - 1 ? <Pressable onPress={() => move(i, 1)} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Move question ${i + 1} down`}><Text style={st.chipT}>↓ Down</Text></Pressable> : null}
+                  <Pressable onPress={() => setQs((a) => [...a.slice(0, i + 1), { ...a[i] }, ...a.slice(i + 1)])} style={[st.chip, { borderColor: "transparent" }]}><Text style={st.chipT}>Copy</Text></Pressable>
                   {qs.length > 1 ? (
                     <Pressable onPress={() => setQs((a) => a.filter((_, j) => j !== i))} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Remove question ${i + 1}`}>
                       <Text style={[st.chipT, { color: C.err }]}>Remove</Text>
@@ -671,7 +896,37 @@ function CreateScreen({ replace, pop, toast }: Ctx) {
           <Text style={[st.muted, { marginTop: 8 }]}>{useCard
             ? "One tap when you publish. The form gets its own key from your card; reinstalling or switching phones only needs another tap. Other forms and your card's other keys stay on the card."
             : "Each form gets its own key, derived from this phone's identity key."}</Text>
-          <Text style={[st.muted, { marginTop: 14 }]}>The form (title, questions, who may answer) is public on the network. Answers are encrypted to this form's key.</Text>
+          <View style={{ marginTop: 22 }}><Label>LIMITS & TIMING (OPTIONAL)</Label></View>
+          <View style={[st.joinRow, { alignItems: "flex-start" }]}>
+            <View style={{ width: 120 }}>
+              <Text style={st.time}>Close after N answers</Text>
+              <TextInput value={max} onChangeText={(t) => setMax(t.replace(/\D/g, ""))} keyboardType="number-pad" placeholder="no limit" placeholderTextColor={C.text3} style={[st.input, { marginTop: 4 }]} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={st.time}>Close at (yyyy-MM-dd HH:mm)</Text>
+              <TextInput value={closeAt} onChangeText={setCloseAt} placeholder="no end date" placeholderTextColor={C.text3} style={[st.input, { marginTop: 4 }]} />
+            </View>
+          </View>
+          <Pressable onPress={() => setShowCount((x) => !x)} style={[st.chip, { marginTop: 10, alignSelf: "flex-start" }, showCount && st.chipOn]}>
+            <Text style={[st.chipT, showCount && { color: C.primary }]}>{showCount ? "✓ " : ""}Show respondents how many answers came in</Text>
+          </Pressable>
+          <Text style={[st.muted, { marginTop: 14 }]}>The form (title, questions, who may answer) is public on the network. Answers are encrypted to this form's key. Drafts stay on this phone.</Text>
+
+          <View style={{ marginTop: 22 }}><Label>PUBLISH</Label></View>
+          <View style={st.chips}>
+            <Btn label="Save draft" onPress={() => { if (saveDraft(null)) toast("Draft saved"); }} />
+            <Btn label={scheduling ? "Don't schedule" : "Schedule…"} onPress={() => setScheduling((x) => !x)} />
+            {did.current ? <Btn label="Delete draft" danger onPress={() => { client.deleteDraft(did.current!); dirty.current = false; toast("Draft deleted"); pop(); }} /> : null}
+          </View>
+          {scheduling ? (
+            <View style={{ marginTop: 10 }}>
+              <View style={st.joinRow}>
+                <TextInput value={publishAt} onChangeText={setPublishAt} placeholder="yyyy-MM-dd HH:mm" placeholderTextColor={C.text3} style={[st.input, { flex: 1 }]} />
+                <Btn label="Schedule" primary onPress={schedule} />
+              </View>
+              <Text style={[st.muted, { marginTop: 6 }]}>There's no server: the form goes out when WhisperBox is open on this phone at that time, or the next time you open it.</Text>
+            </View>
+          ) : null}
           <View style={{ height: 40 }} />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -809,6 +1064,12 @@ function KeycardSettings({ toast, snap }: { toast: (m: string) => void; snap: an
 }
 
 const st = StyleSheet.create({
+  barTrack: { height: 10, borderRadius: 5, backgroundColor: C.surface, marginTop: 4, overflow: "hidden" },
+  barFill: { height: 10, borderRadius: 5, backgroundColor: C.primary },
+  trow: { flexDirection: "row", alignItems: "center", minHeight: 40 },
+  th: { color: C.text3, fontSize: 11, fontWeight: "700", paddingHorizontal: 8, paddingVertical: 10, backgroundColor: C.surface },
+  td: { color: C.text, fontSize: 13, paddingHorizontal: 8, paddingVertical: 8 },
+  numChip: { minWidth: 30, height: 26, borderRadius: 7, borderWidth: 1, borderColor: C.border, backgroundColor: C.raised, alignItems: "center", justifyContent: "center", marginRight: 4, paddingHorizontal: 4 },
   sheetWrap: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
   sheet: { backgroundColor: C.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: C.border, padding: 20, paddingBottom: 28 },
   fill: { flex: 1, backgroundColor: C.bg },
