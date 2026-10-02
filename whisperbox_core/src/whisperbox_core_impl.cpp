@@ -361,7 +361,12 @@ void WhisperboxCoreImpl::loadMySubmissions() {
     } catch (...) { /* ignore */ }
 }
 void WhisperboxCoreImpl::loadLocalPrefs() {
-    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear();
+    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_seen.clear();
+    try {
+        std::ifstream sn(m_dataDir + "/seen.json");
+        if (sn) { json o = json::parse(std::string((std::istreambuf_iterator<char>(sn)), std::istreambuf_iterator<char>()));
+                  if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) if (it.value().is_number_integer()) m_seen[lc(it.key())] = it.value().get<long long>(); }
+    } catch (...) { /* ignore */ }
     try {
         std::ifstream d(m_dataDir + "/drafts.json");
         if (d) { json o = json::parse(std::string((std::istreambuf_iterator<char>(d)), std::istreambuf_iterator<char>()));
@@ -387,6 +392,20 @@ void WhisperboxCoreImpl::saveDrafts() {
     json r = json::array(); for (auto& id : m_autoReceipts) r.push_back(id);
     o["forms"] = d; o["answers"] = a; o["autoReceipts"] = r;
     writeAtomic(m_dataDir + "/drafts.json", o.dump());
+}
+void WhisperboxCoreImpl::saveSeen() {
+    json o = json::object(); for (auto& kv : m_seen) o[kv.first] = kv.second;
+    writeAtomic(m_dataDir + "/seen.json", o.dump());
+}
+// Mark every response of a form as seen (creator opened it).
+std::string WhisperboxCoreImpl::markSeen(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(trim(formId));
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    OrderedJson cv = decryptView(state);
+    long long n = cv["responses"].contains(formId) ? (long long)cv["responses"][formId].size() : 0;
+    if (!m_seen.count(formId) || m_seen[formId] != n) { m_seen[formId] = n; saveSeen(); publishState(); }
+    return json({{"ok", true}, {"formId", formId}, {"seen", n}}).dump();
 }
 void WhisperboxCoreImpl::saveHidden() {
     json a = json::array(); for (auto& id : m_hidden) a.push_back(id);
@@ -706,6 +725,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
 
     // Per-form flags for THIS device (module layer): has the local identity
     // answered / been confirmed / may it answer at all.
+    bool seenDirty = false;
+    long long newTotal = 0;
     for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) {
         const std::string fid = it.key();
         auto& f = it.value();
@@ -731,6 +752,13 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["linkMismatch"] = linkMismatch;
         f["mine"] = mine;
         f["mySubmitted"] = submitted;
+        if (mine) {   // "N new" since the creator last looked
+            long long n = (creatorViewJson.is_object() && creatorViewJson.contains("responses") && creatorViewJson["responses"].contains(fid))
+                          ? (long long)creatorViewJson["responses"][fid].size() : 0;
+            if (!m_seen.count(fid)) { m_seen[fid] = n; seenDirty = true; }   // first sight: nothing is "new"
+            f["newResponses"] = std::max(0LL, n - m_seen[fid]);
+            if (!m_hidden.count(fid)) newTotal += std::max(0LL, n - m_seen[fid]);
+        }
         f["hidden"] = m_hidden.count(fid) > 0;
         f["autoReceipts"] = m_autoReceipts.count(fid) > 0;
         if (m_answerDrafts.count(fid)) f["answerDraft"] = m_answerDrafts[fid];
@@ -745,7 +773,9 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["v"] = 1;
     snap["identity"] = m_signId.valid
         ? json({{"address", m_signId.address}, {"pubHex", m_signId.pubHex}}) : nullptr;
+    if (seenDirty) saveSeen();
     snap["deviceId"] = m_deviceId;
+    snap["newResponses"] = newTotal;   // across my (non-hidden) forms
     snap["storage"] = json({{"dir", m_dataDir}, {"ok", m_storageOk}, {"note", m_storageNote}});
     snap["nodeReady"] = m_nodeReady;
     snap["state"] = state;

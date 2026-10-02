@@ -105,7 +105,18 @@ Item {
         if (s.charAt(0) !== "{") return null;
         try { return JSON.parse(s); } catch (e) { return null; }
     }
-    function applySnapshot(o) { if (o && o.state) root.st = o; }
+    function applySnapshot(o) { if (o && o.state) { root.st = o; Qt.callLater(root.checkSeen); } }
+    // Looking at your own form = its answers are seen (clears the "N new" pill).
+    property bool seenBusy: false
+    function selectCappedForSeen() {   // (harness) open the first own form that has new answers
+        for (var k in root.forms) if (root.forms[k].mine && root.forms[k].newResponses > 0 && root.forms[k].title === "Capped") { selectForm(k); return; }
+    }
+    function checkSeen() {
+        var f = root.previewDef ? null : root.forms[root.selectedId];
+        if (!f || !f.mine || !(f.newResponses > 0) || root.seenBusy) return;
+        root.seenBusy = true;
+        callVia("markSeen", [f.id], function () { root.seenBusy = false; });
+    }
     // Single-flight snapshot poll: never stack requests on a slow core; a stuck call is
     // abandoned after 45 s so one lost reply can't stop the poll forever.
     property bool refreshBusy: false
@@ -277,9 +288,11 @@ Item {
             else if (f.mySubmitted) answered.push(f.id);
             else if (root.watchedIds.indexOf(f.id) >= 0) open.push(f.id);
         }
+        var newMine = 0;
+        for (var nm = 0; nm < mine.length; nm++) newMine += (root.forms[mine[nm]].newResponses || 0);
         var add = function (label, list, kind) {
             if (list.length === 0) return;
-            rows.push({ kind: "h", label: label + "  " + list.length });
+            rows.push({ kind: "h", label: label + "  " + list.length + (label === "MY FORMS" && newMine > 0 ? "   \u00B7  " + newMine + " new" : "") });
             for (var k = 0; k < list.length; k++) rows.push({ kind: kind, id: list[k] });
         };
         if (root.drafts.length > 0) {
@@ -301,6 +314,7 @@ Item {
     function selectForm(id) {
         if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); }   // flush the form we're leaving
         root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = "";
+        Qt.callLater(root.checkSeen);
         restoreAnswerDraft();
     }
     // Half-filled answers saved while typing come back (crash, restart, switching forms).
@@ -852,6 +866,11 @@ Item {
                                             return parts.join("  ·  ");
                                         }
                                     }
+                                }
+                                Badge {
+                                    visible: !!(row.f && row.f.mine && row.f.newResponses > 0)
+                                    label: row.f ? row.f.newResponses + " new" : ""
+                                    fg: "white"; bg: root.wbPrimary
                                 }
                                 Badge {
                                     visible: !!(row.f && !row.f.mine && row.f.mySubmitted)

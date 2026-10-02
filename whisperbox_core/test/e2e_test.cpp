@@ -482,6 +482,10 @@ int main(int argc, char** argv) {
         CHECK(csv.find(",Yes") != std::string::npos && csv.find(",No") != std::string::npos, "CSV renders yes/no");
 
         dumpFixture(*A, "lifecycle");   // capped yes/no form, auto-closed, 2 responses awaiting receipts
+        CHECK(formOf(*A, cf).value("newResponses", -1) == 2 && A->snap().value("newResponses", -1) >= 2, "2 new answers flagged for the creator");
+        CHECK(A->call(A->core->markSeen(cf)).value("seen", -1) == 2 && formOf(*A, cf).value("newResponses", -1) == 0, "markSeen clears them");
+        A->stop(); A->start();
+        CHECK(formOf(*A, cf).value("newResponses", -1) == 0, "seen survives a restart");
         CHECK(A->call(A->core->confirmAll(cf)).value("events", 0) == 1, "confirm all = ONE receipt event for both");
         CHECK(waitUntil([&] { return formOf(*B, cf).value("myConfirmed", false) && formOf(*C, cf).value("myConfirmed", false); }, 3000), "both respondents see their receipt");
         CHECK(formOf(*G, cf)["confirmations"].size() == 2, "anyone can count responses from receipts (show-count)");

@@ -109,6 +109,11 @@ run builder-max-types creator "{\"draftTitle\":\"T\",\"draftQuestions\":$ALLQ}" 
 expect 'CALL whisperbox_core createForm argc=1 args=.*"type":"number".*"min":0,"max":9' "number limits go on the wire"
 expect 'CALL whisperbox_core createForm argc=1 args=.*"help":"First name is fine"' "help text goes on the wire"
 
+# ── new answers ──
+run new-badges lifecycle "{}"
+run new-markseen lifecycle "{}" "selectCappedForSeen"
+expect "CALL whisperbox_core markSeen argc=1 args=$CAPPED\$" "opening an own form with new answers marks them seen"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

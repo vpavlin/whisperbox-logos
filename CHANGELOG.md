@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4 desktop / 0.3.5 Android (2026-10-02) - question types, polish, new answers
+
+- **New question types**: dropdown, linear scale (numbers or stars, end labels), number
+  (min / max), date, time, email, link; "Other: ___" on choice questions; help text.
+  One set of answer rules (contract/src/answers.mjs = C++ validateAnswer, shared fixture).
+- **Polish**: thank-you message, shuffle questions / options (same order on both apps),
+  progress line, Preview, 5 templates, "By question" view, Summary for every type.
+- **New answers**: "N new" badges per form and on My forms (seen counts kept per device;
+  opening a form clears it). Android notifications while the app runs in the background
+  ("3 new answers - tap to open"; never the answers themselves), switch under Identity.
+
 ## 0.3.3 desktop / 0.3.4 Android (2026-10-02) - fixes
 
 - **WhisperBox connects when another Logos app already started the network node.**

@@ -61,6 +61,7 @@ public:
     std::string deleteDraft(std::string draftId);
     std::string publishDraft(std::string draftId);
     std::string saveAnswerDraft(std::string formId, std::string answersJson);
+    std::string markSeen(std::string formId);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
@@ -175,4 +176,8 @@ private:
     void saveDrafts();
     void housekeeping();                                     // scheduled publish, auto-close, auto-receipts
     std::string publishDraftLocked(const std::string& draftId);
+    // "New answers": responses seen per form (local). A form first seen with N responses
+    // starts at N (no stale badge on upgrade). Appended last: layout rule above.
+    std::map<std::string, long long> m_seen;
+    void saveSeen();
 };

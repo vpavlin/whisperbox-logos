@@ -12,6 +12,7 @@ import QRCode from "react-native-qrcode-svg";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { SharedNodeStatus } from "./src/lib/loam-transport-pkg/src/SharedNodeStatus";
 import { boot, client, net, pullHistory, setSharedNode, parseLink } from "./src/lib/whisperbox";
+import { startAnswerNotifications, ensurePermission, notificationsEnabled, setNotificationsEnabled } from "./src/lib/notify";
 import { crumb, previousCrash, previousLog, currentLog, fatalError, onFatal, reportFatal, clearFatal } from "./src/lib/crashlog";
 import { registerSheet, requestCardKeys, getKeycardPrefs, setKeycardPrefs, type CardRequest } from "./src/lib/keycard/flow";
 // @ts-ignore - plain ESM shared with the desktop core's tests (same rules, same fixture)
@@ -174,7 +175,10 @@ function Root() {
   }, [toast]);
 
   useEffect(() => {
-    boot().then(() => setReady(true));
+    boot().then(() => {
+      setReady(true);
+      startAnswerNotifications((formId) => setStack([{ k: "home" }, { k: "form", id: formId }])).catch(() => {});
+    });
     Linking.getInitialURL().then((u) => { if (u && u.startsWith("whisperbox://")) boot().then(() => openLink(u)); });
     const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("whisperbox://")) boot().then(() => openLink(url)); });
     return () => sub.remove();
@@ -289,13 +293,15 @@ function Home({ snap, push, openLink }: Ctx) {
           <Text style={st.rowT} numberOfLines={1}>{f ? f.title || "(untitled)" : id}</Text>
           <Text style={st.rowS} numberOfLines={1}>{sub}</Text>
         </View>
+        {f && f.mine && f.newResponses > 0 ? <Badge label={`${f.newResponses} new`} fg="#fff" bg={C.primary} /> : null}
         {f && !f.mine && f.mySubmitted ? <Badge label={f.myConfirmed ? "Receipt" : "Sent"} fg={f.myConfirmed ? C.ok : C.text2} bg={f.myConfirmed ? C.okSubtle : C.raised} /> : null}
         {f?.contested ? <Badge label="Check link" fg={C.warn} bg={C.warnSubtle} /> : null}
       </Pressable>
     );
   };
+  const newMine = mine.reduce((n, id) => n + (forms[id].newResponses || 0), 0);
   const Section = ({ title, list, pend }: { title: string; list: string[]; pend?: boolean }) =>
-    list.length ? (<View style={{ marginTop: 18 }}><Label>{title}  {list.length}</Label>{list.map((id) => pend ? <Row key={id} id={id} /> : <Row key={id} id={id} />)}</View>) : null;
+    list.length ? (<View style={{ marginTop: 18 }}><Label>{title}  {list.length}{title === "MY FORMS" && newMine ? `   ·  ${newMine} new` : ""}</Label>{list.map((id) => pend ? <Row key={id} id={id} /> : <Row key={id} id={id} />)}</View>) : null;
 
   const onRefresh = async () => { setRefreshing(true); try { await pullHistory(); } finally { setRefreshing(false); } };
   const empty = !mine.length && !answered.length && !open.length && !pending.length && !(snap.drafts || []).length;
@@ -565,6 +571,9 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   }, [answers]);
   // leaving the screen (back, switching forms) saves at once instead of dropping the pending save
   useEffect(() => () => saveNow(), []);
+  // looking at your own form = its answers are seen (clears the "N new" badge)
+  const newHere = !preview && f?.mine ? f.newResponses || 0 : 0;
+  useEffect(() => { if (newHere > 0) client.markSeen(id); }, [newHere]);
 
   if (pending) {
     return (
@@ -990,7 +999,11 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
     if (t <= Date.now()) { toast("That time has passed - use Publish"); return; }
     if (saveDraft(t)) { toast(`Scheduled for ${fmtTime(t)} - goes out when WhisperBox is open then (or the next time you open it)`); pop(); }
   };
-  const done = (formId: string) => { if (did.current) client.deleteDraft(did.current); replace({ k: "form", id: formId }); };
+  const done = (formId: string) => {
+    if (did.current) client.deleteDraft(did.current);
+    notificationsEnabled().then((on) => { if (on) ensurePermission(); }).catch(() => {});   // tell me when answers arrive
+    replace({ k: "form", id: formId });
+  };
   const publish = async () => {
     if (busy) return;
     const b = buildDef(true);
@@ -1252,6 +1265,7 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
           </View>
           <Switch value={shared} onValueChange={async (v) => { setShared(v); await setSharedNode(v); toast("Applies after restarting WhisperBox"); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
         </View>
+        <NotifySetting toast={toast} />
         <KeycardSettings toast={toast} snap={snap} />
         <Btn label="Ask peers for anything I'm missing" onPress={() => { pullHistory(); toast("Catch-up requested"); }} style={{ marginTop: 12 }} />
         <Btn label="Copy debug log" onPress={async () => {
@@ -1260,6 +1274,20 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
         }} style={{ marginTop: 10 }} />
         {net.error ? <Banner tone="err" text={"Network error: " + net.error} /> : null}
       </ScrollView>
+    </View>
+  );
+}
+
+function NotifySetting({ toast }: { toast: (m: string) => void }) {
+  const [on, setOn] = useState(true);
+  useEffect(() => { notificationsEnabled().then(setOn).catch(() => {}); }, []);
+  return (
+    <View style={[st.card, st.cardHead, { marginTop: 18 }]}>
+      <View style={{ flex: 1, paddingRight: 12 }}>
+        <Text style={{ color: C.text, fontWeight: "600" }}>Notify me about new answers</Text>
+        <Text style={st.muted}>While WhisperBox runs in the background. Shows the form title and how many - never the answers.</Text>
+      </View>
+      <Switch value={on} onValueChange={async (v) => { setOn(v); await setNotificationsEnabled(v); toast(v ? "You'll be notified about new answers" : "No answer notifications"); }} trackColor={{ true: C.primary, false: C.border }} thumbColor="#fff" />
     </View>
   );
 }
