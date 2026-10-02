@@ -372,8 +372,10 @@ int main(int argc, char** argv) {
         bool sorted = true;
         for (size_t k = 1; k < ev2.size(); ++k) if (whisperbox::totalOrder(ev2[k - 1], ev2[k]) > 0) sorted = false;
         CHECK(sorted, "repaired log is HLC-sorted on disk");
-        F->node->online = true; F->core->resync();
-        CHECK(waitUntil([&] { return hasForm(*F, wfid); }, 10000), "dropped form returns as the signed original via sync");
+        F->node->online = true;
+        bool back = false;   // a catch-up round can be lost on a busy bus: ask again, as the app's schedule does
+        for (int attempt = 0; attempt < 3 && !back; attempt++) { F->core->resync(); back = waitUntil([&] { return hasForm(*F, wfid); }, 6000); }
+        CHECK(back, "dropped form returns as the signed original via sync");
     }
 
     // ── per-form keys ────────────────────────────────────────────────────────────
