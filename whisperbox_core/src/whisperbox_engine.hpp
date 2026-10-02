@@ -1,4 +1,7 @@
 #pragma once
+#include <cctype>
+#include <cmath>
+#include <regex>
 // whisperbox_engine.hpp — pure, deterministic fold from a merged WhisperBox event
 // log to app state (computeState) + CREATOR VIEW (creatorView). C++ port of
 // packages/engine/src/engine.mjs (the TS reference; golden vectors in
@@ -210,6 +213,8 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
                 f["maxResponses"] = mr;
             }
             f["showResponseCount"] = p.contains("showResponseCount") && p["showResponseCount"].is_boolean() && p["showResponseCount"].get<bool>();
+            f["thankYou"] = p.contains("thankYou") && p["thankYou"].is_string() ? p["thankYou"].get<std::string>() : std::string();
+            f["shuffleQuestions"] = p.contains("shuffleQuestions") && p["shuffleQuestions"].is_boolean() && p["shuffleQuestions"].get<bool>();
             f["status"] = "open";
             f["confirmations"] = json::array();
             if (forms.contains(formId)) {
@@ -483,6 +488,76 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
     view["responses"] = respObj;   // by-value copy — must happen after all pushes
     view["dropped"] = droppedToJson(dropped);
     return view;
+}
+
+// ── Answer validation (mirror contract/src/answers.mjs; fixture answer-validation.json) ──
+inline bool answerIsOther(const json& v) { return v.is_object() && v.contains("other"); }
+inline bool emptyAnswerValue(const json& v) {
+    if (v.is_null()) return true;
+    if (v.is_string()) { const std::string& s = v.get_ref<const std::string&>(); return s.find_first_not_of(" \t\r\n") == std::string::npos; }
+    if (v.is_array()) return v.empty();
+    if (answerIsOther(v)) { const json& o = v["other"]; if (!o.is_string()) return o.is_null();
+        const std::string& s = o.get_ref<const std::string&>(); return s.find_first_not_of(" \t\r\n") == std::string::npos; }
+    return false;
+}
+inline bool answerIsInt(const json& v) {
+    if (v.is_number_integer()) return true;
+    if (v.is_number_float()) { double d = v.get<double>(); return std::isfinite(d) && d == std::floor(d); }
+    return false;
+}
+inline bool validDateStr(const std::string& s) {
+    if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
+    for (int i : {0, 1, 2, 3, 5, 6, 8, 9}) if (!std::isdigit((unsigned char)s[i])) return false;
+    int y = std::stoi(s.substr(0, 4)), mo = std::stoi(s.substr(5, 2)), d = std::stoi(s.substr(8, 2));
+    if (mo < 1 || mo > 12 || d < 1) return false;
+    static const int dm[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int days = dm[mo - 1]; if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) days = 29;
+    return d <= days;
+}
+// "" when ok, else a short reason. Empty answers are only checked for `required`.
+inline std::string validateAnswer(const json& q, const json& v) {
+    const std::string t = q.value("type", std::string("text"));
+    if (t == "section") return "";
+    if (emptyAnswerValue(v)) return q.value("required", false) ? "required" : "";
+    const long long n = q.contains("options") && q["options"].is_array() ? (long long)q["options"].size() : 0;
+    const bool allowOther = q.value("allowOther", false);
+    auto otherOk = [&](const json& x) { return allowOther && answerIsOther(x) && x["other"].is_string() && !emptyAnswerValue(x); };
+    auto inRange = [&](const json& x) { if (!answerIsInt(x)) return false; double d = x.get<double>(); return d >= 0 && d < (double)n; };
+    auto numOr = [&](const char* k, double d) { return q.contains(k) && q[k].is_number() ? q[k].get<double>() : d; };
+    auto fmtNum = [](double d) { std::string s = std::to_string(d); if (d == std::floor(d)) s = std::to_string((long long)d); else { s.erase(s.find_last_not_of('0') + 1); } return s; };
+    if (t == "text" || t == "textarea") return v.is_string() ? "" : "must be text";
+    if (t == "email") { if (!v.is_string()) return "not an email address";
+        static const std::regex re("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
+        std::string s = v.get<std::string>(); s.erase(0, s.find_first_not_of(" \t")); s.erase(s.find_last_not_of(" \t") + 1);
+        return std::regex_match(s, re) ? "" : "not an email address"; }
+    if (t == "url") { if (!v.is_string()) return "not a link (https://...)";
+        static const std::regex re("^https?://\\S+\\.\\S+$", std::regex::icase);
+        std::string s = v.get<std::string>(); s.erase(0, s.find_first_not_of(" \t")); s.erase(s.find_last_not_of(" \t") + 1);
+        return std::regex_match(s, re) ? "" : "not a link (https://...)"; }
+    if (t == "radioButtons" || t == "dropdown") return inRange(v) || otherOk(v) ? "" : "not one of the options";
+    if (t == "checkbox") {
+        if (!v.is_array()) return "not a list of options";
+        std::set<long long> seen; int others = 0;
+        for (const auto& x : v) {
+            if (otherOk(x)) { others++; continue; }
+            if (!inRange(x) || seen.count((long long)x.get<double>())) return "not one of the options";
+            seen.insert((long long)x.get<double>());
+        }
+        return others > 1 ? "only one 'other' answer" : "";
+    }
+    if (t == "boolean") return v.is_boolean() ? "" : "must be yes or no";
+    if (t == "scale") { double lo = numOr("min", 1), hi = numOr("max", 5);
+        return answerIsInt(v) && v.get<double>() >= lo && v.get<double>() <= hi ? "" : "must be " + fmtNum(lo) + "-" + fmtNum(hi); }
+    if (t == "number") {
+        if (!v.is_number() || !std::isfinite(v.get<double>())) return "must be a number";
+        if (q.contains("min") && q["min"].is_number() && v.get<double>() < q["min"].get<double>()) return "at least " + fmtNum(q["min"].get<double>());
+        if (q.contains("max") && q["max"].is_number() && v.get<double>() > q["max"].get<double>()) return "at most " + fmtNum(q["max"].get<double>());
+        return "";
+    }
+    if (t == "date") return v.is_string() && validDateStr(v.get<std::string>()) ? "" : "not a date (YYYY-MM-DD)";
+    if (t == "time") { static const std::regex re("^([01][0-9]|2[0-3]):[0-5][0-9]$");
+        return v.is_string() && std::regex_match(v.get<std::string>(), re) ? "" : "not a time (HH:MM)"; }
+    return v.is_string() ? "" : "must be text";   // unknown type: forward-compatible
 }
 
 // ── Deterministic id helpers (mirror events.mjs) ────────────────────────────────

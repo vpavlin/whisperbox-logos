@@ -848,6 +848,8 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     p["whitelist"] = def.value("whitelist", json({{"type", "none"}, {"value", ""}}));
     if (def.contains("maxResponses") && def["maxResponses"].is_number_integer() && def["maxResponses"].get<long long>() > 0) p["maxResponses"] = def["maxResponses"];
     if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
+    if (def.contains("thankYou") && def["thankYou"].is_string() && !def["thankYou"].get<std::string>().empty()) p["thankYou"] = def["thankYou"];
+    if (def.value("shuffleQuestions", false) == true) p["shuffleQuestions"] = true;
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
     adoptLocal(e);
@@ -941,13 +943,13 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
             if (std::find(list.begin(), list.end(), m_signId.address) == list.end()) { out["ok"] = false; out["error"] = "this form only accepts listed addresses"; return out.dump(); }
         } else if (wl != "none") { out["ok"] = false; out["error"] = "whitelist type '" + wl + "' is not supported"; return out.dump(); }
     }
-    {   // required questions must be answered (the creator can't ask again)
+    {   // every answer must fit its question (types, ranges, required) - the creator can't ask again
         std::map<std::string, json> byQ;
         for (const auto& a : answers) if (a.is_object()) byQ[a.value("questionId", "")] = a.contains("value") ? a["value"] : json();
         for (const auto& q : f["questions"]) {
-            if (!q.value("required", false)) continue;
             auto it = byQ.find(q.value("id", ""));
-            if (it == byQ.end() || emptyAnswer(it->second)) { out["ok"] = false; out["error"] = "required: " + q.value("text", q.value("id", "")); return out.dump(); }
+            std::string e = whisperbox::validateAnswer(json::parse(q.dump()), it == byQ.end() ? json() : it->second);
+            if (!e.empty()) { out["ok"] = false; out["error"] = q.value("text", q.value("id", "")) + ": " + e; return out.dump(); }
         }
     }
 
@@ -1368,6 +1370,8 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
             }
             if (x.is_string()) return x.get<std::string>();
             if (x.is_boolean()) return x.get<bool>() ? "Yes" : "No";   // yes/no question
+            if (x.is_object() && x.contains("other") && x["other"].is_string()) return "Other: " + x["other"].get<std::string>();
+            if (x.is_number_float() && x.get<double>() == std::floor(x.get<double>())) return std::to_string((long long)x.get<double>());
             return x.is_null() ? "" : x.dump();
         };
         if (v.is_array()) {

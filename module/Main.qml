@@ -65,6 +65,8 @@ Item {
     property string draftMax: ""           // max responses (text field)
     property string draftCloseAt: ""       // "yyyy-MM-dd HH:mm" or ""
     property bool draftShowCount: false
+    property string draftThankYou: ""
+    property bool draftShuffle: false
     property string draftPublishAt: ""     // schedule field
     property bool draftScheduling: false
     property bool draftDirty: false
@@ -76,7 +78,9 @@ Item {
     readonly property var qTypes: [
         { t: "text", label: "Short text" }, { t: "textarea", label: "Paragraph" },
         { t: "radioButtons", label: "Single choice" }, { t: "checkbox", label: "Multiple choice" },
-        { t: "boolean", label: "Yes / No" }
+        { t: "boolean", label: "Yes / No" }, { t: "dropdown", label: "Dropdown" }, { t: "scale", label: "Scale" },
+        { t: "number", label: "Number" }, { t: "date", label: "Date" }, { t: "time", label: "Time" },
+        { t: "email", label: "Email" }, { t: "url", label: "Link" }
     ]
 
     // ── core plumbing ──
@@ -150,7 +154,9 @@ Item {
     readonly property bool storageBad: !!(st.storage && st.storage.ok === false)
     readonly property string storageNote: (st.storage && st.storage.note) ? st.storage.note : ""
     readonly property bool nodeReady: !!st.nodeReady
-    readonly property var sel: forms[selectedId] || null
+    // Preview: the builder's form shown as respondents see it (never sent).
+    property var previewDef: null
+    readonly property var sel: previewDef ? previewDef : (forms[selectedId] || null)
     readonly property bool selPending: !sel && selectedId !== "" && pendingForms.indexOf(selectedId) >= 0
     readonly property var selResponses: responsesFor(selectedId)
     readonly property int selConfirmed: { var n = 0; for (var i = 0; i < selResponses.length; i++) if (selResponses[i].confirmed) n++; return n; }
@@ -177,26 +183,51 @@ Item {
     }
     // Per-question aggregate for the Summary view.
     function summaryFor(q) {
-        var rs = root.selResponses, t = normType(q.type);
-        var labels = t === "boolean" ? ["Yes", "No"] : (q.options || []);
-        if (t === "radioButtons" || t === "checkbox" || t === "boolean") {
-            var counts = [], answered = 0;
-            for (var o = 0; o < labels.length; o++) counts.push(0);
-            for (var i = 0; i < rs.length; i++) {
-                var v = answerOf(rs[i], q.id), hit = false;
-                if (t === "boolean") { if (v === true) { counts[0]++; hit = true; } else if (v === false) { counts[1]++; hit = true; } }
-                else { var l = isList(v) ? toList(v) : (typeof v === "number" ? [v] : []);
-                       for (var j = 0; j < l.length; j++) if (l[j] >= 0 && l[j] < counts.length) { counts[l[j]]++; hit = true; } }
-                if (hit) answered++;
-            }
-            var rows = [], max = 1;
-            for (var c = 0; c < counts.length; c++) max = Math.max(max, counts[c]);
-            for (var d = 0; d < labels.length; d++) rows.push({ label: String(labels[d]), n: counts[d], pct: answered ? Math.round(100 * counts[d] / answered) : 0, w: counts[d] / max });
-            return { bars: true, rows: rows, answered: answered, samples: [] };
+        var rs = root.selResponses, t = normType(q.type), i, j;
+        var bars = function (labels, countFn) {
+            var counts = labels.map(function () { return 0; }), answered = 0;
+            for (i = 0; i < rs.length; i++) { var hit = countFn(answerOf(rs[i], q.id), counts); if (hit) answered++; }
+            var max = 1; for (j = 0; j < counts.length; j++) max = Math.max(max, counts[j]);
+            var rows = []; for (j = 0; j < labels.length; j++) rows.push({ label: String(labels[j]), n: counts[j], pct: answered ? Math.round(100 * counts[j] / answered) : 0, w: counts[j] / max });
+            return { bars: true, rows: rows, answered: answered, samples: [], stat: "" };
+        };
+        if (t === "radioButtons" || t === "checkbox" || t === "dropdown" || t === "boolean") {
+            var labels = t === "boolean" ? ["Yes", "No"] : (q.options || []).slice();
+            var other = !!q.allowOther && t !== "boolean"; if (other) labels.push("Other");
+            var r = bars(labels, function (v, c) {
+                var hit = false, l = t === "boolean" ? [] : (isList(v) ? toList(v) : [v]);
+                if (t === "boolean") { if (v === true) { c[0]++; hit = true; } else if (v === false) { c[1]++; hit = true; } return hit; }
+                for (var k = 0; k < l.length; k++) {
+                    if (typeof l[k] === "number" && l[k] >= 0 && l[k] < (q.options || []).length) { c[l[k]]++; hit = true; }
+                    else if (other && isOtherVal(l[k])) { c[c.length - 1]++; hit = true; }
+                }
+                return hit;
+            });
+            if (other) { var os = []; for (i = rs.length - 1; i >= 0 && os.length < 5; i--) { var ov = answerOf(rs[i], q.id), ol = isList(ov) ? toList(ov) : [ov];
+                for (j = 0; j < ol.length; j++) if (isOtherVal(ol[j]) && String(ol[j].other).trim()) os.push("Other: " + ol[j].other); } r.samples = os; }
+            return r;
         }
-        var texts = [];
-        for (var x = rs.length - 1; x >= 0; x--) { var s = answerText(q, answerOf(rs[x], q.id)); if (s) texts.push(s); }
-        return { bars: false, rows: [], answered: texts.length, samples: texts.slice(0, 5) };
+        if (t === "scale") {
+            var lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5, ls = [], sum = 0, cnt = 0;
+            for (var x = lo; x <= hi; x++) ls.push(String(x));
+            var rsS = bars(ls, function (v, c) { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
+            rsS.stat = cnt ? "average " + (Math.round(10 * sum / cnt) / 10) + (q.style === "stars" ? " ★" : "") + "  (" + (q.minLabel || lo) + " → " + (q.maxLabel || hi) + ")" : "";
+            return rsS;
+        }
+        var texts = [], nums = [];
+        for (var y = rs.length - 1; y >= 0; y--) { var av = answerOf(rs[y], q.id), s2 = answerText(q, av); if (s2) texts.push(s2); if (t === "number" && typeof av === "number") nums.push(av); }
+        var stat = "";
+        if (nums.length) { var mn = Math.min.apply(null, nums), mx = Math.max.apply(null, nums), sm = 0; for (var z = 0; z < nums.length; z++) sm += nums[z];
+            stat = "min " + mn + "  ·  average " + (Math.round(100 * sm / nums.length) / 100) + "  ·  max " + mx; }
+        return { bars: false, rows: [], answered: texts.length, samples: texts.slice(0, 5), stat: stat };
+    }
+    // "By question": every answer to one question
+    property int byQIndex: 0
+    readonly property var byQList: {
+        var f = root.sel, out = []; if (!f || !f.questions || !f.questions.length) return out;
+        var qi = Math.max(0, Math.min(root.byQIndex, f.questions.length - 1)), q = f.questions[qi];
+        for (var i = 0; i < root.respList.length; i++) { var t = answerText(q, answerOf(root.respList[i], q.id)); out.push({ who: shortAddr(root.respList[i].respondent), when: root.respList[i].submittedAt, text: t }); }
+        return out;
     }
     function responsesFor(fid) {
         if (!creatorView || !creatorView.responses || !creatorView.responses[fid]) return [];
@@ -210,7 +241,8 @@ Item {
     function fmtTime(ms) { if (!ms) return ""; return Qt.formatDateTime(new Date(Number(ms)), "d MMM yyyy, hh:mm"); }
     function normType(t) {
         var s = String(t);
-        return (s === "text" || s === "textarea" || s === "radioButtons" || s === "checkbox" || s === "boolean") ? s : "text";
+        var known = ["text", "textarea", "radioButtons", "checkbox", "boolean", "dropdown", "scale", "number", "date", "time", "email", "url", "section"];
+        return known.indexOf(s) >= 0 ? s : "text";
     }
     function questionFor(f, qid) {
         if (!f || !f.questions) return null;
@@ -223,6 +255,7 @@ Item {
         var opts = (q && q.options) ? q.options : [];
         var one = function (x) {
             if (typeof x === "boolean") return x ? "Yes" : "No";
+            if (x !== null && typeof x === "object" && x.other !== undefined) return "Other: " + x.other;
             return (typeof x === "number" && opts[x] !== undefined) ? String(opts[x]) : String(x);
         };
         if (isList(v)) { var parts = []; for (var i = 0; i < v.length; i++) parts.push(one(v[i])); return parts.join(", "); }
@@ -288,7 +321,7 @@ Item {
     }
     function setAnswer(qid, v) { var a = Object.assign({}, root.answers); a[qid] = v; root.answers = a; answerDraftTimer.restart(); }
     function saveAnswerDraftNow() {
-        if (!root.sel || root.sel.mine || root.sel.mySubmitted) return;
+        if (root.previewDef || !root.sel || root.sel.mine || root.sel.mySubmitted) return;
         var arr = [];
         for (var k in root.answers) if (root.answers.hasOwnProperty(k)) arr.push({ questionId: k, value: root.answers[k] });
         callVia("saveAnswerDraft", [root.sel.id, JSON.stringify(arr)], function () {});
@@ -299,19 +332,77 @@ Item {
         if (at >= 0) cur.splice(at, 1); else { cur.push(idx); cur.sort(function (a, b) { return a - b; }); }
         setAnswer(qid, cur);
     }
+    // ── answer rules (mirror contract/src/answers.mjs; the core enforces them too) ──
+    function isOtherVal(v) { return v !== null && v !== undefined && typeof v === "object" && !isList(v) && v.other !== undefined; }
+    function emptyVal(v) {
+        if (v === null || v === undefined) return true;
+        if (typeof v === "string") return v.trim() === "";
+        if (isList(v)) return v.length === 0;
+        if (isOtherVal(v)) return String(v.other || "").trim() === "";
+        return false;
+    }
+    function validateVal(q, v) {
+        var t = normType(q.type);
+        if (t === "section") return "";
+        if (emptyVal(v)) return q.required ? "required" : "";
+        var n = (q.options || []).length, isInt = function (x) { return typeof x === "number" && Math.floor(x) === x; };
+        var otherOk = function (x) { return !!q.allowOther && isOtherVal(x) && String(x.other).trim() !== ""; };
+        if (t === "text" || t === "textarea") return typeof v === "string" ? "" : "must be text";
+        if (t === "email") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim()) ? "" : "not an email address";
+        if (t === "url") return /^https?:\/\/\S+\.\S+$/i.test(String(v).trim()) ? "" : "not a link (https://...)";
+        if (t === "radioButtons" || t === "dropdown") return (isInt(v) && v >= 0 && v < n) || otherOk(v) ? "" : "pick one of the options";
+        if (t === "checkbox") { var l = toList(v), others = 0; for (var i = 0; i < l.length; i++) { if (otherOk(l[i])) others++; else if (!(isInt(l[i]) && l[i] >= 0 && l[i] < n)) return "pick from the options"; } return others > 1 ? "only one 'other'" : ""; }
+        if (t === "boolean") return typeof v === "boolean" ? "" : "pick yes or no";
+        if (t === "scale") { var lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5; return isInt(v) && v >= lo && v <= hi ? "" : "pick " + lo + "-" + hi; }
+        if (t === "number") { if (typeof v !== "number" || !isFinite(v)) return "must be a number"; if (typeof q.min === "number" && v < q.min) return "at least " + q.min; if (typeof q.max === "number" && v > q.max) return "at most " + q.max; return ""; }
+        if (t === "date") { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v)); if (!m) return "use YYYY-MM-DD"; var d = new Date(+m[1], +m[2] - 1, +m[3]); return d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? "" : "not a real date"; }
+        if (t === "time") return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v)) ? "" : "use HH:MM (24 h)";
+        return "";
+    }
+    function problemOf(q) { return validateVal(q, root.answers[q.id]); }
+    // Deterministic shuffle per respondent + form (stable across restarts, different per person).
+    function seededOrder(n, seedStr) {
+        var h = 2166136261; for (var i = 0; i < seedStr.length; i++) { h ^= seedStr.charCodeAt(i); h = (h * 16777619) >>> 0; }
+        var idx = []; for (var k = 0; k < n; k++) idx.push(k);
+        for (var j = n - 1; j > 0; j--) { h = (h * 1103515245 + 12345) >>> 0; var r = h % (j + 1); var t = idx[j]; idx[j] = idx[r]; idx[r] = t; }
+        return idx;
+    }
+    readonly property var shownQuestions: {
+        var f = root.sel; if (!f || !f.questions) return [];
+        if (!f.shuffleQuestions) return f.questions;
+        var o = seededOrder(f.questions.length, root.myAddress + "|" + f.id), out = [];
+        for (var i = 0; i < o.length; i++) out.push(f.questions[o[i]]);
+        return out;
+    }
+    function optionOrder(q) {   // indices of q.options in display order
+        var n = (q.options || []).length;
+        if (!q.shuffleOptions) { var a = []; for (var i = 0; i < n; i++) a.push(i); return a; }
+        return seededOrder(n, root.myAddress + "|" + (root.sel ? root.sel.id : "") + "|" + q.id);
+    }
+    readonly property var progress: {
+        var qs = root.shownQuestions, n = 0, done = 0;
+        for (var i = 0; i < qs.length; i++) { if (normType(qs[i].type) === "section") continue; n++; if (!emptyVal(root.answers[qs[i].id])) done++; }
+        return { n: n, done: done };
+    }
     function isMissing(q) {
         var v = root.answers[q.id];
         return !!q.required && (v === undefined || v === null || (typeof v === "string" && v.trim() === "") || (isList(v) && v.length === 0));
     }
     function doSubmit() {
         var f = root.sel;
+        if (root.previewDef) { toast("This is a preview - answers aren't sent"); return; }
         if (!f || !f.canRespond) return;
+        for (var pi = 0; pi < f.questions.length; pi++) {
+            var pq = f.questions[pi], pe = problemOf(pq);
+            if (pe) { root.showErrors = true; toast(pq.text + ": " + pe); return; }
+        }
         var arr = [];
         for (var i = 0; i < f.questions.length; i++) {
             var q = f.questions[i];
             if (isMissing(q)) { root.showErrors = true; toast("Please answer: " + q.text); return; }
             var v = root.answers[q.id];
-            if (v === undefined) v = normType(q.type) === "checkbox" ? [] : ((normType(q.type) === "radioButtons" || normType(q.type) === "boolean") ? null : "");
+            if (normType(q.type) === "section") continue;
+            if (v === undefined) { var tt = normType(q.type); v = tt === "checkbox" ? [] : ((tt === "text" || tt === "textarea" || tt === "email" || tt === "url") ? "" : null); }
             arr.push({ questionId: q.id, value: v });
         }
         answerDraftTimer.stop();   // the core drops the answer draft on submit
@@ -368,6 +459,7 @@ Item {
         root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
+        root.draftThankYou = ""; root.draftShuffle = false;
     }
     function openCreate() { resetBuilder(); rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     function loadBuilder(b) {
@@ -376,6 +468,7 @@ Item {
         root.draftQuestions = (b.questions && b.questions.length) ? b.questions : root.draftQuestions;
         root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
         root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
+        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle;
     }
     function openDraft(d) {
         var b = (d.def && d.def._builder) ? d.def._builder : null;
@@ -391,13 +484,48 @@ Item {
         var qs = [];
         for (var i = 0; i < (f.questions || []).length; i++) {
             var q = f.questions[i];
-            qs.push({ type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n") });
+            var dq = Object.assign({}, q); delete dq.id; delete dq.options;
+            dq.type = normType(q.type); dq.text = q.text || ""; dq.required = !!q.required; dq.optionsText = (q.options || []).join("\n");
+            qs.push(dq);
         }
         loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
                       restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
-                      max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount });
+                      max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions });
         rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
+    readonly property var templates: [
+        { name: "Event RSVP", b: { title: "Are you coming?", description: "Let us know by Friday.", questions: [
+            { type: "boolean", text: "Will you attend?", required: true, optionsText: "" },
+            { type: "number", text: "How many guests are you bringing?", required: false, optionsText: "", numMin: "0", numMax: "10" },
+            { type: "radioButtons", text: "Food preference", required: false, optionsText: "Anything\nVegetarian\nVegan", allowOther: true },
+            { type: "textarea", text: "Anything we should know?", required: false, optionsText: "" }], thankYou: "Thanks - see you there!" } },
+        { name: "Feedback", b: { title: "How did we do?", description: "", questions: [
+            { type: "scale", text: "Overall, how satisfied are you?", required: true, optionsText: "", min: 1, max: 5, style: "stars" },
+            { type: "checkbox", text: "What did you like?", required: false, optionsText: "Content\nSpeakers\nVenue\nPeople", allowOther: true },
+            { type: "textarea", text: "What should we improve?", required: false, optionsText: "" }], thankYou: "Thank you for the feedback!" } },
+        { name: "Quick poll", b: { title: "Quick poll", description: "", questions: [
+            { type: "radioButtons", text: "Which option do you prefer?", required: true, optionsText: "Option A\nOption B\nOption C", shuffleOptions: true }] } },
+        { name: "Sign-up sheet", b: { title: "Sign up", description: "", questions: [
+            { type: "text", text: "Name", required: true, optionsText: "" },
+            { type: "email", text: "Email (optional - only the organiser sees it)", required: false, optionsText: "" },
+            { type: "dropdown", text: "Slot", required: true, optionsText: "Morning\nAfternoon\nEvening" }] } },
+        { name: "NPS", b: { title: "Would you recommend us?", description: "", questions: [
+            { type: "scale", text: "How likely are you to recommend us to a friend?", required: true, optionsText: "", min: 0, max: 10, minLabel: "Not likely", maxLabel: "Very likely" },
+            { type: "textarea", text: "What's the main reason for your score?", required: false, optionsText: "" }] } }
+    ]
+    function useTemplateNps() { useTemplate(4); }   // (harness: invokable without args)
+    function useTemplate(i) { loadBuilder(JSON.parse(JSON.stringify(templates[i].b))); rebuildBuilder(); root.draftDirty = true; }
+    property var answersBeforePreview: ({})
+    function openPreview() {
+        var b = buildDef(false);
+        var d = b.def;
+        root.answersBeforePreview = root.answers; root.answers = ({}); root.showErrors = false;
+        root.previewDef = { id: "preview", title: d.title || "(untitled)", description: d.description, questions: d.questions, whitelist: d.whitelist,
+            creator: root.myAddress, status: "open", canRespond: true, allowed: true, mine: false, confirmations: [],
+            maxResponses: d.maxResponses, expiresAt: d.expiresAt, showResponseCount: !!d.showResponseCount, thankYou: d.thankYou || "", shuffleQuestions: !!d.shuffleQuestions };
+        root.showCreate = false;
+    }
+    function closePreview() { root.previewDef = null; root.answers = root.answersBeforePreview; root.showCreate = true; }
     function addDraftQuestion() { root.draftQuestions = root.draftQuestions.concat([{ type: "text", text: "", required: false, optionsText: "" }]); }
     function removeDraftQuestion(i) { var a = root.draftQuestions.slice(); a.splice(i, 1); root.draftQuestions = a; rebuildBuilder(); }
     function moveDraftQuestion(i, d) {
@@ -420,7 +548,8 @@ Item {
     }
     // Everything the builder shows - stored inside the draft so it reopens exactly.
     readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
-        restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount })
+        restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount,
+        thankYou: root.draftThankYou, shuffle: root.draftShuffle })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
     function buildDef(strict) {
@@ -432,9 +561,24 @@ Item {
             var d = root.draftQuestions[i], text = String(d.text || "").trim();
             if (!text) continue;
             var q = { id: "q" + (qs.length + 1), type: d.type, text: text, required: !!d.required };
-            if (d.type === "radioButtons" || d.type === "checkbox") {
+            if (String(d.help || "").trim()) q.help = String(d.help).trim();
+            if (d.type === "radioButtons" || d.type === "checkbox" || d.type === "dropdown") {
                 q.options = draftOptions(d);
                 if (strict && q.options.length < 2) return err("\"" + text + "\" needs at least two options");
+                if (d.allowOther) q.allowOther = true;
+                if (d.shuffleOptions) q.shuffleOptions = true;
+            }
+            if (d.type === "scale") {
+                q.min = d.min === 0 ? 0 : 1; q.max = [3, 4, 5, 7, 10].indexOf(d.max) >= 0 ? d.max : 5;
+                if (String(d.minLabel || "").trim()) q.minLabel = String(d.minLabel).trim();
+                if (String(d.maxLabel || "").trim()) q.maxLabel = String(d.maxLabel).trim();
+                if (d.style === "stars") q.style = "stars";
+            }
+            if (d.type === "number") {
+                var mn = String(d.numMin || "").trim(), mx = String(d.numMax || "").trim();
+                if (mn !== "" && !isNaN(Number(mn))) q.min = Number(mn);
+                if (mx !== "" && !isNaN(Number(mx))) q.max = Number(mx);
+                if (strict && q.min !== undefined && q.max !== undefined && q.min > q.max) return err("\"" + text + "\": minimum is above maximum");
             }
             qs.push(q);
         }
@@ -451,6 +595,8 @@ Item {
         var ca = root.draftCloseAt.trim();
         if (ca) { var t = parseLocal(ca); if (strict && isNaN(t)) return err("Close date: use yyyy-MM-dd HH:mm"); if (strict && t <= Date.now()) return err("Close date is in the past"); if (!isNaN(t)) def.expiresAt = t; }
         if (root.draftShowCount) def.showResponseCount = true;
+        if (root.draftThankYou.trim()) def.thankYou = root.draftThankYou.trim();
+        if (root.draftShuffle) def.shuffleQuestions = true;
         return { ok: true, def: def };
     }
     function builderEmpty() {
@@ -829,6 +975,18 @@ Item {
                     width: Math.min(detailFlick.width - 12, 860)
                     spacing: 16
 
+                    Rectangle {   // preview banner
+                        visible: !!root.previewDef
+                        Layout.fillWidth: true
+                        implicitHeight: pvRow.implicitHeight + 20
+                        radius: 12; color: root.wbWarningSubtle; border.color: root.wbAccent; border.width: 1
+                        RowLayout {
+                            id: pvRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: 12
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Preview - this is what respondents will see. Nothing you enter here is sent."; font.pixelSize: 13; color: root.wbAccent }
+                            WbButton { label: "Back to editing"; primary: true; onClicked: root.closePreview() }
+                        }
+                    }
                     // ── header ──
                     RowLayout {
                         Layout.fillWidth: true
@@ -841,9 +999,9 @@ Item {
                             color: root.wbText
                             wrapMode: Text.WordWrap
                         }
-                        WbButton { visible: !!root.sel; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
-                        WbButton { visible: !!root.sel; label: "Duplicate"; onClicked: root.duplicateSelected() }
-                        WbButton { visible: !!root.sel; label: "Share"; onClicked: root.openShare() }
+                        WbButton { visible: !!root.sel && !root.previewDef; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
+                        WbButton { visible: !!root.sel && !root.previewDef; label: "Duplicate"; onClicked: root.duplicateSelected() }
+                        WbButton { visible: !!root.sel && !root.previewDef; label: "Share"; onClicked: root.openShare() }
                     }
                     Flow {
                         Layout.fillWidth: true
@@ -963,7 +1121,7 @@ Item {
                             visible: root.selResponses.length > 0
                             spacing: 6
                             Repeater {
-                                model: [{ m: "summary", l: "Summary" }, { m: "table", l: "Table" }, { m: "one", l: "One by one" }]
+                                model: [{ m: "summary", l: "Summary" }, { m: "question", l: "By question" }, { m: "table", l: "Table" }, { m: "one", l: "One by one" }]
                                 Rectangle {
                                     property bool on: root.respMode === modelData.m
                                     implicitWidth: tabT.implicitWidth + 24; implicitHeight: 32; radius: 16
@@ -975,7 +1133,7 @@ Item {
                             }
                             Item { Layout.fillWidth: true }
                             InputBox {
-                                visible: root.respMode !== "summary"
+                                visible: root.respMode === "table" || root.respMode === "one" || root.respMode === "question"
                                 implicitWidth: 220; implicitHeight: 32
                                 TextField {
                                     anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
@@ -1027,12 +1185,47 @@ Item {
                                         }
                                     }
                                     Repeater {
-                                        model: sumCard.sm.bars ? [] : sumCard.sm.samples
+                                        model: sumCard.sm.samples
                                         Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "“" + modelData + "”"; font.pixelSize: 13; color: root.wbTextSec }
                                     }
+                                    Text { textFormat: Text.PlainText; visible: !!sumCard.sm.stat; text: sumCard.sm.stat || ""; font.pixelSize: 12; color: root.wbTextSec }
                                     Text { textFormat: Text.PlainText
                                         visible: !sumCard.sm.bars && sumCard.sm.answered > sumCard.sm.samples.length
                                         text: "+ " + (sumCard.sm.answered - sumCard.sm.samples.length) + " more - see Table or One by one"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                        }
+
+                        // ── BY QUESTION: pick a question, see every answer to it ──
+                        ColumnLayout {
+                            visible: root.respMode === "question" && root.selResponses.length > 0
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Flow {
+                                Layout.fillWidth: true; spacing: 6
+                                Repeater {
+                                    model: root.sel ? root.sel.questions : []
+                                    Rectangle {
+                                        property bool on: index === root.byQIndex
+                                        implicitWidth: Math.min(260, bqT.implicitWidth + 22); implicitHeight: 28; radius: 14
+                                        color: on ? root.wbPrimarySubtle : "transparent"; border.color: on ? root.wbPrimary : root.wbBorder; border.width: 1
+                                        Text { id: bqT; textFormat: Text.PlainText; anchors.centerIn: parent; width: Math.min(implicitWidth, 238); elide: Text.ElideRight
+                                            text: (index + 1) + ". " + modelData.text; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.byQIndex = index }
+                                    }
+                                }
+                            }
+                            Repeater {
+                                model: root.respMode === "question" ? root.byQList : []
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: bqRow.implicitHeight + 18; radius: 10
+                                    color: root.wbSurfaceRaised; border.color: root.wbBorderSubtle; border.width: 1
+                                    RowLayout {
+                                        id: bqRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: 12; spacing: 12
+                                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData.text.length ? modelData.text : "(no answer)"
+                                            font.pixelSize: 13; color: modelData.text.length ? root.wbText : root.wbTextTert }
+                                        Text { textFormat: Text.PlainText; text: modelData.who; font.pixelSize: 11; font.family: "monospace"; color: root.wbTextTert }
+                                    }
                                 }
                             }
                         }
@@ -1229,8 +1422,9 @@ Item {
                                     if (!f) return "";
                                     if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it.";
                                     if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
-                                    if (f.mySubmitted && f.myConfirmed) return "Your answers were received - the creator sent you a receipt.";
-                                    if (f.mySubmitted) return "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.";
+                                    if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed
+                                        ? "Your answers were received - the creator sent you a receipt."
+                                        : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.");
                                     if (f.status === "closed") return "This form is closed and no longer accepts answers.";
                                     if (!f.allowed) return "This form only accepts answers from specific addresses, and yours (" + root.shortAddr(root.myAddress) + ") isn't on the list.";
                                     if (!f.publicKey) return "Still syncing this form...";
@@ -1277,39 +1471,73 @@ Item {
                             }
                         }
 
+                        // progress (longer forms)
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: !!(root.sel && root.sel.canRespond) && root.progress.n >= 4
+                            spacing: 4
+                            Text { textFormat: Text.PlainText; text: root.progress.done + " of " + root.progress.n + " answered"; font.pixelSize: 11; color: root.wbTextTert }
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 4; radius: 2; color: root.wbSurfaceRaised
+                                Rectangle { height: parent.height; radius: 2; color: root.wbPrimary; width: parent.width * (root.progress.n ? root.progress.done / root.progress.n : 0) } }
+                        }
+
                         Repeater {
-                            model: (root.sel && root.sel.canRespond) ? root.sel.questions : []
+                            model: (root.sel && root.sel.canRespond) ? root.shownQuestions : []
                             ColumnLayout {
                                 id: qBlock
                                 Layout.fillWidth: true
                                 spacing: 8
                                 property var q: modelData
                                 property string qt: root.normType(modelData.type)
-                                property bool invalid: root.showErrors && root.isMissing(modelData)
+                                property string problem: root.showErrors ? root.problemOf(modelData) : ""
+                                property bool invalid: problem.length > 0
+                                property var cur: root.answers[modelData.id]
+                                property bool single: qt === "text" || qt === "email" || qt === "url" || qt === "number" || qt === "date" || qt === "time"
+                                property bool choice: qt === "radioButtons" || qt === "checkbox" || qt === "dropdown" || qt === "boolean"
+                                property bool multi: qt === "checkbox"
+                                property string otherText: root.isOtherVal(cur) ? String(cur.other) : ""
+                                function hasOther() {
+                                    if (root.isOtherVal(cur)) return true;
+                                    var l = root.toList(cur); for (var i = 0; i < l.length; i++) if (root.isOtherVal(l[i])) return true; return false;
+                                }
+                                function setOther(t, on) {
+                                    if (!multi) { root.setAnswer(q.id, on ? { other: t } : null); return; }
+                                    var l = root.toList(cur).filter(function (x) { return !root.isOtherVal(x); });
+                                    if (on) l.push({ other: t });
+                                    root.setAnswer(q.id, l);
+                                }
 
-                                Text { textFormat: Text.PlainText;
+                                Text { textFormat: Text.PlainText
                                     Layout.fillWidth: true
-                                    text: (index + 1) + ". " + qBlock.q.text + (qBlock.q.required ? "  *" : "")
+                                    text: (qBlock.qt === "section" ? "" : (index + 1) + ". ") + qBlock.q.text + (qBlock.q.required ? "  *" : "")
                                     wrapMode: Text.WordWrap
-                                    font.pixelSize: 14
-                                    font.weight: Font.DemiBold
+                                    font.pixelSize: qBlock.qt === "section" ? 17 : 14
+                                    font.weight: qBlock.qt === "section" ? Font.Bold : Font.DemiBold
                                     color: qBlock.invalid ? root.wbError : root.wbText
                                 }
+                                Text { textFormat: Text.PlainText
+                                    visible: !!qBlock.q.help
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                    text: qBlock.q.help || ""; font.pixelSize: 12; color: root.wbTextTert
+                                }
+                                // one-line inputs: text, email, link, number, date, time
                                 InputBox {
-                                    visible: qBlock.qt === "text"
+                                    visible: qBlock.single
                                     Layout.fillWidth: true
                                     implicitHeight: 42
                                     invalid: qBlock.invalid
                                     TextField {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
-                                        color: root.wbText
-                                        placeholderTextColor: root.wbTextTert
-                                        font.pixelSize: 13
-                                        background: null
-                                        placeholderText: "Your answer"
-                                        onTextChanged: root.setAnswer(qBlock.q.id, text)
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13; background: null
+                                        placeholderText: ({ email: "name@example.com", url: "https://...", number: "A number", date: "YYYY-MM-DD", time: "HH:MM" })[qBlock.qt] || "Your answer"
+                                        inputMethodHints: qBlock.qt === "number" ? Qt.ImhFormattedNumbersOnly : (qBlock.qt === "email" ? Qt.ImhEmailCharactersOnly : Qt.ImhNone)
+                                        text: qBlock.cur === undefined || qBlock.cur === null ? "" : String(qBlock.cur)
+                                        onTextChanged: {
+                                            if (qBlock.qt !== "number") { if (text !== String(qBlock.cur === undefined || qBlock.cur === null ? "" : qBlock.cur)) root.setAnswer(qBlock.q.id, text); return; }
+                                            var t = text.trim().replace(",", ".");
+                                            var v = t === "" ? null : (isNaN(Number(t)) ? t : Number(t));
+                                            if (v !== qBlock.cur) root.setAnswer(qBlock.q.id, v);
+                                        }
                                     }
                                 }
                                 InputBox {
@@ -1321,53 +1549,101 @@ Item {
                                         anchors.fill: parent
                                         anchors.margins: 4
                                         TextArea {
-                                            color: root.wbText
-                                            placeholderTextColor: root.wbTextTert
-                                            font.pixelSize: 13
-                                            wrapMode: TextEdit.Wrap
-                                            background: null
-                                            placeholderText: "Your answer"
-                                            onTextChanged: root.setAnswer(qBlock.q.id, text)
+                                            color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13
+                                            wrapMode: TextEdit.Wrap; background: null; placeholderText: "Your answer"
+                                            text: typeof qBlock.cur === "string" ? qBlock.cur : ""
+                                            onTextChanged: if (text !== (typeof qBlock.cur === "string" ? qBlock.cur : "")) root.setAnswer(qBlock.q.id, text)
                                         }
                                     }
                                 }
-                                Repeater {
-                                    model: (qBlock.qt === "radioButtons" || qBlock.qt === "checkbox") ? (qBlock.q.options || []) : (qBlock.qt === "boolean" ? ["Yes", "No"] : [])
-                                    Rectangle {
-                                        id: opt
-                                        Layout.fillWidth: true
-                                        implicitHeight: 40
-                                        radius: 10
-                                        property bool multi: qBlock.qt === "checkbox"
-                                        property bool on: multi ? root.toList(root.answers[qBlock.q.id]).indexOf(index) >= 0
-                                                                : (qBlock.qt === "boolean" ? root.answers[qBlock.q.id] === (index === 0) : root.answers[qBlock.q.id] === index)
-                                        color: on ? root.wbPrimarySubtle : (optMa.containsMouse ? root.wbBorderSubtle : root.wbSurfaceRaised)
-                                        border.color: on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)
-                                        border.width: 1
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 12
-                                            anchors.rightMargin: 12
-                                            spacing: 10
-                                            Rectangle {
-                                                width: 16; height: 16
-                                                radius: opt.multi ? 4 : 8
-                                                color: "transparent"
-                                                border.color: opt.on ? root.wbPrimary : root.wbTextTert
-                                                border.width: 2
-                                                Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: opt.multi ? 2 : 4; color: root.wbPrimary; visible: opt.on }
+                                // choices: single / multiple / dropdown (compact) / yes-no
+                                Flow {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    visible: qBlock.choice
+                                    Repeater {
+                                        model: qBlock.qt === "boolean" ? [0, 1] : (qBlock.choice ? root.optionOrder(qBlock.q) : [])
+                                        Rectangle {
+                                            id: opt
+                                            property int oi: modelData
+                                            property string label: qBlock.qt === "boolean" ? (oi === 0 ? "Yes" : "No") : String((qBlock.q.options || [])[oi])
+                                            property var val: qBlock.qt === "boolean" ? oi === 0 : oi
+                                            property bool on: qBlock.multi ? root.toList(qBlock.cur).indexOf(oi) >= 0 : qBlock.cur === val
+                                            width: qBlock.qt === "dropdown" ? optLbl.implicitWidth + 28 : qBlock.width
+                                            height: qBlock.qt === "dropdown" ? 32 : 46
+                                            radius: qBlock.qt === "dropdown" ? 16 : 10
+                                            color: on ? root.wbPrimarySubtle : (optMa.containsMouse ? root.wbBorderSubtle : root.wbSurfaceRaised)
+                                            border.color: on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)
+                                            border.width: 1
+                                            RowLayout {
+                                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                                Rectangle {
+                                                    visible: qBlock.qt !== "dropdown"
+                                                    width: 16; height: 16; radius: qBlock.multi ? 4 : 8; color: "transparent"
+                                                    border.color: opt.on ? root.wbPrimary : root.wbTextTert; border.width: 2
+                                                    Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: qBlock.multi ? 2 : 4; color: root.wbPrimary; visible: opt.on }
+                                                }
+                                                Text { id: optLbl; textFormat: Text.PlainText; Layout.fillWidth: qBlock.qt !== "dropdown"; text: opt.label; font.pixelSize: 13; color: opt.on ? root.wbPrimary : root.wbText; elide: Text.ElideRight }
                                             }
-                                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: String(modelData); font.pixelSize: 13; color: root.wbText; elide: Text.ElideRight }
-                                        }
-                                        MouseArea {
-                                            id: optMa
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: opt.multi ? root.toggleChoice(qBlock.q.id, index) : root.setAnswer(qBlock.q.id, qBlock.qt === "boolean" ? index === 0 : index)
+                                            MouseArea {
+                                                id: optMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: qBlock.multi ? root.toggleChoice(qBlock.q.id, opt.oi) : root.setAnswer(qBlock.q.id, opt.on && !qBlock.q.required ? null : opt.val)
+                                            }
                                         }
                                     }
                                 }
+                                // "Other: ___"
+                                RowLayout {
+                                    visible: qBlock.choice && !!qBlock.q.allowOther && qBlock.qt !== "boolean"
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 16; height: 16; radius: qBlock.multi ? 4 : 8; color: "transparent"
+                                        border.color: qBlock.hasOther() ? root.wbPrimary : root.wbTextTert; border.width: 2
+                                        Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: qBlock.multi ? 2 : 4; color: root.wbPrimary; visible: qBlock.hasOther() }
+                                        MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: qBlock.setOther(otherField.text, !qBlock.hasOther()) }
+                                    }
+                                    Text { textFormat: Text.PlainText; text: "Other:"; font.pixelSize: 13; color: root.wbTextSec }
+                                    InputBox { Layout.fillWidth: true; implicitHeight: 36
+                                        TextField { id: otherField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                            color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13; background: null; placeholderText: "Your own answer"
+                                            text: qBlock.otherText
+                                            onTextChanged: if (text !== qBlock.otherText) qBlock.setOther(text, text.trim() !== "") } }
+                                }
+                                // linear scale / stars
+                                ColumnLayout {
+                                    visible: qBlock.qt === "scale"
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    property int lo: typeof qBlock.q.min === "number" ? qBlock.q.min : 1
+                                    property int hi: typeof qBlock.q.max === "number" ? qBlock.q.max : 5
+                                    Flow {
+                                        Layout.fillWidth: true; spacing: 6
+                                        Repeater {
+                                            model: qBlock.qt === "scale" ? Math.max(0, parent.parent.hi - parent.parent.lo + 1) : 0
+                                            Rectangle {
+                                                property int v: parent.parent.lo + index
+                                                property bool stars: qBlock.q.style === "stars"
+                                                property bool on: stars ? (typeof qBlock.cur === "number" && v <= qBlock.cur) : qBlock.cur === v
+                                                width: stars ? 34 : 40; height: stars ? 34 : 36; radius: stars ? 17 : 8
+                                                color: stars ? "transparent" : (on ? root.wbPrimary : root.wbSurfaceRaised)
+                                                border.color: stars ? "transparent" : (on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)); border.width: 1
+                                                Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: parent.stars ? "★" : String(parent.v)
+                                                    font.pixelSize: parent.stars ? 26 : 13; font.weight: Font.DemiBold
+                                                    color: parent.stars ? (parent.on ? root.wbAccent : root.wbBorder) : (parent.on ? "white" : root.wbText) }
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setAnswer(qBlock.q.id, parent.v) }
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        visible: !!(qBlock.q.minLabel || qBlock.q.maxLabel)
+                                        Text { textFormat: Text.PlainText; text: qBlock.q.minLabel || ""; font.pixelSize: 11; color: root.wbTextTert }
+                                        Item { Layout.fillWidth: true }
+                                        Text { textFormat: Text.PlainText; text: qBlock.q.maxLabel || ""; font.pixelSize: 11; color: root.wbTextTert }
+                                    }
+                                }
+                                Text { textFormat: Text.PlainText; visible: qBlock.invalid; text: qBlock.problem; font.pixelSize: 12; color: root.wbError }
                             }
                         }
 
@@ -1699,6 +1975,19 @@ Item {
                     width: createFlick.width - 10
                     spacing: 12
 
+                    SectionLabel { visible: !root.draftId && root.builderEmpty(); text: "START FROM A TEMPLATE" }
+                    Flow {
+                        visible: !root.draftId && root.builderEmpty()
+                        Layout.fillWidth: true; spacing: 6
+                        Repeater {
+                            model: root.templates
+                            Rectangle {
+                                implicitWidth: tpT.implicitWidth + 22; implicitHeight: 30; radius: 15; color: "transparent"; border.color: root.wbBorder; border.width: 1
+                                Text { id: tpT; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData.name; font.pixelSize: 12; color: root.wbTextSec }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.useTemplate(index) }
+                            }
+                        }
+                    }
                     SectionLabel { text: "TITLE" }
                     InputBox {
                         Layout.fillWidth: true
@@ -1752,7 +2041,7 @@ Item {
                             // Repeater below, a bare `index` is the CHIP's index, not the question's.
                             readonly property int qi: index
                             property var d: root.draftQuestions[index] || ({})
-                            property bool choice: d.type === "radioButtons" || d.type === "checkbox"
+                            property bool choice: d.type === "radioButtons" || d.type === "checkbox" || d.type === "dropdown"
 
                             ColumnLayout {
                                 id: dqCol
@@ -1820,6 +2109,63 @@ Item {
                                         border.width: 1
                                         Text { textFormat: Text.PlainText; id: reqT; anchors.centerIn: parent; text: dq.d.required ? "Required" : "Optional"; font.pixelSize: 11; color: dq.d.required ? root.wbAccent : root.wbTextSec }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, "required", !dq.d.required) }
+                                    }
+                                }
+                                InputBox {   // help text
+                                    Layout.fillWidth: true; implicitHeight: 32; color: root.wbSurface
+                                    TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                        font.pixelSize: 12; background: null; placeholderText: "Help text (optional)"
+                                        text: String(dq.d.help || ""); onTextChanged: if (text !== String(dq.d.help || "")) root.setDraft(dq.qi, "help", text) }
+                                }
+                                Flow {   // choice extras
+                                    visible: dq.choice; Layout.fillWidth: true; spacing: 6
+                                    Repeater {
+                                        model: [{ k: "allowOther", l: "Allow \"Other\"" }, { k: "shuffleOptions", l: "Shuffle options" }]
+                                        Rectangle {
+                                            property bool on: !!dq.d[modelData.k]
+                                            implicitWidth: xT.implicitWidth + 18; implicitHeight: 24; radius: 12
+                                            color: on ? root.wbPrimarySubtle : "transparent"; border.color: on ? root.wbPrimary : root.wbBorder; border.width: 1
+                                            Text { id: xT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (parent.on ? "\u2713 " : "") + modelData.l; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, modelData.k, !parent.on) }
+                                        }
+                                    }
+                                }
+                                ColumnLayout {   // scale settings
+                                    visible: dq.d.type === "scale"; Layout.fillWidth: true; spacing: 6
+                                    Flow {
+                                        Layout.fillWidth: true; spacing: 6
+                                        Repeater {
+                                            model: [{ l: "0", k: "min", v: 0 }, { l: "1", k: "min", v: 1 }, { l: "to 3", k: "max", v: 3 }, { l: "4", k: "max", v: 4 }, { l: "5", k: "max", v: 5 },
+                                                    { l: "7", k: "max", v: 7 }, { l: "10", k: "max", v: 10 }, { l: "Numbers", k: "style", v: "numbers" }, { l: "Stars \u2605", k: "style", v: "stars" }]
+                                            Rectangle {
+                                                property var cur: dq.d[modelData.k] === undefined ? (modelData.k === "min" ? 1 : modelData.k === "max" ? 5 : "numbers") : dq.d[modelData.k]
+                                                property bool on: cur === modelData.v
+                                                implicitWidth: sT.implicitWidth + 16; implicitHeight: 24; radius: 12
+                                                color: on ? root.wbPrimarySubtle : "transparent"; border.color: on ? root.wbPrimary : root.wbBorder; border.width: 1
+                                                Text { id: sT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (modelData.k === "min" && modelData.v === 0 ? "from " : "") + modelData.l; font.pixelSize: 11; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setDraft(dq.qi, modelData.k, modelData.v) }
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 6
+                                        Repeater {
+                                            model: [{ k: "minLabel", p: "Label for the low end (optional)" }, { k: "maxLabel", p: "Label for the high end (optional)" }]
+                                            InputBox { Layout.fillWidth: true; implicitHeight: 32; color: root.wbSurface
+                                                TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                                    font.pixelSize: 12; background: null; placeholderText: modelData.p
+                                                    text: String(dq.d[modelData.k] || ""); onTextChanged: if (text !== String(dq.d[modelData.k] || "")) root.setDraft(dq.qi, modelData.k, text) } }
+                                        }
+                                    }
+                                }
+                                RowLayout {   // number limits
+                                    visible: dq.d.type === "number"; Layout.fillWidth: true; spacing: 6
+                                    Repeater {
+                                        model: [{ k: "numMin", p: "Minimum (optional)" }, { k: "numMax", p: "Maximum (optional)" }]
+                                        InputBox { Layout.fillWidth: true; implicitHeight: 32; color: root.wbSurface
+                                            TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                                font.pixelSize: 12; background: null; placeholderText: modelData.p
+                                                text: String(dq.d[modelData.k] || ""); onTextChanged: if (text !== String(dq.d[modelData.k] || "")) root.setDraft(dq.qi, modelData.k, text) } }
                                     }
                                 }
                                 InputBox {
@@ -1914,6 +2260,20 @@ Item {
                         Text { id: scT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShowCount ? "\u2713 " : "") + "Show respondents how many answers came in"; font.pixelSize: 12; color: root.draftShowCount ? root.wbPrimary : root.wbTextSec }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftShowCount = !root.draftShowCount }
                     }
+                    Rectangle {
+                        implicitWidth: shT.implicitWidth + 22; implicitHeight: 30; radius: 15
+                        color: root.draftShuffle ? root.wbPrimarySubtle : "transparent"
+                        border.color: root.draftShuffle ? root.wbPrimary : root.wbBorder; border.width: 1
+                        Text { id: shT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShuffle ? "\u2713 " : "") + "Shuffle question order for each respondent"; font.pixelSize: 12; color: root.draftShuffle ? root.wbPrimary : root.wbTextSec }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftShuffle = !root.draftShuffle }
+                    }
+                    SectionLabel { text: "THANK-YOU MESSAGE (OPTIONAL)" }
+                    InputBox {
+                        Layout.fillWidth: true; implicitHeight: 36
+                        TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                            font.pixelSize: 13; background: null; placeholderText: "Shown to respondents after they send their answers"
+                            text: root.draftThankYou; onTextChanged: root.draftThankYou = text }
+                    }
                     Text { textFormat: Text.PlainText;
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
@@ -1943,6 +2303,7 @@ Item {
                 WbButton { visible: !!root.draftId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Close"; onClicked: root.closeBuilder() }
+                WbButton { label: "Preview"; onClicked: root.openPreview() }
                 WbButton { label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
                 WbButton { label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
                 WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }

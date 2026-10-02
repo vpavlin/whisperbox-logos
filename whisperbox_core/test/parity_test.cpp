@@ -11,6 +11,7 @@
 #include <fstream>
 #include <string>
 #include "src/whisperbox_identity.hpp"
+#include "src/whisperbox_engine.hpp"
 
 using namespace whisperbox;
 
@@ -63,6 +64,19 @@ int main(int argc, char** argv) {
         CHECK(std::string(pt.begin(), pt.end()) == fs["plaintext"], "C++ opens a TS seal to a form key");
         bool idOpens = true; try { eciesOpen(byName[1].priv, fromHex(fs["sealedHex"])); } catch (...) { idOpens = false; }
         CHECK(!idOpens, "identity key cannot open a form-key seal");
+    }
+
+    // ── 1c. Answer validation (same fixture as the JS test) ────────────────────
+    std::printf("answer validation:\n");
+    {
+        json av = loadJson(fx + "answer-validation.json");
+        int n = 0, ok = 0;
+        for (const auto& c : av["cases"]) {
+            n++;
+            bool got = whisperbox::validateAnswer(c["q"], c["v"]).empty();
+            if (got == c["ok"].get<bool>()) ok++; else std::printf("    mismatch: %s <- %s\n", c["q"].dump().c_str(), c["v"].dump().c_str());
+        }
+        CHECK(n > 30 && ok == n, "C++ validateAnswer == JS on every fixture case");
     }
 
     // ── 2. Signed events ──────────────────────────────────────────────────────

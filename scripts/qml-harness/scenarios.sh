@@ -51,9 +51,9 @@ expect 'CALL whisperbox_core createForm argc=1 args=\{"title":"Team offsite","de
 run create-bad-choice creator  '{"draftTitle":"x","draftQuestions":[{"type":"checkbox","text":"Pick","required":true,"optionsText":"only one"}]}' "doCreate"
 deny "CALL whisperbox_core createForm" "choice question with <2 options is not published"
 # Real clicks on the builder's type/required chips (dialog at 1280x800: Q1 chips row
-# y=381; "Single choice" x=548, "Required" x=798 since "Yes / No" was added). Regression: chip handlers used the
+# "Single choice" (548,449), "Required" (648,481) since templates + 7 more types were added). Regression: chip handlers used the
 # CHIP repeater's index, so a click appended a phantom question instead.
-WB_DUMP=draftQuestions WB_CLICKS="548,381;798,381" run create-chips creator "{}" "openCreate"
+WB_DUMP=draftQuestions WB_CLICKS="548,449;648,481" run create-chips creator "{}" "openCreate"
 expect 'DUMP draftQuestions \[\{"optionsText":"","required":false,"text":"","type":"radioButtons"\}\]' "chip clicks edit Q1 in place (single choice, now optional) - no phantom question"
 run respondent-done  respondent "{\"selectedId\":\"$LUNCH_B\"}"
 run respondent-form  respondent "{\"selectedId\":\"$LEGACY_B\"}"
@@ -95,6 +95,20 @@ expect 'CALL whisperbox_core createForm argc=1 args=.*"maxResponses":25,"showRes
 deny '_builder' "builder state never goes on the wire"
 WB_DUMP=answers run answer-restore answer-draft "{\"selectedId\":\"$LONG_G\"}" "restoreAnswerDraft"
 expect 'DUMP answers \{"q1":true\}' "unsent answers are restored into the form"
+# ── question types, preview, templates ──
+ALLQ='[{"type":"text","text":"Name","required":true,"optionsText":"","help":"First name is fine"},{"type":"email","text":"Email","required":false,"optionsText":""},{"type":"url","text":"Website","required":false,"optionsText":""},{"type":"dropdown","text":"Slot","required":true,"optionsText":"Morning\nEvening","allowOther":true},{"type":"radioButtons","text":"Pick","required":false,"optionsText":"A\nB\nC","allowOther":true,"shuffleOptions":true},{"type":"checkbox","text":"Many","required":false,"optionsText":"X\nY","allowOther":true},{"type":"boolean","text":"Coming?","required":true,"optionsText":""},{"type":"scale","text":"Rate","required":true,"optionsText":"","min":1,"max":5,"style":"stars"},{"type":"scale","text":"NPS","required":false,"optionsText":"","min":0,"max":10,"minLabel":"No","maxLabel":"Yes"},{"type":"number","text":"Guests","required":false,"optionsText":"","numMin":"0","numMax":"9"},{"type":"date","text":"Day","required":false,"optionsText":""},{"type":"time","text":"Time","required":false,"optionsText":""},{"type":"textarea","text":"Notes","required":false,"optionsText":""}]'
+WB_DUMP=previewDef run preview-all creator "{\"draftTitle\":\"All types\",\"draftThankYou\":\"Thanks!\",\"draftShuffle\":true,\"draftQuestions\":$ALLQ}" "openPreview"
+expect 'DUMP previewDef .*"allowOther":true.*"type":"dropdown".*"max":5,"min":1.*"style":"stars"' "preview carries every type + its settings"
+expect 'DUMP previewDef .*"shuffleQuestions":true.*"thankYou":"Thanks!"' "preview carries shuffle + thank-you"
+run preview-submit creator "{\"draftTitle\":\"All types\",\"draftQuestions\":$ALLQ}" "openPreview,doSubmit"
+deny 'CALL whisperbox_core submitResponse' "submitting a preview sends nothing"
+run preview-errors creator "{\"draftTitle\":\"All types\",\"draftQuestions\":$ALLQ,\"showErrors\":true}" "openPreview"
+WB_DUMP=builderState run template creator "{}" "openCreate,useTemplateNps"
+expect 'DUMP builderState .*"max":10,"maxLabel":"Very likely","min":0' "NPS template fills the builder (0-10 scale)"
+run builder-max-types creator "{\"draftTitle\":\"T\",\"draftQuestions\":$ALLQ}" "doCreate"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"type":"number".*"min":0,"max":9' "number limits go on the wire"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"help":"First name is fine"' "help text goes on the wire"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL
