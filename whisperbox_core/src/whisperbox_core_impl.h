@@ -54,6 +54,13 @@ public:
     std::string deleteLocalForm(std::string formId);
     std::string hideForm(std::string formId);
     std::string unhideForm(std::string formId);
+    std::string reopenForm(std::string formId);
+    std::string confirmAll(std::string formId);
+    std::string setAutoReceipts(std::string formId, std::string on);
+    std::string saveDraft(std::string draftJson);
+    std::string deleteDraft(std::string draftId);
+    std::string publishDraft(std::string draftId);
+    std::string saveAnswerDraft(std::string formId, std::string answersJson);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
@@ -159,4 +166,13 @@ private:
     void loadLocalPrefs();
     void saveHidden();
     void saveMyAnswers();
+    // 0.3.2: local drafts (forms + half-filled answers), scheduled publishing, automatic
+    // receipts per form. Appended last: layout rule above.
+    std::map<std::string, whisperbox::json> m_drafts;        // draftId -> {id, def, publishAt|null, updatedAt}
+    std::map<std::string, whisperbox::json> m_answerDrafts;  // formId -> answers array
+    std::set<std::string> m_autoReceipts;                    // formIds with automatic receipts
+    long long m_lastHousekeepMs = 0;
+    void saveDrafts();
+    void housekeeping();                                     // scheduled publish, auto-close, auto-receipts
+    std::string publishDraftLocked(const std::string& draftId);
 };

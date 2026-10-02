@@ -75,6 +75,31 @@ int main(int argc, char** argv) {
         CHECK(ok, "contested id: creator / link-pinned / browsing projections == TS (30 arrival orders)");
     }
 
+    // Lifecycle (0.3.2): close -> re-open -> close, answer cap, close-at date, batch receipts.
+    {
+        OrderedJson lf = load(fx + "golden-lifecycle.json");
+        std::vector<json> evs; for (auto& e : lf["log"]) evs.push_back(json::parse(e.dump()));
+        const std::string creator = lf["creator"];
+        SignId cid = identityFromPriv(fromHex(lf["privHex"].get<std::string>()));
+        auto openC = [&](const std::string& hex) -> json {
+            try { Bytes pt = eciesOpen(cid.priv, fromHex(hex)); return json::parse(std::string(pt.begin(), pt.end())); } catch (...) { return json(); }
+        };
+        bool ok = true;
+        for (int t = 0; t < 30 && ok; t++) {
+            std::vector<json> order = evs; std::shuffle(order.begin(), order.end(), rng);
+            std::vector<json> log; for (auto& e : order) mergeOne(log, e);
+            OrderedJson st = computeState(log, creator);
+            ok = json::parse(st.dump()) == json::parse(lf["state"].dump())
+              && json::parse(creatorView(st, creator, openC).dump()) == json::parse(lf["view"].dump());
+            if (!ok) std::printf("    got state: %.600s\n", st.dump().c_str());
+        }
+        CHECK(ok, "lifecycle: re-open spans, answer cap, close-at date, batch receipts == TS (30 arrival orders)");
+        std::vector<std::string> ids = {"c-life-350", "c-life-150"};
+        bool idOk = false;
+        for (auto& e : lf["log"]) if (e["id"].get<std::string>().rfind("confirm:life:b:", 0) == 0) idOk = e["id"] == responseConfirmBatchId("life", ids);
+        CHECK(idOk, "batch receipt id == TS (content-addressed over sorted ids)");
+    }
+
     std::printf(failures ? "ENGINE GOLDEN FAILED\n" : "ENGINE GOLDEN GREEN\n");
     return failures ? 1 : 0;
 }

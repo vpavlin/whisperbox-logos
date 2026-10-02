@@ -59,6 +59,8 @@ static json callCore(WhisperboxCoreImpl* c, const std::string& m, const json& a)
     else if (m == "shareUri") r = c->shareUri(s(0));
     else if (m == "exportCsv") r = c->exportCsv(s(0));
     else if (m == "resync") r = c->resync();
+    else if (m == "reopenForm") r = c->reopenForm(s(0));
+    else if (m == "confirmAll") r = c->confirmAll(s(0));
     else return json{{"error", "unknown method " + m}};
     return json::parse(r);
 }

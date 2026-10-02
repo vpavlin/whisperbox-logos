@@ -180,6 +180,7 @@ void WhisperboxCoreImpl::onContextReady() {
                 if (m_syncReqTries <= 3) requestSync(); else { m_lastSyncReqMs = nowMs(); m_syncReqTries++; }
                 catchupRound();
             }
+            if (nowMs() - m_lastHousekeepMs >= 5000) { m_lastHousekeepMs = nowMs(); housekeeping(); }
             // Distributed-debugging: counters on stderr every 30s ("watch counters").
             if (nowMs() - m_lastStatMs >= 30000) {
                 m_lastStatMs = nowMs();
@@ -360,7 +361,14 @@ void WhisperboxCoreImpl::loadMySubmissions() {
     } catch (...) { /* ignore */ }
 }
 void WhisperboxCoreImpl::loadLocalPrefs() {
-    m_hidden.clear(); m_myAnswers.clear();
+    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear();
+    try {
+        std::ifstream d(m_dataDir + "/drafts.json");
+        if (d) { json o = json::parse(std::string((std::istreambuf_iterator<char>(d)), std::istreambuf_iterator<char>()));
+                 if (o.contains("forms") && o["forms"].is_object()) for (auto it = o["forms"].begin(); it != o["forms"].end(); ++it) m_drafts[it.key()] = it.value();
+                 if (o.contains("answers") && o["answers"].is_object()) for (auto it = o["answers"].begin(); it != o["answers"].end(); ++it) m_answerDrafts[lc(it.key())] = it.value();
+                 if (o.contains("autoReceipts") && o["autoReceipts"].is_array()) for (auto& x : o["autoReceipts"]) if (x.is_string()) m_autoReceipts.insert(lc(x.get<std::string>())); }
+    } catch (...) { fprintf(stderr, "WHISPERBOX drafts.json unreadable - starting without drafts\n"); }
     try {
         std::ifstream h(m_dataDir + "/hidden.json");
         if (h) { json a = json::parse(std::string((std::istreambuf_iterator<char>(h)), std::istreambuf_iterator<char>()));
@@ -371,6 +379,14 @@ void WhisperboxCoreImpl::loadLocalPrefs() {
         if (m) { json o = json::parse(std::string((std::istreambuf_iterator<char>(m)), std::istreambuf_iterator<char>()));
                  if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) m_myAnswers[lc(it.key())] = it.value(); }
     } catch (...) { /* ignore */ }
+}
+void WhisperboxCoreImpl::saveDrafts() {
+    json o = json::object();
+    json d = json::object(); for (auto& kv : m_drafts) d[kv.first] = kv.second;
+    json a = json::object(); for (auto& kv : m_answerDrafts) a[kv.first] = kv.second;
+    json r = json::array(); for (auto& id : m_autoReceipts) r.push_back(id);
+    o["forms"] = d; o["answers"] = a; o["autoReceipts"] = r;
+    writeAtomic(m_dataDir + "/drafts.json", o.dump());
 }
 void WhisperboxCoreImpl::saveHidden() {
     json a = json::array(); for (auto& id : m_hidden) a.push_back(id);
@@ -628,7 +644,7 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;
     }
-    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE) {
+    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;   // not-creator is also dropped at fold time (engine, counted there)
     }
@@ -701,6 +717,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["mine"] = mine;
         f["mySubmitted"] = submitted;
         f["hidden"] = m_hidden.count(fid) > 0;
+        f["autoReceipts"] = m_autoReceipts.count(fid) > 0;
+        if (m_answerDrafts.count(fid)) f["answerDraft"] = m_answerDrafts[fid];
         if (m_myAnswers.count(fid)) f["myAnswers"] = m_myAnswers[fid];
         f["myConfirmed"] = confirmed;
         f["allowed"] = allowed;
@@ -724,6 +742,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["pendingForms"] = pendingArr;
     json hiddenArr = json::array(); for (auto& id : m_hidden) hiddenArr.push_back(id);
     snap["hidden"] = hiddenArr;
+    json draftsArr = json::array(); for (auto& kv : m_drafts) draftsArr.push_back(kv.second);
+    snap["drafts"] = draftsArr;
     json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
@@ -811,6 +831,8 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     p["expiresAt"] = def.contains("expiresAt") ? def["expiresAt"] : nullptr;
     p["questions"] = def.value("questions", json::array());
     p["whitelist"] = def.value("whitelist", json({{"type", "none"}, {"value", ""}}));
+    if (def.contains("maxResponses") && def["maxResponses"].is_number_integer() && def["maxResponses"].get<long long>() > 0) p["maxResponses"] = def["maxResponses"];
+    if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
     adoptLocal(e);
@@ -833,7 +855,7 @@ std::string WhisperboxCoreImpl::closeForm(std::string formId) {
     p["formId"] = formId;
     p["expiresAt"] = nullptr;
     p["author"] = m_signId.address;
-    json e = buildEvent(FORM_CLOSE, whisperbox::formCloseId(formId), p, /*sign=*/true);
+    json e = buildEvent(FORM_CLOSE, whisperbox::formCloseId(formId, randomHex(6)), p, /*sign=*/true);
     adoptLocal(e);
     broadcastEvent(e);
     publishState();
@@ -887,6 +909,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     const auto& f = state["forms"][formId];
     if (f["status"].get<std::string>() != "open") { out["ok"] = false; out["error"] = "form is closed"; return out.dump(); }
+    if (f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>()) { out["ok"] = false; out["error"] = "this form closed at its end date"; return out.dump(); }
     if (m_mySubmissions.count(formId)) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
     {
         const std::string creator = f["creator"].get<std::string>();
@@ -958,6 +981,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         saveMySubmissions();
         m_myAnswers[formId] = json({{"answers", answers}, {"submittedAt", submittedAt}});
         saveMyAnswers();
+        if (m_answerDrafts.erase(formId)) saveDrafts();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
     } catch (const std::exception& ex) {
         fprintf(stderr, "WHISPERBOX submit EXCEPTION (%s): %s\n", typeid(ex).name(), ex.what());
@@ -1019,6 +1043,144 @@ std::string WhisperboxCoreImpl::hideForm(std::string formId) {
     publishState();
     return json({{"ok", true}, {"formId", formId}}).dump();
 }
+// Re-open a closed form (creator). Answers sealed while it was closed stay dropped.
+std::string WhisperboxCoreImpl::reopenForm(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    formId = lc(trim(formId));
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    const auto& f = state["forms"][formId];
+    if (f["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    if (f["status"].get<std::string>() == "open") { out["ok"] = false; out["error"] = "form is already open"; return out.dump(); }
+    if (f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>()) { out["ok"] = false; out["error"] = "its end date has passed - duplicate it as a new form"; return out.dump(); }
+    OrderedJson p = OrderedJson::object();
+    p["formId"] = formId; p["author"] = m_signId.address;
+    json e = buildEvent(whisperbox::FORM_REOPEN, whisperbox::formReopenId(formId, randomHex(6)), p, /*sign=*/true);
+    adoptLocal(e); broadcastEvent(e); publishState();
+    out["ok"] = true; out["formId"] = formId;
+    return out.dump();
+}
+
+// Receipts for every decrypted, not-yet-confirmed response of a form, as few events as
+// possible (100 receipt ids per event keeps each well inside one message).
+std::string WhisperboxCoreImpl::confirmAll(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    formId = lc(trim(formId));
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    OrderedJson cv = decryptView(state);
+    const json confs = json::parse(state["forms"][formId]["confirmations"].dump());
+    std::vector<std::string> todo;
+    if (cv["responses"].contains(formId))
+        for (const auto& r : cv["responses"][formId]) {
+            std::string cid = confirmIdOf(json::parse(r.dump()), formId);
+            if (!cid.empty() && !containsStr(confs, cid)) todo.push_back(cid);
+        }
+    int events = 0;
+    for (size_t i = 0; i < todo.size(); i += 100) {
+        std::vector<std::string> chunk(todo.begin() + i, todo.begin() + std::min(todo.size(), i + 100));
+        OrderedJson p = OrderedJson::object();
+        p["formId"] = formId; p["confirmationIds"] = chunk; p["author"] = m_signId.address;
+        json e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmBatchId(formId, chunk), p, /*sign=*/true);
+        adoptLocal(e); broadcastEvent(e); events++;
+    }
+    if (events) publishState();
+    out["ok"] = true; out["formId"] = formId; out["confirmed"] = (int)todo.size(); out["events"] = events;
+    return out.dump();
+}
+
+std::string WhisperboxCoreImpl::setAutoReceipts(std::string formId, std::string on) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(trim(formId));
+    const bool enable = trim(on) == "1" || trim(on) == "true";
+    if (enable) m_autoReceipts.insert(formId); else m_autoReceipts.erase(formId);
+    saveDrafts();
+    publishState();
+    if (enable) confirmAll(formId);   // catch up on what's already in
+    return json({{"ok", true}, {"formId", formId}, {"autoReceipts", enable}}).dump();
+}
+
+// Form drafts: {id?, def, publishAt?(ms|null)}. Saved locally only; publishDraft (or the
+// scheduler, once publishAt has passed and the node is up) turns one into a real form.
+std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json d;
+    try { d = json::parse(trim(draftJson)); } catch (...) { return json({{"ok", false}, {"error", "bad draftJson"}}).dump(); }
+    if (!d.is_object() || !d.contains("def") || !d["def"].is_object()) return json({{"ok", false}, {"error", "draft needs a def object"}}).dump();
+    std::string id = d.value("id", "");
+    if (id.empty()) id = "draft-" + randomHex(4);
+    json rec = {{"id", id}, {"def", d["def"]}, {"updatedAt", nowMs()},
+                {"publishAt", d.contains("publishAt") && d["publishAt"].is_number() ? d["publishAt"] : json(nullptr)}};
+    m_drafts[id] = rec;
+    saveDrafts();
+    publishState();
+    return json({{"ok", true}, {"draftId", id}}).dump();
+}
+std::string WhisperboxCoreImpl::deleteDraft(std::string draftId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_drafts.erase(trim(draftId));
+    saveDrafts();
+    publishState();
+    return json({{"ok", true}}).dump();
+}
+std::string WhisperboxCoreImpl::publishDraft(std::string draftId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    return publishDraftLocked(trim(draftId));
+}
+std::string WhisperboxCoreImpl::publishDraftLocked(const std::string& draftId) {
+    auto it = m_drafts.find(draftId);
+    if (it == m_drafts.end()) return json({{"ok", false}, {"error", "unknown draft"}}).dump();
+    json r = json::parse(createForm(it->second["def"].dump()));
+    if (r.value("ok", false)) { m_drafts.erase(draftId); saveDrafts(); publishState(); }
+    return r.dump();
+}
+// Half-filled answers for a form, restored when it is opened again. "" / [] clears.
+std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string answersJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(trim(formId));
+    json a;
+    try { a = trim(answersJson).empty() ? json::array() : json::parse(trim(answersJson)); } catch (...) { return json({{"ok", false}, {"error", "bad answersJson"}}).dump(); }
+    if (!a.is_array() || a.empty()) m_answerDrafts.erase(formId); else m_answerDrafts[formId] = a;
+    saveDrafts();
+    return json({{"ok", true}}).dump();   // no publishState: called while typing
+}
+
+// Every 5 s while online: publish due scheduled drafts, close my forms at their cap or end
+// date, send receipts for forms with automatic receipts.
+void WhisperboxCoreImpl::housekeeping() {
+    if (!m_nodeReady || !m_signId.valid) return;
+    std::vector<std::string> due;
+    for (auto& kv : m_drafts) if (kv.second.contains("publishAt") && kv.second["publishAt"].is_number() && kv.second["publishAt"].get<long long>() <= nowMs()) due.push_back(kv.first);
+    for (auto& id : due) { json r = json::parse(publishDraftLocked(id)); fprintf(stderr, "WHISPERBOX scheduled draft %s -> %s\n", id.c_str(), r.dump().c_str()); }
+
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    bool anyMine = false;
+    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) if (it.value()["creator"].get<std::string>() == m_signId.address) { anyMine = true; break; }
+    if (!anyMine) return;
+    OrderedJson cv = decryptView(state);
+    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) {
+        const auto& f = it.value();
+        if (f["creator"].get<std::string>() != m_signId.address) continue;
+        const std::string fid = it.key();
+        if (f["status"].get<std::string>() == "open") {
+            size_t n = cv["responses"].contains(fid) ? cv["responses"][fid].size() : 0;
+            bool full = f.contains("maxResponses") && f["maxResponses"].is_number() && (long long)n >= f["maxResponses"].get<long long>();
+            bool ended = f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>();
+            if (full || ended) { closeForm(fid); fprintf(stderr, "WHISPERBOX auto-closed %s (%s)\n", fid.c_str(), full ? "answer cap" : "end date"); }
+        }
+        if (m_autoReceipts.count(fid) && cv["responses"].contains(fid)) {
+            const json confs = json::parse(f["confirmations"].dump());
+            for (const auto& r : cv["responses"][fid])
+                if (!containsStr(confs, confirmIdOf(json::parse(r.dump()), fid))) { confirmAll(fid); break; }
+        }
+    }
+}
+
 std::string WhisperboxCoreImpl::unhideForm(std::string formId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
@@ -1185,6 +1347,7 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
                 if (k >= 0 && k < (long long)opts.size() && opts[k].is_string()) return opts[k].get<std::string>();
             }
             if (x.is_string()) return x.get<std::string>();
+            if (x.is_boolean()) return x.get<bool>() ? "Yes" : "No";   // yes/no question
             return x.is_null() ? "" : x.dump();
         };
         if (v.is_array()) {

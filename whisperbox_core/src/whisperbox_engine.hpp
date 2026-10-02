@@ -43,6 +43,7 @@ inline const std::string FORM_PUBLISH      = "form.publish";
 inline const std::string RESPONSE_SUBMIT   = "response.submit";
 inline const std::string RESPONSE_CONFIRM  = "response.confirm";
 inline const std::string FORM_CLOSE        = "form.close";
+inline const std::string FORM_REOPEN       = "form.reopen";   // 0.3.2+: creator re-opens
 inline const std::string TOPIC             = "/whisperbox/1/all/proto";
 
 // ── HLC total order: wall → ctr → dev. Identical on every replica. ───────────────
@@ -176,6 +177,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     // the first (mirror engine.mjs).
     std::map<std::string, std::map<std::string, OrderedJson>> alts;   // formId -> creator -> view
     std::map<std::string, json> closeHlcBy;                            // "formId|creator" -> hlc
+    std::map<std::string, std::vector<std::pair<json, json>>> spansBy; // "formId|creator" -> closed periods (from, to|null)
 
     OrderedJson forms = OrderedJson::object();   // insertion order = HLC publish order
     std::vector<std::pair<std::string, json>> formHlc;  // (formId, publish hlc) — feed ordering
@@ -199,6 +201,15 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             f["expiresAt"] = p.contains("expiresAt") && !p["expiresAt"].is_null() ? p["expiresAt"] : nullptr;
             f["questions"] = p.value("questions", json::array());
             f["whitelist"] = p.value("whitelist", json({{"type", "none"}, {"value", ""}}));
+            {   // answer cap: a positive integer, else null (mirror engine.mjs Number.isInteger)
+                json mr = nullptr;
+                if (p.contains("maxResponses") && p["maxResponses"].is_number()) {
+                    double d = p["maxResponses"].get<double>();
+                    if (d > 0 && d == (double)(long long)d) mr = (long long)d;
+                }
+                f["maxResponses"] = mr;
+            }
+            f["showResponseCount"] = p.contains("showResponseCount") && p["showResponseCount"].is_boolean() && p["showResponseCount"].get<bool>();
             f["status"] = "open";
             f["confirmations"] = json::array();
             if (forms.contains(formId)) {
@@ -232,7 +243,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             responses.push_back(r);
             return;
         }
-        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE) {
+        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN) {
             if (verify && e.contains("sig") && !e["sig"].is_null() && !e["sig"].get<std::string>().empty()
                 && !verify(e)) { drop(dropped, "sig-invalid"); return; }
             std::string formId = lc(p.value("formId", ""));
@@ -247,15 +258,36 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             }
             OrderedJson& f = *tf;
             if (type == RESPONSE_CONFIRM) {
-                std::string cid = p.value("confirmationId", "");
-                const json confs = f["confirmations"];
-                bool has = false; for (const auto& c : confs) if (c.get<std::string>() == cid) { has = true; break; }
-                if (!has) { json nc = confs; nc.push_back(cid); f["confirmations"] = nc; }
-            } else { // FORM_CLOSE — sticky, idempotent
+                // single receipt, or many in one event ("confirm all")
+                std::vector<std::string> ids;
+                if (p.contains("confirmationIds") && p["confirmationIds"].is_array()) {
+                    for (const auto& c : p["confirmationIds"]) if (c.is_string()) ids.push_back(c.get<std::string>());
+                } else if (p.contains("confirmationId") && p["confirmationId"].is_string()) ids.push_back(p["confirmationId"].get<std::string>());
+                json nc = f["confirmations"];
+                for (const auto& cid : ids) {
+                    if (cid.empty()) continue;
+                    bool has = false; for (const auto& c : nc) if (c.get<std::string>() == cid) { has = true; break; }
+                    if (!has) nc.push_back(cid);
+                }
+                f["confirmations"] = nc;
+                return;
+            }
+            // Close / re-open: log is HLC-ordered, the last one wins; every closed period is
+            // kept so answers sealed during any of them stay dropped (mirror engine.mjs).
+            const std::string key = formId + "|" + f["creator"].get<std::string>();
+            auto& spans = spansBy[key];
+            const bool isOpen = spans.empty() || !spans.back().second.is_null();
+            if (type == FORM_CLOSE) {
+                if (isOpen) spans.push_back({e.value("hlc", json::object()), json(nullptr)});
                 f["status"] = "closed";
-                if (isFirst) closeHlc[formId] = e.value("hlc", json::object());
-                closeHlcBy[formId + "|" + f["creator"].get<std::string>()] = e.value("hlc", json::object());
+                if (isFirst) closeHlc[formId] = spans.back().first;
+                closeHlcBy[key] = spans.back().first;
                 if (p.contains("expiresAt") && !p["expiresAt"].is_null()) f["expiresAt"] = p["expiresAt"];
+            } else { // FORM_REOPEN
+                if (!isOpen) spans.back().second = e.value("hlc", json::object());
+                f["status"] = "open";
+                if (isFirst) closeHlc.erase(formId);
+                closeHlcBy.erase(key);
             }
             return;
         }
@@ -299,6 +331,15 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     OrderedJson chj = OrderedJson::object();
     for (auto& kv : closeHlc) chj[kv.first] = kv.second;
     state["closeHlc"] = chj;
+    OrderedJson spj = OrderedJson::object();   // closed periods of the creator shown here
+    for (auto it = forms.begin(); it != forms.end(); ++it) {
+        auto sp = spansBy.find(it.key() + "|" + it.value()["creator"].get<std::string>());
+        if (sp == spansBy.end() || sp->second.empty()) continue;
+        json arr = json::array();
+        for (auto& x : sp->second) arr.push_back(json({{"from", x.first}, {"to", x.second}}));
+        spj[it.key()] = arr;
+    }
+    state["closedSpans"] = spj;
     state["creator"] = nullptr;
     OrderedJson pendEvents = OrderedJson::array();
     for (const auto& e : deferred) {
@@ -376,7 +417,14 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         if (!forms.contains(formId) || forms.at(formId)["creator"].get<std::string>() != ident) continue; // not mine
 
         const auto& f = forms.at(formId);
-        if (f["status"].get<std::string>() == "closed") {
+        const OrderedJson* spans = (state.contains("closedSpans") && state["closedSpans"].contains(formId)) ? &state["closedSpans"][formId] : nullptr;
+        if (spans && !spans->empty()) {
+            // sealed while the form was closed - any closed period, even if re-opened since
+            bool inClosed = false;
+            for (const auto& s : *spans)
+                if (compareHlc(blob["hlc"], s["from"]) >= 0 && (s["to"].is_null() || compareHlc(blob["hlc"], s["to"]) < 0)) { inClosed = true; break; }
+            if (inClosed) { drop(dropped, "form-closed"); continue; }
+        } else if (f["status"].get<std::string>() == "closed") {
             // Closed-form drop: blob's HLC after the close event's HLC. Cross-device
             // HLC comparison is approximate (clock skew) — best-effort, documented.
             bool afterClose = true;
@@ -385,6 +433,10 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             else afterClose = true;   // no close hlc recorded → treat as closed
             if (afterClose) { drop(dropped, "form-closed"); continue; }
         }
+
+        // Close-at date (expiresAt, ms): answers stamped after it don't count.
+        if (f.contains("expiresAt") && f["expiresAt"].is_number() && blob["hlc"].contains("wall")
+            && blob["hlc"]["wall"].get<double>() > f["expiresAt"].get<double>()) { drop(dropped, "expired"); continue; }
 
         // Whitelist + inner signature (original: enforced only when whitelist != none).
         std::string wlType = f["whitelist"].value("type", "none");
@@ -413,6 +465,9 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         auto& seen = seenRespondent[formId];
         if (seen.count(respondent)) { drop(dropped, "duplicate-respondent"); continue; }
         seen.insert(respondent);
+        // Answer cap: the first maxResponses in HLC order count (same on every replica).
+        if (f.contains("maxResponses") && f["maxResponses"].is_number()
+            && (long long)respObj[formId].size() >= f["maxResponses"].get<long long>()) { drop(dropped, "over-limit"); continue; }
 
         OrderedJson r = OrderedJson::object();
         r["respondent"] = respondent;
@@ -439,6 +494,13 @@ inline std::string responseSubmitId(const std::string& encryptedPayloadHex) {
 inline std::string responseConfirmId(const std::string& formId, const std::string& confirmationId) {
     return "confirm:" + lc(formId) + ":" + confirmationId;
 }
-inline std::string formCloseId(const std::string& formId) { return "close:" + lc(formId); }
+inline std::string formCloseId(const std::string& formId, const std::string& nonce = "") {
+    return nonce.empty() ? "close:" + lc(formId) : "close:" + lc(formId) + ":" + nonce; }
+inline std::string formReopenId(const std::string& formId, const std::string& nonce) { return "reopen:" + lc(formId) + ":" + nonce; }
+inline std::string responseConfirmBatchId(const std::string& formId, std::vector<std::string> ids) {
+    std::sort(ids.begin(), ids.end());
+    std::string j; for (size_t i = 0; i < ids.size(); i++) { if (i) j += ","; j += ids[i]; }
+    return "confirm:" + lc(formId) + ":b:" + toHex(sha256(Bytes(j.begin(), j.end()))).substr(0, 16);
+}
 
 } // namespace whisperbox

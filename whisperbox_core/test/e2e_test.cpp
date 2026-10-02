@@ -21,6 +21,7 @@
 #include <fstream>
 #include <set>
 #include <filesystem>
+#include <chrono>
 #include <pwd.h>
 #include <unistd.h>
 
@@ -439,6 +440,70 @@ int main(int argc, char** argv) {
         CHECK(formOf(*A, fid).value("hidden", true) == false, "hiding is local - other peers unaffected");
         CHECK(B->call(B->core->unhideForm(fid)).value("ok", false) && !formOf(*B, fid).value("hidden", true), "unhideForm brings it back");
         CHECK(!formOf(*A, fid).contains("myAnswers"), "the creator has no 'myAnswers' for a form it didn't answer");
+    }
+
+    // ── 0.3.2 lifecycle: yes/no, answer cap + auto-close, re-open, confirm all,
+    //    automatic receipts, response count, drafts + scheduled publish, answer drafts ──
+    std::printf("lifecycle 0.3.2:\n");
+    {
+        auto G = mkPeer("G");
+        std::string addrG = G->snap()["identity"]["address"];
+        json qs = json::array({{{"id", "q1"}, {"type", "boolean"}, {"text", "Coming?"}, {"required", true}}});
+        json cr = A->call(A->core->createForm(json({{"title", "Capped"}, {"questions", qs}, {"maxResponses", 2}, {"showResponseCount", true}}).dump()));
+        std::string cf = cr.value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*B, cf) && hasForm(*C, cf) && hasForm(*G, cf); }, 3000), "capped form syncs");
+        CHECK(formOf(*B, cf).value("maxResponses", 0) == 2 && formOf(*B, cf).value("showResponseCount", false), "cap + show-count travel with the form");
+        CHECK(B->call(B->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers yes (boolean)");
+        CHECK(C->call(C->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", false), "C answers no (false is a real answer)");
+        CHECK(waitUntil([&] { return responsesOf(*A, cf).size() == 2; }, 3000), "creator decrypts both");
+        CHECK(waitUntil([&] { return formOf(*G, cf).value("status", "") == "closed"; }, 9000), "form auto-closes at its answer cap and peers see it");
+        CHECK(!G->call(G->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", true), "a third answer is refused once closed");
+        std::string csv = A->call(A->core->exportCsv(cf)).value("csv", "");
+        CHECK(csv.find(",Yes") != std::string::npos && csv.find(",No") != std::string::npos, "CSV renders yes/no");
+
+        CHECK(A->call(A->core->confirmAll(cf)).value("events", 0) == 1, "confirm all = ONE receipt event for both");
+        CHECK(waitUntil([&] { return formOf(*B, cf).value("myConfirmed", false) && formOf(*C, cf).value("myConfirmed", false); }, 3000), "both respondents see their receipt");
+        CHECK(formOf(*G, cf)["confirmations"].size() == 2, "anyone can count responses from receipts (show-count)");
+        CHECK(A->call(A->core->confirmAll(cf)).value("confirmed", -1) == 0, "confirm all again: nothing left to confirm");
+
+        // Re-open an uncapped form: closed -> open again, new answers count.
+        std::string rf = A->call(A->core->createForm(json({{"title", "Reopen me"}, {"questions", qs}}).dump())).value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*G, rf); }, 3000), "second form syncs");
+        CHECK(A->call(A->core->closeForm(rf)).value("ok", false) && A->call(A->core->closeForm(rf)).value("ok", false), "close (twice is fine)");
+        CHECK(waitUntil([&] { return formOf(*G, rf).value("status", "") == "closed"; }, 3000), "peers see it closed");
+        CHECK(A->call(A->core->reopenForm(rf)).value("ok", false), "reopenForm ok");
+        CHECK(waitUntil([&] { return formOf(*G, rf).value("status", "") == "open"; }, 3000), "peers see it open again");
+        CHECK(A->call(A->core->setAutoReceipts(rf, "1")).value("ok", false), "automatic receipts on");
+        CHECK(G->call(G->core->submitResponse(rf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "G answers after the re-open");
+        CHECK(waitUntil([&] { return responsesOf(*A, rf).size() == 1; }, 3000), "the post-re-open answer counts");
+        CHECK(waitUntil([&] { return formOf(*G, rf).value("myConfirmed", false); }, 9000), "automatic receipt reaches G without a click");
+        CHECK(A->call(A->core->closeForm(rf)).value("ok", false), "close again after re-open (unique close ids)");
+        CHECK(waitUntil([&] { return formOf(*G, rf).value("status", "") == "closed"; }, 3000), "second close propagates");
+
+        // Drafts: local, survive restart; publish now / scheduled.
+        json d1 = A->call(A->core->saveDraft(json({{"def", {{"title", "Draft now"}, {"questions", qs}}}}).dump()));
+        long long soon = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 1500;
+        json d2 = A->call(A->core->saveDraft(json({{"def", {{"title", "Draft scheduled"}, {"questions", qs}}}, {"publishAt", soon}}).dump()));
+        CHECK(d1.value("ok", false) && d2.value("ok", false) && A->snap()["drafts"].size() == 2, "two drafts saved");
+        bool leaked = false;
+        { json gs = G->snap(); for (auto& kv : gs["state"]["forms"].items()) if (kv.value().value("title", "").rfind("Draft", 0) == 0) leaked = true; }
+        CHECK(!leaked, "drafts never leave the device");
+        A->stop(); A->start();
+        CHECK(A->snap()["drafts"].size() >= 1, "drafts survive a restart");
+        // (keep the snapshot in a variable: iterating a temporary's sub-object is use-after-free)
+        auto titled = [&](Peer& p, const std::string& t) { json ps = p.snap(); for (auto& kv : ps["state"]["forms"].items()) if (kv.value().value("title", "") == t) return true; return false; };
+        CHECK(A->call(A->core->publishDraft(d1.value("draftId", ""))).value("ok", false), "publish a draft now");
+        CHECK(waitUntil([&] { return titled(*G, "Draft now"); }, 3000), "published draft reaches peers");
+        CHECK(waitUntil([&] { return titled(*G, "Draft scheduled"); }, 9000), "scheduled draft publishes itself when due");
+        CHECK(waitUntil([&] { return A->snap()["drafts"].size() == 0; }, 3000), "published drafts are removed");
+
+        // Answer drafts: kept across restart, cleared by submitting.
+        std::string af = A->call(A->core->createForm(json({{"title", "Long form"}, {"questions", qs}}).dump())).value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*G, af); }, 3000), "long form syncs");
+        G->call(G->core->saveAnswerDraft(af, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
+        G->stop(); G->start();
+        CHECK(formOf(*G, af).contains("answerDraft") && formOf(*G, af)["answerDraft"][0]["value"] == true, "a half-filled answer survives a restart");
+        CHECK(G->call(G->core->submitResponse(af, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false) && !formOf(*G, af).contains("answerDraft"), "submitting clears the answer draft");
     }
 
     // ── data folder: never relative, adopt an identity kept elsewhere ────────────
