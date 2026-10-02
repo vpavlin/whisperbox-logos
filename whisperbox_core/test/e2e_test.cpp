@@ -444,6 +444,24 @@ int main(int argc, char** argv) {
         CHECK(!formOf(*A, fid).contains("myAnswers"), "the creator has no 'myAnswers' for a form it didn't answer");
     }
 
+    // ── shared delivery node: another Logos app started it first ──────────────
+    std::printf("shared node (another app first):\n");
+    {
+        // Same delivery_module, node already created + started by e.g. scala via loam_core.
+        auto S = std::make_unique<Peer>(); S->name = "S"; S->dir = g_base + "/S";
+        setenv("WHISPERBOX_CORE_DATA", S->dir.c_str(), 1);
+        S->node = std::make_unique<FakeNode>(); S->node->name = "S";
+        S->node->created = true; S->node->up = true;              // owned by the other app
+        S->core = std::make_unique<WhisperboxCoreImpl>();
+        S->core->modules().delivery_module.node = S->node.get();
+        FakeBus::get().nodes.push_back(S->node.get());
+        S->core->fakeStart();
+        CHECK(waitUntil([&] { return S->snap().value("nodeReady", false); }, 3000), "WhisperBox joins a node another app already started");
+        CHECK(S->node->starts == 0, "and does not start it a second time");
+        CHECK(S->node->subscribed && S->node->channel, "subscribes its topic + channel on the shared node");
+        CHECK(waitUntil([&] { return hasForm(*S, fid); }, 6000), "and syncs (catch-up) like a normal start");
+    }
+
     // ── 0.3.2 lifecycle: yes/no, answer cap + auto-close, re-open, confirm all,
     //    automatic receipts, response count, drafts + scheduled publish, answer drafts ──
     std::printf("lifecycle 0.3.2:\n");

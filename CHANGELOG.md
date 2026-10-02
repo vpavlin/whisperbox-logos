@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3 desktop / 0.3.4 Android (2026-10-02) - fixes
+
+- **WhisperBox connects when another Logos app already started the network node.**
+  Basecamp runs one `delivery_module` for all apps; a second `createNode` answers
+  "Context already initialized", which WhisperBox reported as an error and retried
+  forever. It now joins the running node (and never starts it twice). E2E covers it.
+- **Desktop: Save draft works.** The save callback read the core's raw reply as an object,
+  so every save looked failed: no feedback, no draft id kept, and autosave created a new
+  draft every 2.5 s. Drafts section gets "clear all" for the duplicates this left.
+- **Android: unsent answers are kept.** They were restored from a stale snapshot and a
+  save pending when leaving the form was cancelled; now read from the client and flushed
+  on leave. Desktop flushes before switching forms.
+
 ## 0.3.2 desktop / 0.3.3 Android (2026-10-02) - responses viewer, receipts, lifecycle, drafts
 
 - **Responses in three modes**: Summary (bars per choice / yes-no question, recent text

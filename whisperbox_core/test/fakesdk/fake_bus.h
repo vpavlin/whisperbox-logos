@@ -14,6 +14,7 @@ struct FakeNode {
     static long nextSerial() { static long n = 0; return ++n; }
     std::string name;
     bool created = false, up = false, online = true, subscribed = false, channel = false;
+    int starts = 0;   // start() calls (a second start on a shared node is a bug)
     std::string senderId;
     FakeDeliveryModule::MsgFn onMsg, onCh;
     long rx = 0, tx = 0;
@@ -64,10 +65,14 @@ struct FakeBus {
 inline bool FakeDeliveryModule::onMessageReceived(MsgFn fn) { node->onMsg = fn; return true; }
 inline bool FakeDeliveryModule::onChannelMessageReceived(MsgFn fn) { node->onCh = fn; return true; }
 inline void FakeDeliveryModule::createNodeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
-    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->created = true; cb(StdLogosResult{}); } });
+    // Like the real delivery_module (one node per Basecamp, shared by every app): a second
+    // createNode is rejected with "Context already initialized".
+    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) {
+        if (n->created) { cb(StdLogosResult{false, "Context already initialized", nullptr}); return; }
+        n->created = true; cb(StdLogosResult{}); } });
 }
 inline void FakeDeliveryModule::startAsync(std::function<void(StdLogosResult)> cb) {
-    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->up = true; cb(StdLogosResult{}); } });
+    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->up = true; n->starts++; cb(StdLogosResult{}); } });
 }
 inline void FakeDeliveryModule::subscribeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
     if (!node->up) throw std::runtime_error("no provider registered");

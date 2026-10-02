@@ -169,7 +169,7 @@ function Root() {
   return (
     <SafeAreaView style={st.fill} edges={["top", "bottom"]}>
       {screen.k === "home" && <Home {...ctx} />}
-      {screen.k === "form" && <FormScreen {...ctx} id={screen.id} />}
+      {screen.k === "form" && <FormScreen key={screen.id} {...ctx} id={screen.id} />}
       {screen.k === "create" && <CreateScreen {...ctx} draftId={screen.draftId} fromForm={screen.fromForm} />}
       {screen.k === "share" && <ShareScreen {...ctx} id={screen.id} />}
       {screen.k === "scan" && <ScanScreen {...ctx} />}
@@ -419,12 +419,15 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
   const f = snap.state.forms[id];
   const pending = !f;
   // unsent answers saved while typing come back (crash, restart, leaving the screen)
+  // Read the draft from the client itself: the snapshot this screen got may predate the last
+  // save (saving a draft doesn't re-render the app), which made re-opened forms come back empty.
+  const savedDraft = (): any[] | null => (f && !f.mySubmitted ? client.answerDrafts?.[String(id).toLowerCase()] || null : null);
   const [answers, setAnswers] = useState<Record<string, any>>(() => {
     const a: Record<string, any> = {};
-    if (f?.answerDraft && !f.mySubmitted) for (const x of f.answerDraft) a[x.questionId] = x.value;
+    for (const x of savedDraft() || []) a[x.questionId] = x.value;
     return a;
   });
-  const [restored] = useState(() => !!(f?.answerDraft && !f.mySubmitted));
+  const [restored] = useState(() => !!savedDraft());
   const [showErrors, setShowErrors] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [mode, setMode] = useState<"summary" | "table" | "one">("summary");
@@ -432,11 +435,17 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
   const [filter, setFilter] = useState("");
   const [jump, setJump] = useState("");
   const typed = useRef(false);
-  useEffect(() => {
+  const latest = useRef(answers); latest.current = answers;
+  const saveNow = () => {
     if (!typed.current || !f || f.mine || f.mySubmitted) return;
-    const t = setTimeout(() => client.saveAnswerDraft(id, Object.entries(answers).map(([questionId, value]) => ({ questionId, value }))), 700);
+    client.saveAnswerDraft(id, Object.entries(latest.current).map(([questionId, value]) => ({ questionId, value })));
+  };
+  useEffect(() => {
+    const t = setTimeout(saveNow, 600);
     return () => clearTimeout(t);
   }, [answers]);
+  // leaving the screen (back, switching forms) saves at once instead of dropping the pending save
+  useEffect(() => () => saveNow(), []);
 
   if (pending) {
     return (

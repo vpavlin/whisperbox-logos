@@ -80,6 +80,7 @@ public:
             return QString("{\"ok\":true,\"n\":%1,\"cells\":[%2]}").arg(qr.getSize()).arg(cells);
         }
         if (method == "exportCsv") return "{\"ok\":true,\"csv\":\"respondent,q1\\n0xabc,hi\"}";
+        if (method == "saveDraft") return "{\"ok\":true,\"draftId\":\"draft-harness1\"}";
         return "{\"ok\":true}";
     }
 
@@ -182,7 +183,10 @@ int main(int argc, char **argv) {
         QQuickItem *r = view.rootObject(); if (!r) return;
         for (const QByteArray &n : qgetenv("WB_DUMP").split(',')) {
             if (n.isEmpty()) continue;
-            const QJsonValue v = QJsonValue::fromVariant(r->property(n.constData()).value<QJSValue>().toVariant());
+            // var properties arrive as QJSValue; plain string/int/bool properties as themselves
+            const QVariant raw = r->property(n.constData());
+            const QJsonValue v = QJsonValue::fromVariant(raw.canConvert<QJSValue>() && raw.userType() == qMetaTypeId<QJSValue>()
+                                                         ? raw.value<QJSValue>().toVariant() : raw);
             const QByteArray j = v.isArray() ? QJsonDocument(v.toArray()).toJson(QJsonDocument::Compact)
                                : v.isObject() ? QJsonDocument(v.toObject()).toJson(QJsonDocument::Compact)
                                : QJsonDocument(QJsonArray{v}).toJson(QJsonDocument::Compact);

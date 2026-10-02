@@ -455,17 +455,32 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
     std::string cfgStr = cfg.dump();
     fprintf(stderr, "WHISPERBOX bootstrapDelivery cfg=%s\n", cfgStr.c_str());
     auto startNode = [this, cfgStr]() {
-        modules().delivery_module.createNodeAsync(cfgStr, [this](StdLogosResult r) {
-            if (!r.success) { m_deliveryStarting = false; setStatus("Delivery error (createNode): " + r.error); return; }
-            modules().delivery_module.startAsync([this](StdLogosResult r2) {
+        auto onUp = [this]() {
+            std::lock_guard<std::recursive_mutex> lk(m_mtx);
+            m_nodeReady = true;
+            joinTransport();
+            requestSync();     // legacy (0.1.x) peers answer with their log
+            catchupRound();    // RBSR peers reconcile the exact delta both ways
+            setStatus("Connected");
+            publishState();
+        };
+        modules().delivery_module.createNodeAsync(cfgStr, [this, onUp](StdLogosResult r) {
+            if (!r.success) {
+                // Basecamp runs ONE delivery_module for every app: when scala / kym / qaku (or
+                // loam_core on their behalf) already created the node, createNode answers
+                // "Context already initialized". That node is ours too - join it; never start
+                // it a second time (the owner did). Was: reported as an error + retried forever,
+                // so WhisperBox never connected when another Logos app started first.
+                if (r.error.find("already initialized") != std::string::npos) {
+                    fprintf(stderr, "WHISPERBOX delivery node already running (another app) - joining it\n");
+                    onUp();
+                    return;
+                }
+                m_deliveryStarting = false; setStatus("Delivery error (createNode): " + r.error); return;
+            }
+            modules().delivery_module.startAsync([this, onUp](StdLogosResult r2) {
                 if (!r2.success) { m_deliveryStarting = false; setStatus("Delivery error (start): " + r2.error); return; }
-                std::lock_guard<std::recursive_mutex> lk(m_mtx);
-                m_nodeReady = true;
-                joinTransport();
-                requestSync();     // legacy (0.1.x) peers answer with their log
-                catchupRound();    // RBSR peers reconcile the exact delta both ways
-                setStatus("Connected");
-                publishState();
+                onUp();
             });
         });
     };

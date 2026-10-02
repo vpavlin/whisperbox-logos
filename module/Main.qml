@@ -250,7 +250,7 @@ Item {
             for (var k = 0; k < list.length; k++) rows.push({ kind: kind, id: list[k] });
         };
         if (root.drafts.length > 0) {
-            rows.push({ kind: "h", label: "DRAFTS  " + root.drafts.length });
+            rows.push({ kind: "hd", label: "DRAFTS  " + root.drafts.length + "   \u00B7  clear all" });
             for (var dd = 0; dd < root.drafts.length; dd++) rows.push({ kind: "d", id: root.drafts[dd].id, draft: root.drafts[dd] });
         }
         add("WAITING FOR SYNC", root.pendingForms, "p");
@@ -266,6 +266,7 @@ Item {
 
     // ── actions ──
     function selectForm(id) {
+        if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); }   // flush the form we're leaving
         root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = "";
         restoreAnswerDraft();
     }
@@ -463,10 +464,15 @@ Item {
         var d = { def: b.def };
         if (root.draftId) d.id = root.draftId;
         if (publishAt) d.publishAt = publishAt;
-        callVia("saveDraft", [JSON.stringify(d)], function (r) {
+        callVia("saveDraft", [JSON.stringify(d)], function (raw) {
+            // callVia hands back the RAW string: parse it (reading .ok on the string made every
+            // save look failed - no toast, no id kept, and autosave minted a new draft each time)
+            var r = root.parse(raw);
             if (r && r.ok) { root.draftId = r.draftId; root.draftDirty = false; if (cb) cb(r); }
+            else { root.draftDirty = false; toast("Couldn't save the draft: " + ((r && r.error) || "no answer from the WhisperBox core - is it updated too?")); }
         });
     }
+    function saveCurrentDraftNow() { saveCurrentDraft(null, function () { toast("Draft saved"); }); }
     Timer { id: draftAutosave; interval: 2500; repeat: true; running: root.showCreate && root.draftDirty
             onTriggered: if (!root.builderEmpty()) root.saveCurrentDraft(null) }
     Timer { id: answerDraftTimer; interval: 900; onTriggered: root.saveAnswerDraftNow() }
@@ -475,6 +481,15 @@ Item {
         else if (root.draftId && builderEmpty()) callVia("deleteDraft", [root.draftId], function () {});
         root.showCreate = false;
     }
+    property bool confirmClearDrafts: false
+    function clearDrafts() {
+        if (!root.confirmClearDrafts) { root.confirmClearDrafts = true; toast("Click again to delete all " + root.drafts.length + " drafts"); clearDraftsTimer.restart(); return; }
+        root.confirmClearDrafts = false;
+        var ids = root.drafts.map(function (d) { return d.id; });
+        for (var i = 0; i < ids.length; i++) callVia("deleteDraft", [ids[i]], function () {});
+        toast("Deleted " + root.plural(ids.length, "draft", "drafts"));
+    }
+    Timer { id: clearDraftsTimer; interval: 4000; onTriggered: root.confirmClearDrafts = false }
     function discardDraft() {
         if (root.draftId) act("deleteDraft", [root.draftId], "Draft deleted");
         root.draftDirty = false; root.showCreate = false;
@@ -635,7 +650,7 @@ Item {
                     delegate: Item {
                         id: row
                         width: formList.width
-                        property bool isHead: modelData.kind === "h" || modelData.kind === "hh"
+                        property bool isHead: modelData.kind === "h" || modelData.kind === "hh" || modelData.kind === "hd"
                         height: isHead ? 30 : 54
                         property var f: modelData.kind === "f" ? root.forms[modelData.id] : null
                         property bool current: !isHead && modelData.id === root.selectedId
@@ -648,10 +663,10 @@ Item {
                             text: row.isHead ? modelData.label : ""
                         }
                         MouseArea {
-                            visible: modelData.kind === "hh"
+                            visible: modelData.kind === "hh" || modelData.kind === "hd"
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.showHidden = !root.showHidden
+                            onClicked: modelData.kind === "hh" ? root.showHidden = !root.showHidden : root.clearDrafts()
                         }
                         Rectangle {
                             visible: !row.isHead
@@ -1928,7 +1943,7 @@ Item {
                 WbButton { visible: !!root.draftId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Close"; onClicked: root.closeBuilder() }
-                WbButton { label: "Save draft"; onClicked: root.saveCurrentDraft(null, function () { root.toast("Draft saved"); }) }
+                WbButton { label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
                 WbButton { label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
                 WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
             }
