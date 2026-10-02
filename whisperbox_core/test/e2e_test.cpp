@@ -461,6 +461,7 @@ int main(int argc, char** argv) {
         std::string csv = A->call(A->core->exportCsv(cf)).value("csv", "");
         CHECK(csv.find(",Yes") != std::string::npos && csv.find(",No") != std::string::npos, "CSV renders yes/no");
 
+        dumpFixture(*A, "lifecycle");   // capped yes/no form, auto-closed, 2 responses awaiting receipts
         CHECK(A->call(A->core->confirmAll(cf)).value("events", 0) == 1, "confirm all = ONE receipt event for both");
         CHECK(waitUntil([&] { return formOf(*B, cf).value("myConfirmed", false) && formOf(*C, cf).value("myConfirmed", false); }, 3000), "both respondents see their receipt");
         CHECK(formOf(*G, cf)["confirmations"].size() == 2, "anyone can count responses from receipts (show-count)");
@@ -485,6 +486,7 @@ int main(int argc, char** argv) {
         long long soon = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 1500;
         json d2 = A->call(A->core->saveDraft(json({{"def", {{"title", "Draft scheduled"}, {"questions", qs}}}, {"publishAt", soon}}).dump()));
         CHECK(d1.value("ok", false) && d2.value("ok", false) && A->snap()["drafts"].size() == 2, "two drafts saved");
+        dumpFixture(*A, "drafts");   // a plain draft + a scheduled one in the sidebar
         bool leaked = false;
         { json gs = G->snap(); for (auto& kv : gs["state"]["forms"].items()) if (kv.value().value("title", "").rfind("Draft", 0) == 0) leaked = true; }
         CHECK(!leaked, "drafts never leave the device");
@@ -503,6 +505,7 @@ int main(int argc, char** argv) {
         G->call(G->core->saveAnswerDraft(af, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
         G->stop(); G->start();
         CHECK(formOf(*G, af).contains("answerDraft") && formOf(*G, af)["answerDraft"][0]["value"] == true, "a half-filled answer survives a restart");
+        dumpFixture(*G, "answer-draft");   // respondent with unsent (restored) answers on a yes/no form
         CHECK(G->call(G->core->submitResponse(af, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false) && !formOf(*G, af).contains("answerDraft"), "submitting clears the answer draft");
     }
 

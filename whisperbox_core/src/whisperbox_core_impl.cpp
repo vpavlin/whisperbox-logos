@@ -1055,6 +1055,11 @@ std::string WhisperboxCoreImpl::reopenForm(std::string formId) {
     if (f["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
     if (f["status"].get<std::string>() == "open") { out["ok"] = false; out["error"] = "form is already open"; return out.dump(); }
     if (f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>()) { out["ok"] = false; out["error"] = "its end date has passed - duplicate it as a new form"; return out.dump(); }
+    if (f.contains("maxResponses") && f["maxResponses"].is_number()) {
+        OrderedJson cv = decryptView(state);
+        if (cv["responses"].contains(formId) && (long long)cv["responses"][formId].size() >= f["maxResponses"].get<long long>()) {
+            out["ok"] = false; out["error"] = "it reached its answer limit - duplicate it as a new form"; return out.dump(); }
+    }
     OrderedJson p = OrderedJson::object();
     p["formId"] = formId; p["author"] = m_signId.address;
     json e = buildEvent(whisperbox::FORM_REOPEN, whisperbox::formReopenId(formId, randomHex(6)), p, /*sign=*/true);

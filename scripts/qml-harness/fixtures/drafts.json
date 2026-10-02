@@ -1,29 +1,272 @@
 {
-  "creatorView": null,
-  "deviceId": "wb-cca29a6f6106",
+  "creatorView": {
+    "address": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
+    "confirmations": {
+      "form-08a690d9": [],
+      "form-24b7173c": [],
+      "form-5c8b35a2": [],
+      "form-6662f884": [
+        "6281e325fe1b5a49"
+      ],
+      "form-8571ef7a": [],
+      "form-a5bab5d8": [
+        "db76af7c529efcd5"
+      ],
+      "form-c33e6e6f": [
+        "e5b32a409c8be258"
+      ],
+      "form-e4b7e57b": [],
+      "form-ed995b7e": [
+        "26355fe6e8353fe7",
+        "93d3fec905d58d67"
+      ],
+      "form-legacykey": []
+    },
+    "dropped": {
+      "count": 1,
+      "reasons": {
+        "not-whitelisted": 1
+      }
+    },
+    "forms": [
+      "form-5c8b35a2",
+      "form-legacykey",
+      "form-6662f884",
+      "form-e4b7e57b",
+      "form-a5bab5d8",
+      "form-08a690d9",
+      "form-8571ef7a",
+      "form-24b7173c",
+      "form-ed995b7e",
+      "form-c33e6e6f"
+    ],
+    "responses": {
+      "form-08a690d9": [],
+      "form-24b7173c": [],
+      "form-5c8b35a2": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "plenty"
+            }
+          ],
+          "confirmationId": "160921ff1bd08416",
+          "confirmed": false,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-efbfe4aa4b49",
+            "wall": 1790924453992
+          },
+          "respondent": "0x19bacd25504e33f28cdcadaf27cbf7990c5f82aa",
+          "signature": null,
+          "submittedAt": 1790924453989
+        }
+      ],
+      "form-6662f884": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": 1
+            },
+            {
+              "questionId": "q2",
+              "value": [
+                0
+              ]
+            },
+            {
+              "questionId": "q3",
+              "value": "no olives, please"
+            }
+          ],
+          "confirmationId": "6281e325fe1b5a49",
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-cca29a6f6106",
+            "wall": 1790924434372
+          },
+          "respondent": "0x30b90501c8b8769cc152805269774455abbe8450",
+          "signature": null,
+          "submittedAt": 1790924434371
+        }
+      ],
+      "form-8571ef7a": [],
+      "form-a5bab5d8": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "old client"
+            }
+          ],
+          "confirmationId": null,
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "old",
+            "wall": 3
+          },
+          "respondent": "0x836b41b6ac26d74980ab2c7ddc6b40b36ebb61ef",
+          "signature": null,
+          "submittedAt": 5
+        }
+      ],
+      "form-c33e6e6f": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": true
+            }
+          ],
+          "confirmationId": "e5b32a409c8be258",
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-efbfe4aa4b49",
+            "wall": 1790924479463
+          },
+          "respondent": "0x19bacd25504e33f28cdcadaf27cbf7990c5f82aa",
+          "signature": null,
+          "submittedAt": 1790924479462
+        }
+      ],
+      "form-e4b7e57b": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "yo"
+            }
+          ],
+          "confirmationId": "effa0090dc91a308",
+          "confirmed": false,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-cca29a6f6106",
+            "wall": 1790924434399
+          },
+          "respondent": "0x30b90501c8b8769cc152805269774455abbe8450",
+          "signature": "edfddca0317571bb485c930f69cc4b7e890ff5fc0e6d737639cb6461217472982a4863293e1b6a135dc1ce4fdd064389341b715b3b87bea4f55d1c02f690d64e",
+          "submittedAt": 1790924434397
+        }
+      ],
+      "form-ed995b7e": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": true
+            }
+          ],
+          "confirmationId": "26355fe6e8353fe7",
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-cca29a6f6106",
+            "wall": 1790924474688
+          },
+          "respondent": "0x30b90501c8b8769cc152805269774455abbe8450",
+          "signature": null,
+          "submittedAt": 1790924474688
+        },
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": false
+            }
+          ],
+          "confirmationId": "93d3fec905d58d67",
+          "confirmed": true,
+          "hlc": {
+            "ctr": 0,
+            "dev": "wb-b7bfb0a484f0",
+            "wall": 1790924474692
+          },
+          "respondent": "0x836b41b6ac26d74980ab2c7ddc6b40b36ebb61ef",
+          "signature": null,
+          "submittedAt": 1790924474691
+        }
+      ],
+      "form-legacykey": [
+        {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "old key"
+            }
+          ],
+          "confirmationId": null,
+          "confirmed": false,
+          "hlc": {
+            "ctr": 0,
+            "dev": "k",
+            "wall": 9
+          },
+          "respondent": "0x836b41b6ac26d74980ab2c7ddc6b40b36ebb61ef",
+          "signature": null,
+          "submittedAt": 9
+        }
+      ]
+    },
+    "undecrypted": 1
+  },
+  "deviceId": "wb-767eaafad444",
   "diagnostics": {
     "admDropSig": 0,
     "admDropType": 0,
     "legacyReseeds": 0,
-    "rbsrRx": 61,
-    "rxDup": 361,
-    "rxNew": 4,
-    "rxRaw": 427,
-    "rxSeen": 191,
-    "txTotal": 43
+    "rbsrRx": 318,
+    "rxDup": 2271,
+    "rxNew": 3,
+    "rxRaw": 2599,
+    "rxSeen": 1151,
+    "txTotal": 304
   },
-  "drafts": [],
-  "hidden": [
-    "form-6662f884"
+  "drafts": [
+    {
+      "def": {
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Coming?",
+            "type": "boolean"
+          }
+        ],
+        "title": "Draft scheduled"
+      },
+      "id": "draft-239eb8e9",
+      "publishAt": 1790924485952,
+      "updatedAt": 1790924484452
+    },
+    {
+      "def": {
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Coming?",
+            "type": "boolean"
+          }
+        ],
+        "title": "Draft now"
+      },
+      "id": "draft-a0dc0614",
+      "publishAt": null,
+      "updatedAt": 1790924484446
+    }
   ],
+  "hidden": [],
   "identity": {
-    "address": "0x30b90501c8b8769cc152805269774455abbe8450",
-    "pubHex": "03ab4351f7e5b66442d0011bfa26ae9213d36b13aea96db07bb5dc9ed5a8dcf12c"
+    "address": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
+    "pubHex": "03db8d9599756fbfb2007881ef1b0e7806b3ef6971295a204e945d1dad0a1d9bd6"
   },
-  "mySubmissions": [
-    "form-6662f884",
-    "form-e4b7e57b"
-  ],
+  "mySubmissions": [],
   "nodeReady": true,
   "pendingForms": [],
   "state": {
@@ -32,6 +275,16 @@
         "ctr": 0,
         "dev": "wb-767eaafad444",
         "wall": 1790924435768
+      },
+      "form-c33e6e6f": {
+        "ctr": 0,
+        "dev": "wb-767eaafad444",
+        "wall": 1790924484393
+      },
+      "form-ed995b7e": {
+        "ctr": 0,
+        "dev": "wb-767eaafad444",
+        "wall": 1790924479139
       }
     },
     "closedSpans": {
@@ -44,9 +297,55 @@
           },
           "to": null
         }
+      ],
+      "form-c33e6e6f": [
+        {
+          "from": {
+            "ctr": 0,
+            "dev": "wb-767eaafad444",
+            "wall": 1790924479298
+          },
+          "to": {
+            "ctr": 0,
+            "dev": "wb-767eaafad444",
+            "wall": 1790924479412
+          }
+        },
+        {
+          "from": {
+            "ctr": 0,
+            "dev": "wb-767eaafad444",
+            "wall": 1790924484393
+          },
+          "to": null
+        }
+      ],
+      "form-ed995b7e": [
+        {
+          "from": {
+            "ctr": 0,
+            "dev": "wb-767eaafad444",
+            "wall": 1790924479139
+          },
+          "to": null
+        }
       ]
     },
-    "creator": null,
+    "creator": {
+      "address": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
+      "forms": [
+        "form-5c8b35a2",
+        "form-legacykey",
+        "form-6662f884",
+        "form-e4b7e57b",
+        "form-a5bab5d8",
+        "form-08a690d9",
+        "form-8571ef7a",
+        "form-24b7173c",
+        "form-ed995b7e",
+        "form-c33e6e6f"
+      ]
+    },
     "dropped": {
       "count": 0,
       "reasons": {}
@@ -64,7 +363,7 @@
       "form-08a690d9": {
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [],
         "contested": false,
         "createdAt": 1790924437427,
@@ -75,7 +374,7 @@
         "id": "form-08a690d9",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
@@ -98,7 +397,7 @@
       "form-24b7173c": {
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [],
         "contested": false,
         "createdAt": 1790924473660,
@@ -109,7 +408,7 @@
         "id": "form-24b7173c",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
@@ -135,19 +434,19 @@
         "canRespond": false,
         "confirmations": [],
         "contested": true,
-        "createdAt": 1,
-        "creator": "0x836b41b6ac26d74980ab2c7ddc6b40b36ebb61ef",
+        "createdAt": 1790924442596,
+        "creator": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
         "description": "",
         "expiresAt": null,
         "hidden": false,
         "id": "form-5c8b35a2",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
-        "publicKey": "031b79a204dbfc050070e308152cd46583b60f47441a36fc5873f8c54713f59a0c",
+        "publicKey": "03acebd29d86e88e398a85861de168488c6b6d096b17d51f2f9f848b99ec28b324",
         "questions": [
           {
             "id": "q1",
@@ -176,32 +475,13 @@
         "creator": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
         "description": "Friday team lunch",
         "expiresAt": null,
-        "hidden": true,
+        "hidden": false,
         "id": "form-6662f884",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
-        "myAnswers": {
-          "answers": [
-            {
-              "questionId": "q1",
-              "value": 1
-            },
-            {
-              "questionId": "q2",
-              "value": [
-                0
-              ]
-            },
-            {
-              "questionId": "q3",
-              "value": "no olives, please"
-            }
-          ],
-          "submittedAt": 1790924434371
-        },
-        "myConfirmed": true,
-        "mySubmitted": true,
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
         "pinnedCreator": null,
         "publicKey": "0275b126fb188708df138fb4a71fe8a6eb4d6134c7425455c8bf02c8a4da4bd3eb",
         "questions": [
@@ -244,7 +524,7 @@
       "form-8571ef7a": {
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [],
         "contested": false,
         "createdAt": 1790924438091,
@@ -255,7 +535,7 @@
         "id": "form-8571ef7a",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
@@ -278,7 +558,7 @@
       "form-a5bab5d8": {
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [
           "db76af7c529efcd5"
         ],
@@ -291,7 +571,7 @@
         "id": "form-a5bab5d8",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
@@ -311,8 +591,45 @@
           "value": ""
         }
       },
-      "form-e4b7e57b": {
+      "form-c33e6e6f": {
         "allowed": true,
+        "autoReceipts": true,
+        "canRespond": false,
+        "confirmations": [
+          "e5b32a409c8be258"
+        ],
+        "contested": false,
+        "createdAt": 1790924479248,
+        "creator": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-c33e6e6f",
+        "linkMismatch": false,
+        "maxResponses": null,
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "0287cad05976d1b8e93c29e4feca0c71ad95fca73e8f3c4ca6fd6c2db13520463b",
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Coming?",
+            "type": "boolean"
+          }
+        ],
+        "showResponseCount": false,
+        "status": "closed",
+        "title": "Reopen me",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
+      "form-e4b7e57b": {
+        "allowed": false,
         "autoReceipts": false,
         "canRespond": false,
         "confirmations": [],
@@ -325,18 +642,9 @@
         "id": "form-e4b7e57b",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
-        "myAnswers": {
-          "answers": [
-            {
-              "questionId": "q1",
-              "value": "yo"
-            }
-          ],
-          "submittedAt": 1790924434397
-        },
+        "mine": true,
         "myConfirmed": false,
-        "mySubmitted": true,
+        "mySubmitted": false,
         "pinnedCreator": null,
         "publicKey": "030380913edbfa0d76cf5d5e458264c14e88f2e3bbcaff35b1df50655c3439a13d",
         "questions": [
@@ -355,10 +663,48 @@
           "value": "0x30b90501c8b8769cc152805269774455abbe8450"
         }
       },
+      "form-ed995b7e": {
+        "allowed": true,
+        "autoReceipts": false,
+        "canRespond": false,
+        "confirmations": [
+          "26355fe6e8353fe7",
+          "93d3fec905d58d67"
+        ],
+        "contested": false,
+        "createdAt": 1790924474336,
+        "creator": "0x8d253ddb2f4ed71b7adb2b53de4f0078f51c952e",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-ed995b7e",
+        "linkMismatch": false,
+        "maxResponses": 2,
+        "mine": true,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "02593a7238944c0733df8225b353cf73b23fb9756fb439c0a9c03020e66b6b91b4",
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Coming?",
+            "type": "boolean"
+          }
+        ],
+        "showResponseCount": true,
+        "status": "closed",
+        "title": "Capped",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
       "form-legacykey": {
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
+        "canRespond": false,
         "confirmations": [],
         "contested": false,
         "createdAt": 1,
@@ -369,7 +715,7 @@
         "id": "form-legacykey",
         "linkMismatch": false,
         "maxResponses": null,
-        "mine": false,
+        "mine": true,
         "myConfirmed": false,
         "mySubmitted": false,
         "pinnedCreator": null,
@@ -457,12 +803,39 @@
           "wall": 1790924453992
         },
         "id": "resp:9b673fff02eace5d4fea3da2fa84a987e5e84737e8176ad39e41c1c45c1d6547"
+      },
+      {
+        "encryptedPayload": "0102e3651657807fbf4f5e20d498397aef24d32f4b74901fab18e78e6894d4aa889cf84ee8b9293001bcda04ecfa1ed98fc7b986bc00449f4a8c7aa1eebf56477aace27189d0815f5be92a1537f05c4527364846072ee5f4fb6cdf0b1d05cff288ace6bef91e0c51a67e5c2d513fc970a105e842af8f227124cea8c7685eecc2b3db8270ad111c1024b6643653635d2e2ba038b545523f9e29f0889cc65ac148c8fe3d5837a417a5ad34c35fbe32d209cdfbee87ed44d085b253c0ef3a20fd0654ede551337176607277fa041e87d32c872a1ce2bab7b4af6c6ac0b632b1c918482bb8d025157d7e560dab7fb97848f5e6d17785b57ae4a730a052ebdcefb1db09795bdc42443ff8716491260c5ce19849c5d8222f2b2b46e61a45",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-cca29a6f6106",
+          "wall": 1790924474688
+        },
+        "id": "resp:ac3f1d393a073849bc004be4bad7aec50b823e190ff2e33d971cd5e6c15e9ec9"
+      },
+      {
+        "encryptedPayload": "0102d0dcaac4ce9f06ab3836107ea599f0161504ea90a9268387cb460d9deb103d0baf51ed52a5b14496c43a682239d574b10bdf7139179c618e2f415129922d725ccc1c3635d9ea4a88ee952398eb676278e23b2e34f38988c3d4b6f8dc5fce987872735b3a1a48f1750e7277c9d9ee530729d257f11cdfdb8eb50c2c00a5db5cf517b2619f09b922fd76d9bc146c36f980bf5feeb249b95418915a3b09d5a204edc7aa11c82e516b3446bfed54918b50b6f31b3b8a36ebeea5de1f599230d1244fd5660a220becae2846dd9d252add5d347907e3b4d3295e179d035f4f2079adbac1c45d987d2748aac316de22708bc7ebd6d2e3da496ed852f08e0aad7501fd7f531a96675705eecbeb8119f7c0d1b86c298d09545ec14b97c132",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-b7bfb0a484f0",
+          "wall": 1790924474692
+        },
+        "id": "resp:3b1bb8ccd53121da839f8cd7c4826c51f65dba6a6e30737f6dab6a53d7c68f1b"
+      },
+      {
+        "encryptedPayload": "010331b71535d39ea0aaef802887575534dd9a5e9441414f5d1e8e2357b591280b8125f334d25c0b546024c1f051f776d4178454d7615fc5ae91f2d41e47de0da612f65bd05392da4147deebd32b52f5244832eaa22ea0dd7e8c581a2d3636568a7346995f895bf529492317e87b7a82779e5e8994be982f49c208a30d41041c3df17f03730111ed7769960854a65c08bd6f34b833652c309af082f1bd9f8cb80354217daf8e28def2b277ae61bf21a0fd1cec9b70b0a6da63ca605c08b297d1d698d9a2c2f2331a97b03aa19d97de3b2ce1b7f32d5d2a2c606898866dc9c66cebd7be496df9b6cdd11dda390abcd5d3c4abbc10b497b5062c90a81cc8b2fcb4c0b03b477e6f323c99fc1fa190405f0f938a2f4f6967cdf1a307b0",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-efbfe4aa4b49",
+          "wall": 1790924479463
+        },
+        "id": "resp:199ef83067557573c62ad1dac5fda189d1deeb437efe64eca2377c94a02d4668"
       }
     ],
     "v": 1
   },
   "storage": {
-    "dir": "/tmp/wb-e2e-RKydjb/B",
+    "dir": "/tmp/wb-e2e-RKydjb/A",
     "note": "",
     "ok": true
   },

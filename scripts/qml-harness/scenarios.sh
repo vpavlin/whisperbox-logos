@@ -51,9 +51,9 @@ expect 'CALL whisperbox_core createForm argc=1 args=\{"title":"Team offsite","de
 run create-bad-choice creator  '{"draftTitle":"x","draftQuestions":[{"type":"checkbox","text":"Pick","required":true,"optionsText":"only one"}]}' "doCreate"
 deny "CALL whisperbox_core createForm" "choice question with <2 options is not published"
 # Real clicks on the builder's type/required chips (dialog at 1280x800: Q1 chips row
-# y=381; "Single choice" x=548, "Required" x=732). Regression: chip handlers used the
+# y=381; "Single choice" x=548, "Required" x=798 since "Yes / No" was added). Regression: chip handlers used the
 # CHIP repeater's index, so a click appended a phantom question instead.
-WB_DUMP=draftQuestions WB_CLICKS="548,381;732,381" run create-chips creator "{}" "openCreate"
+WB_DUMP=draftQuestions WB_CLICKS="548,381;798,381" run create-chips creator "{}" "openCreate"
 expect 'DUMP draftQuestions \[\{"optionsText":"","required":false,"text":"","type":"radioButtons"\}\]' "chip clicks edit Q1 in place (single choice, now optional) - no phantom question"
 run respondent-done  respondent "{\"selectedId\":\"$LUNCH_B\"}"
 run respondent-form  respondent "{\"selectedId\":\"$LEGACY_B\"}"
@@ -69,6 +69,29 @@ run contested        contested "{\"selectedId\":\"$(fid contested "Salary survey
 deny "CALL whisperbox_core submitResponse" "contested form offers no submit"
 run identity         creator   '{"showIdentity":true}'
 run join-id          empty     "{}" ""
+
+# ── 0.3.2: responses viewer, receipts, re-open, drafts, duplicate, yes/no ──
+CAPPED=$(fid lifecycle "Capped"); LONG_G=$(fid answer-draft "Long form")
+run creator-summary  lifecycle "{\"selectedId\":\"$CAPPED\",\"respMode\":\"summary\"}"
+run creator-table    lifecycle "{\"selectedId\":\"$CAPPED\",\"respMode\":\"table\"}"
+run creator-one      lifecycle "{\"selectedId\":\"$CAPPED\",\"respMode\":\"one\",\"respIndex\":1}"
+run confirm-all      lifecycle "{\"selectedId\":\"$CAPPED\"}" "confirmAllSelected"
+expect "CALL whisperbox_core confirmAll argc=1 args=$CAPPED\$" "Send all receipts -> confirmAll(formId)"
+run auto-receipts    lifecycle "{\"selectedId\":\"$CAPPED\"}" "toggleAutoReceipts"
+expect "CALL whisperbox_core setAutoReceipts argc=2 args=$CAPPED \| 1\$" "Automatic receipts toggle -> setAutoReceipts(formId, 1)"
+run reopen           lifecycle "{\"selectedId\":\"$CAPPED\"}" "reopenSelected"
+expect "CALL whisperbox_core reopenForm argc=1 args=$CAPPED\$" "Re-open -> reopenForm(formId)"
+WB_DUMP=builderState run duplicate lifecycle "{\"selectedId\":\"$CAPPED\"}" "duplicateSelected"
+expect 'DUMP builderState .*"max":"2".*"title":"Capped \(copy\)"' "Duplicate opens the builder prefilled (questions, cap, title)"
+run drafts-sidebar   drafts    "{}"
+run builder-schedule creator   '{"draftTitle":"Later","draftQuestions":[{"type":"boolean","text":"In?","required":true,"optionsText":""}],"draftPublishAt":"2099-01-01 10:00"}' "doSchedule"
+expect 'CALL whisperbox_core saveDraft argc=1 args=\{"def":\{"title":"Later".*"type":"boolean".*\},"publishAt":[0-9]{13}\}$' "Schedule -> saveDraft with publishAt"
+deny "CALL whisperbox_core createForm" "scheduling does not publish now"
+run builder-max      creator   '{"draftTitle":"Cap","draftMax":"25","draftShowCount":true,"draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]}' "doCreate"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"maxResponses":25,"showResponseCount":true\}$' "Publish carries the answer cap + show-count"
+deny '_builder' "builder state never goes on the wire"
+WB_DUMP=answers run answer-restore answer-draft "{\"selectedId\":\"$LONG_G\"}" "restoreAnswerDraft"
+expect 'DUMP answers \{"q1":true\}' "unsent answers are restored into the form"
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

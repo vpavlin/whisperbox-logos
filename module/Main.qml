@@ -60,10 +60,23 @@ Item {
     property var draftQuestions: []
     property bool draftRestrict: false
     property string draftAllowList: ""
+    // 0.3.2 builder extras + responses viewer
+    property string draftId: ""            // saved draft being edited ("" = not saved yet)
+    property string draftMax: ""           // max responses (text field)
+    property string draftCloseAt: ""       // "yyyy-MM-dd HH:mm" or ""
+    property bool draftShowCount: false
+    property string draftPublishAt: ""     // schedule field
+    property bool draftScheduling: false
+    property bool draftDirty: false
+    property bool builderLive: true        // toggled to re-create builder fields (bindings)
+    property string respMode: "summary"    // summary | table | one
+    property int respIndex: 0
+    property string respFilter: ""
 
     readonly property var qTypes: [
         { t: "text", label: "Short text" }, { t: "textarea", label: "Paragraph" },
-        { t: "radioButtons", label: "Single choice" }, { t: "checkbox", label: "Multiple choice" }
+        { t: "radioButtons", label: "Single choice" }, { t: "checkbox", label: "Multiple choice" },
+        { t: "boolean", label: "Yes / No" }
     ]
 
     // ── core plumbing ──
@@ -142,6 +155,49 @@ Item {
     readonly property var selResponses: responsesFor(selectedId)
     readonly property int selConfirmed: { var n = 0; for (var i = 0; i < selResponses.length; i++) if (selResponses[i].confirmed) n++; return n; }
 
+    readonly property var drafts: st.drafts || []
+    readonly property var selUnconfirmed: { var n = 0; for (var i = 0; i < selResponses.length; i++) if (!selResponses[i].confirmed) n++; return n; }
+    // Table/one-by-one list: the search box matches the address or any answer text.
+    readonly property var respList: {
+        var t = root.respFilter.trim().toLowerCase();
+        if (!t) return selResponses;
+        var out = [];
+        for (var i = 0; i < selResponses.length; i++) {
+            var r = selResponses[i], hay = String(r.respondent || "");
+            var a = r.answers || [];
+            for (var k = 0; k < a.length; k++) hay += " " + answerText(questionFor(root.sel, a[k].questionId), a[k].value);
+            if (hay.toLowerCase().indexOf(t) >= 0) out.push(r);
+        }
+        return out;
+    }
+    function answerOf(r, qid) {
+        var a = (r && r.answers) ? r.answers : [];
+        for (var i = 0; i < a.length; i++) if (a[i].questionId === qid) return a[i].value;
+        return null;
+    }
+    // Per-question aggregate for the Summary view.
+    function summaryFor(q) {
+        var rs = root.selResponses, t = normType(q.type);
+        var labels = t === "boolean" ? ["Yes", "No"] : (q.options || []);
+        if (t === "radioButtons" || t === "checkbox" || t === "boolean") {
+            var counts = [], answered = 0;
+            for (var o = 0; o < labels.length; o++) counts.push(0);
+            for (var i = 0; i < rs.length; i++) {
+                var v = answerOf(rs[i], q.id), hit = false;
+                if (t === "boolean") { if (v === true) { counts[0]++; hit = true; } else if (v === false) { counts[1]++; hit = true; } }
+                else { var l = isList(v) ? toList(v) : (typeof v === "number" ? [v] : []);
+                       for (var j = 0; j < l.length; j++) if (l[j] >= 0 && l[j] < counts.length) { counts[l[j]]++; hit = true; } }
+                if (hit) answered++;
+            }
+            var rows = [], max = 1;
+            for (var c = 0; c < counts.length; c++) max = Math.max(max, counts[c]);
+            for (var d = 0; d < labels.length; d++) rows.push({ label: String(labels[d]), n: counts[d], pct: answered ? Math.round(100 * counts[d] / answered) : 0, w: counts[d] / max });
+            return { bars: true, rows: rows, answered: answered, samples: [] };
+        }
+        var texts = [];
+        for (var x = rs.length - 1; x >= 0; x--) { var s = answerText(q, answerOf(rs[x], q.id)); if (s) texts.push(s); }
+        return { bars: false, rows: [], answered: texts.length, samples: texts.slice(0, 5) };
+    }
     function responsesFor(fid) {
         if (!creatorView || !creatorView.responses || !creatorView.responses[fid]) return [];
         return creatorView.responses[fid];
@@ -154,7 +210,7 @@ Item {
     function fmtTime(ms) { if (!ms) return ""; return Qt.formatDateTime(new Date(Number(ms)), "d MMM yyyy, hh:mm"); }
     function normType(t) {
         var s = String(t);
-        return (s === "text" || s === "textarea" || s === "radioButtons" || s === "checkbox") ? s : "text";
+        return (s === "text" || s === "textarea" || s === "radioButtons" || s === "checkbox" || s === "boolean") ? s : "text";
     }
     function questionFor(f, qid) {
         if (!f || !f.questions) return null;
@@ -165,7 +221,10 @@ Item {
     function answerText(q, v) {
         if (v === null || v === undefined || v === "") return "";
         var opts = (q && q.options) ? q.options : [];
-        var one = function (x) { return (typeof x === "number" && opts[x] !== undefined) ? String(opts[x]) : String(x); };
+        var one = function (x) {
+            if (typeof x === "boolean") return x ? "Yes" : "No";
+            return (typeof x === "number" && opts[x] !== undefined) ? String(opts[x]) : String(x);
+        };
         if (isList(v)) { var parts = []; for (var i = 0; i < v.length; i++) parts.push(one(v[i])); return parts.join(", "); }
         return one(v);
     }
@@ -190,6 +249,10 @@ Item {
             rows.push({ kind: "h", label: label + "  " + list.length });
             for (var k = 0; k < list.length; k++) rows.push({ kind: kind, id: list[k] });
         };
+        if (root.drafts.length > 0) {
+            rows.push({ kind: "h", label: "DRAFTS  " + root.drafts.length });
+            for (var dd = 0; dd < root.drafts.length; dd++) rows.push({ kind: "d", id: root.drafts[dd].id, draft: root.drafts[dd] });
+        }
         add("WAITING FOR SYNC", root.pendingForms, "p");
         add("MY FORMS", mine, "f");
         add("ANSWERED", answered, "f");
@@ -202,7 +265,16 @@ Item {
     }
 
     // ── actions ──
-    function selectForm(id) { root.selectedId = id; root.answers = ({}); root.showErrors = false; }
+    function selectForm(id) {
+        root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = "";
+        restoreAnswerDraft();
+    }
+    // Half-filled answers saved while typing come back (crash, restart, switching forms).
+    function restoreAnswerDraft() {
+        var f = root.forms[root.selectedId], a = {};
+        if (f && f.answerDraft && !f.mySubmitted) for (var i = 0; i < f.answerDraft.length; i++) a[f.answerDraft[i].questionId] = f.answerDraft[i].value;
+        root.answers = a;
+    }
     function joinForm() {
         var t = String(joinField.text || "").trim();
         if (!t) return;
@@ -213,7 +285,13 @@ Item {
             toast(r.pending ? "Form added - waiting for it to sync" : "Form opened");
         });
     }
-    function setAnswer(qid, v) { var a = Object.assign({}, root.answers); a[qid] = v; root.answers = a; }
+    function setAnswer(qid, v) { var a = Object.assign({}, root.answers); a[qid] = v; root.answers = a; answerDraftTimer.restart(); }
+    function saveAnswerDraftNow() {
+        if (!root.sel || root.sel.mine || root.sel.mySubmitted) return;
+        var arr = [];
+        for (var k in root.answers) if (root.answers.hasOwnProperty(k)) arr.push({ questionId: k, value: root.answers[k] });
+        callVia("saveAnswerDraft", [root.sel.id, JSON.stringify(arr)], function () {});
+    }
     function toggleChoice(qid, idx) {
         var cur = toList(root.answers[qid]);
         var at = cur.indexOf(idx);
@@ -232,9 +310,10 @@ Item {
             var q = f.questions[i];
             if (isMissing(q)) { root.showErrors = true; toast("Please answer: " + q.text); return; }
             var v = root.answers[q.id];
-            if (v === undefined) v = normType(q.type) === "checkbox" ? [] : (normType(q.type) === "radioButtons" ? null : "");
+            if (v === undefined) v = normType(q.type) === "checkbox" ? [] : ((normType(q.type) === "radioButtons" || normType(q.type) === "boolean") ? null : "");
             arr.push({ questionId: q.id, value: v });
         }
+        answerDraftTimer.stop();   // the core drops the answer draft on submit
         act("submitResponse", [f.id, JSON.stringify(arr)], "Response sealed and sent", function () {
             root.answers = ({}); root.showErrors = false;
         });
@@ -246,6 +325,14 @@ Item {
         act(hide ? "hideForm" : "unhideForm", [f.id], hide ? "Hidden - find it under Hidden in the sidebar" : "Back in your lists", function () {
             if (hide && !root.showHidden) root.selectedId = "";
         });
+    }
+    function reopenSelected() { act("reopenForm", [root.selectedId], "Form re-opened - answers sealed while it was closed still don't count"); }
+    function confirmAllSelected() {
+        act("confirmAll", [root.selectedId], "", function (r) { toast(r.confirmed ? "Receipts sent for " + root.plural(r.confirmed, "response", "responses") : "Everything already has a receipt"); });
+    }
+    function toggleAutoReceipts() {
+        var on = !(root.sel && root.sel.autoReceipts);
+        act("setAutoReceipts", [root.selectedId, on ? "1" : "0"], on ? "Receipts now go out automatically" : "Automatic receipts off");
     }
     function closeSelected() { act("closeForm", [root.selectedId], "Form closed - no new responses"); }
     function openShare() {
@@ -274,23 +361,71 @@ Item {
         act("importIdentity", [k], "Identity imported", function () { keyField.text = ""; });
     }
 
-    // ── create-form draft ──
-    function openCreate() {
-        root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
+    // ── create-form builder (drafts autosave; publish now / schedule) ──
+    function rebuildBuilder() { root.builderLive = false; Qt.callLater(function () { root.builderLive = true; }); }
+    function resetBuilder() {
+        root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
-        root.showCreate = true;
+        root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
+    }
+    function openCreate() { resetBuilder(); rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
+    function loadBuilder(b) {
+        resetBuilder();
+        root.draftTitle = b.title || ""; root.draftDescription = b.description || "";
+        root.draftQuestions = (b.questions && b.questions.length) ? b.questions : root.draftQuestions;
+        root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
+        root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
+    }
+    function openDraft(d) {
+        var b = (d.def && d.def._builder) ? d.def._builder : null;
+        if (!b) { toast("This draft can't be edited here"); return; }
+        loadBuilder(b);
+        root.draftId = d.id;
+        if (d.publishAt) { root.draftScheduling = true; root.draftPublishAt = Qt.formatDateTime(new Date(Number(d.publishAt)), "yyyy-MM-dd HH:mm"); }
+        rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
+    }
+    // Published forms can't be edited - duplicate one into a new draft instead.
+    function duplicateSelected() {
+        var f = root.sel; if (!f) return;
+        var qs = [];
+        for (var i = 0; i < (f.questions || []).length; i++) {
+            var q = f.questions[i];
+            qs.push({ type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n") });
+        }
+        loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
+                      restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
+                      max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount });
+        rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
     function addDraftQuestion() { root.draftQuestions = root.draftQuestions.concat([{ type: "text", text: "", required: false, optionsText: "" }]); }
-    function removeDraftQuestion(i) { var a = root.draftQuestions.slice(); a.splice(i, 1); root.draftQuestions = a; }
+    function removeDraftQuestion(i) { var a = root.draftQuestions.slice(); a.splice(i, 1); root.draftQuestions = a; rebuildBuilder(); }
+    function moveDraftQuestion(i, d) {
+        var j = i + d; if (j < 0 || j >= root.draftQuestions.length) return;
+        var a = root.draftQuestions.slice(); var t = a[i]; a[i] = a[j]; a[j] = t; root.draftQuestions = a; rebuildBuilder();
+    }
+    function duplicateDraftQuestion(i) {
+        var a = root.draftQuestions.slice(); a.splice(i + 1, 0, Object.assign({}, a[i])); root.draftQuestions = a; rebuildBuilder();
+    }
     function setDraft(i, prop, v) { if (i < 0 || i >= root.draftQuestions.length) return; var a = root.draftQuestions.slice(); var q = Object.assign({}, a[i]); q[prop] = v; a[i] = q; root.draftQuestions = a; }
     function draftOptions(q) {
         var out = [], lines = String(q.optionsText || "").split("\n");
         for (var i = 0; i < lines.length; i++) { var s = lines[i].trim(); if (s) out.push(s); }
         return out;
     }
-    function doCreate() {
+    function parseLocal(s) {   // "yyyy-MM-dd HH:mm" (local time) -> ms, or NaN
+        var m = /^\s*(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?\s*$/.exec(String(s || ""));
+        if (!m) return NaN;
+        return new Date(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 23, m[5] ? +m[5] : 59).getTime();
+    }
+    // Everything the builder shows - stored inside the draft so it reopens exactly.
+    readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
+        restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount })
+    onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
+    // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
+    function buildDef(strict) {
+        var err = function (m) { return { ok: false, error: m }; };
         var title = root.draftTitle.trim();
-        if (!title) { toast("Give the form a title"); return; }
+        if (strict && !title) return err("Give the form a title");
         var qs = [];
         for (var i = 0; i < root.draftQuestions.length; i++) {
             var d = root.draftQuestions[i], text = String(d.text || "").trim();
@@ -298,19 +433,69 @@ Item {
             var q = { id: "q" + (qs.length + 1), type: d.type, text: text, required: !!d.required };
             if (d.type === "radioButtons" || d.type === "checkbox") {
                 q.options = draftOptions(d);
-                if (q.options.length < 2) { toast("\"" + text + "\" needs at least two options"); return; }
+                if (strict && q.options.length < 2) return err("\"" + text + "\" needs at least two options");
             }
             qs.push(q);
         }
-        if (qs.length === 0) { toast("Add at least one question"); return; }
+        if (strict && qs.length === 0) return err("Add at least one question");
         var wl = { type: "none", value: "" };
         if (root.draftRestrict) {
             var addrs = root.draftAllowList.split(/[\s,]+/).filter(function (a) { return /^0x[0-9a-fA-F]{40}$/.test(a); });
-            if (addrs.length === 0) { toast("Add at least one 0x address, or turn off the restriction"); return; }
+            if (strict && addrs.length === 0) return err("Add at least one 0x address, or turn off the restriction");
             wl = { type: "addresses", value: addrs.join(",").toLowerCase() };
         }
-        act("createForm", [JSON.stringify({ title: title, description: root.draftDescription.trim(), questions: qs, whitelist: wl })], "Form published", function (r) {
-            root.showCreate = false; selectForm(String(r.formId || "").toLowerCase());
+        var def = { title: title, description: root.draftDescription.trim(), questions: qs, whitelist: wl, _builder: root.builderState };
+        var max = root.draftMax.trim();
+        if (max) { var n = parseInt(max, 10); if (strict && (!(n > 0) || String(n) !== max)) return err("Max responses must be a whole number"); if (n > 0) def.maxResponses = n; }
+        var ca = root.draftCloseAt.trim();
+        if (ca) { var t = parseLocal(ca); if (strict && isNaN(t)) return err("Close date: use yyyy-MM-dd HH:mm"); if (strict && t <= Date.now()) return err("Close date is in the past"); if (!isNaN(t)) def.expiresAt = t; }
+        if (root.draftShowCount) def.showResponseCount = true;
+        return { ok: true, def: def };
+    }
+    function builderEmpty() {
+        if (root.draftTitle.trim() || root.draftDescription.trim()) return false;
+        for (var i = 0; i < root.draftQuestions.length; i++) if (String(root.draftQuestions[i].text || "").trim()) return false;
+        return true;
+    }
+    function saveCurrentDraft(publishAt, cb) {
+        var b = buildDef(publishAt !== undefined && publishAt !== null);
+        if (!b.ok) { toast(b.error); return; }
+        var d = { def: b.def };
+        if (root.draftId) d.id = root.draftId;
+        if (publishAt) d.publishAt = publishAt;
+        callVia("saveDraft", [JSON.stringify(d)], function (r) {
+            if (r && r.ok) { root.draftId = r.draftId; root.draftDirty = false; if (cb) cb(r); }
+        });
+    }
+    Timer { id: draftAutosave; interval: 2500; repeat: true; running: root.showCreate && root.draftDirty
+            onTriggered: if (!root.builderEmpty()) root.saveCurrentDraft(null) }
+    Timer { id: answerDraftTimer; interval: 900; onTriggered: root.saveAnswerDraftNow() }
+    function closeBuilder() {
+        if (root.draftDirty && !builderEmpty()) saveCurrentDraft(null, function () { toast("Saved as a draft"); });
+        else if (root.draftId && builderEmpty()) callVia("deleteDraft", [root.draftId], function () {});
+        root.showCreate = false;
+    }
+    function discardDraft() {
+        if (root.draftId) act("deleteDraft", [root.draftId], "Draft deleted");
+        root.draftDirty = false; root.showCreate = false;
+    }
+    function doCreate() {
+        var b = buildDef(true);
+        if (!b.ok) { toast(b.error); return; }
+        var did = root.draftId;
+        var def = Object.assign({}, b.def); delete def._builder;   // builder state is for drafts only
+        act("createForm", [JSON.stringify(def)], "Form published", function (r) {
+            if (did) callVia("deleteDraft", [did], function () {});
+            root.draftDirty = false; root.showCreate = false; selectForm(String(r.formId || "").toLowerCase());
+        });
+    }
+    function doSchedule() {
+        var t = parseLocal(root.draftPublishAt);
+        if (isNaN(t)) { toast("Publish time: use yyyy-MM-dd HH:mm"); return; }
+        if (t <= Date.now()) { toast("That time has passed - use Publish now"); return; }
+        saveCurrentDraft(t, function () {
+            root.showCreate = false;
+            toast("Scheduled for " + root.fmtTime(t) + " - publishes when WhisperBox is running then");
         });
     }
 
@@ -486,7 +671,7 @@ Item {
                                     spacing: 1
                                     Text { textFormat: Text.PlainText;
                                         Layout.fillWidth: true
-                                        text: row.f ? (row.f.title || "(untitled)") : (modelData.id || "")
+                                        text: row.f ? (row.f.title || "(untitled)") : (modelData.kind === "d" ? ((modelData.draft.def && modelData.draft.def.title) || "Untitled draft") : (modelData.id || ""))
                                         font.pixelSize: 13
                                         font.weight: Font.DemiBold
                                         color: root.wbText
@@ -498,6 +683,7 @@ Item {
                                         font.pixelSize: 11
                                         color: root.wbTextTert
                                         text: {
+                                            if (modelData.kind === "d") return modelData.draft.publishAt ? "scheduled  ·  " + root.fmtTime(modelData.draft.publishAt) : "draft  ·  edited " + root.fmtTime(modelData.draft.updatedAt);
                                             if (!row.f) return "syncing...";
                                             var parts = [root.plural(row.f.questions.length, "question", "questions")];
                                             if (row.f.mine) parts.push(root.plural(root.responsesFor(row.f.id).length, "response", "responses"));
@@ -513,7 +699,8 @@ Item {
                                     bg: row.f && row.f.myConfirmed ? root.wbSuccessSubtle : root.wbSurfaceRaised
                                 }
                             }
-                            MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selectForm(modelData.id) }
+                            MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: modelData.kind === "d" ? root.openDraft(modelData.draft) : root.selectForm(modelData.id) }
                         }
                     }
                     Text { textFormat: Text.PlainText;
@@ -640,6 +827,7 @@ Item {
                             wrapMode: Text.WordWrap
                         }
                         WbButton { visible: !!root.sel; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
+                        WbButton { visible: !!root.sel; label: "Duplicate"; onClicked: root.duplicateSelected() }
                         WbButton { visible: !!root.sel; label: "Share"; onClicked: root.openShare() }
                     }
                     Flow {
@@ -703,91 +891,283 @@ Item {
                             }
                         }
 
-                        RowLayout {
+                        // ── toolbar: lifecycle + receipts ──
+                        Flow {
+                            Layout.fillWidth: true
                             spacing: 8
-                            WbButton { label: "Export CSV"; active: root.selResponses.length > 0; onClicked: root.openCsv() }
                             WbButton {
                                 visible: !!(root.sel && root.sel.status === "open")
-                                label: "Close form"
-                                danger: true
+                                label: "Close form"; danger: true
                                 onClicked: root.closeSelected()
+                            }
+                            WbButton {
+                                // not when it closed at its answer limit or end date (it would just close again)
+                                visible: !!(root.sel && root.sel.status === "closed" && !(root.sel.maxResponses && root.selResponses.length >= root.sel.maxResponses)
+                                            && !(root.sel.expiresAt && Date.now() > root.sel.expiresAt))
+                                label: root.busy("reopenForm") ? "Re-opening..." : "Re-open form"
+                                active: !root.busy("reopenForm")
+                                onClicked: root.reopenSelected()
+                            }
+                            WbButton {
+                                visible: root.selUnconfirmed > 0
+                                primary: true
+                                label: root.busy("confirmAll") ? "Sending..." : "Send all receipts (" + root.selUnconfirmed + ")"
+                                active: !root.busy("confirmAll")
+                                onClicked: root.confirmAllSelected()
+                            }
+                            Rectangle {   // automatic receipts toggle
+                                implicitWidth: arRow.implicitWidth + 20; implicitHeight: 36; radius: 10
+                                color: root.sel && root.sel.autoReceipts ? root.wbSuccessSubtle : "transparent"
+                                border.color: root.sel && root.sel.autoReceipts ? root.wbSuccess : root.wbBorder; border.width: 1
+                                RowLayout {
+                                    id: arRow; anchors.centerIn: parent; spacing: 8
+                                    Rectangle { width: 28; height: 16; radius: 8; color: root.sel && root.sel.autoReceipts ? root.wbSuccess : root.wbBorder
+                                        Rectangle { width: 12; height: 12; radius: 6; y: 2; x: root.sel && root.sel.autoReceipts ? 14 : 2; color: "white" } }
+                                    Text { textFormat: Text.PlainText; text: "Automatic receipts"; font.pixelSize: 12; color: root.wbTextSec }
+                                }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleAutoReceipts() }
+                            }
+                            WbButton { label: "Export CSV"; active: root.selResponses.length > 0; onClicked: root.openCsv() }
+                        }
+                        Text { textFormat: Text.PlainText
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
+                            visible: text.length > 0
+                            text: {
+                                var f = root.sel, parts = [];
+                                if (!f) return "";
+                                if (f.maxResponses) parts.push("Closes automatically at " + root.plural(f.maxResponses, "response", "responses"));
+                                if (f.expiresAt) parts.push((f.status === "closed" ? "End date " : "Closes ") + root.fmtTime(f.expiresAt));
+                                if (f.showResponseCount) parts.push("respondents see how many receipts you sent");
+                                return parts.join("  ·  ");
                             }
                         }
 
-                        SectionLabel { text: "RESPONSES (" + root.selResponses.length + ")" }
-                        Text { textFormat: Text.PlainText;
-                            visible: root.selResponses.length === 0
+                        // ── mode tabs + search ──
+                        RowLayout {
                             Layout.fillWidth: true
-                            wrapMode: Text.WordWrap
+                            visible: root.selResponses.length > 0
+                            spacing: 6
+                            Repeater {
+                                model: [{ m: "summary", l: "Summary" }, { m: "table", l: "Table" }, { m: "one", l: "One by one" }]
+                                Rectangle {
+                                    property bool on: root.respMode === modelData.m
+                                    implicitWidth: tabT.implicitWidth + 24; implicitHeight: 32; radius: 16
+                                    color: on ? root.wbPrimarySubtle : "transparent"
+                                    border.color: on ? root.wbPrimary : root.wbBorder; border.width: 1
+                                    Text { id: tabT; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData.l; font.pixelSize: 12; font.weight: Font.DemiBold; color: parent.on ? root.wbPrimary : root.wbTextSec }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.respMode = modelData.m; if (modelData.m === "one") oneNav.forceActiveFocus(); } }
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                            InputBox {
+                                visible: root.respMode !== "summary"
+                                implicitWidth: 220; implicitHeight: 32
+                                TextField {
+                                    anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                    color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 12; background: null
+                                    placeholderText: "Search answers or address"
+                                    onTextChanged: { root.respFilter = text; root.respIndex = 0; }
+                                }
+                            }
+                        }
+                        Text { textFormat: Text.PlainText
+                            visible: root.selResponses.length === 0
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 13; color: root.wbTextTert
                             text: "No responses yet. Share the link - answers arrive sealed and only this device can open them."
-                            font.pixelSize: 13
-                            color: root.wbTextTert
+                        }
+                        Text { textFormat: Text.PlainText
+                            visible: root.selResponses.length > 0 && root.respMode !== "summary" && root.respList.length === 0
+                            text: "Nothing matches \"" + root.respFilter + "\"."; font.pixelSize: 13; color: root.wbTextTert
                         }
 
+                        // ── SUMMARY: one card per question ──
                         Repeater {
-                            model: root.selResponses
+                            model: (root.respMode === "summary" && root.sel) ? root.sel.questions : []
                             Rectangle {
-                                id: respCard
+                                id: sumCard
                                 Layout.fillWidth: true
-                                implicitHeight: respCol.implicitHeight + 28
-                                radius: 12
-                                color: root.wbSurfaceRaised
-                                border.color: root.wbBorderSubtle
-                                border.width: 1
-                                property var resp: modelData
-
+                                implicitHeight: sumCol.implicitHeight + 28
+                                radius: 12; color: root.wbSurfaceRaised; border.color: root.wbBorderSubtle; border.width: 1
+                                property var sm: root.summaryFor(modelData)
                                 ColumnLayout {
-                                    id: respCol
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.margins: 14
-                                    spacing: 10
-
+                                    id: sumCol
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14
+                                    spacing: 8
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        spacing: 8
-                                        Text { textFormat: Text.PlainText;
-                                            text: root.shortAddr(respCard.resp.respondent)
-                                            font.pixelSize: 12
-                                            font.family: "monospace"
-                                            color: root.wbTextSec
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(respCard.resp.respondent, "Address") }
-                                        }
-                                        Text { textFormat: Text.PlainText; text: root.fmtTime(respCard.resp.submittedAt); font.pixelSize: 11; color: root.wbTextTert }
-                                        Item { Layout.fillWidth: true }
-                                        Badge { visible: !!respCard.resp.confirmed; label: "Receipt sent" }
-                                        WbButton {
-                                            visible: !respCard.resp.confirmed
-                                            implicitHeight: 28
-                                            label: "Send receipt"
-                                            onClicked: root.confirmResponse(respCard.resp.respondent)
+                                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: (index + 1) + ". " + modelData.text; font.pixelSize: 14; font.weight: Font.DemiBold; color: root.wbText }
+                                        Text { textFormat: Text.PlainText; text: sumCard.sm.answered + " of " + root.selResponses.length + " answered"; font.pixelSize: 11; color: root.wbTextTert }
+                                    }
+                                    Repeater {
+                                        model: sumCard.sm.rows
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 10
+                                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 160; elide: Text.ElideRight; text: modelData.label; font.pixelSize: 13; color: root.wbTextSec }
+                                            Rectangle {
+                                                Layout.fillWidth: true; implicitHeight: 14; radius: 7; color: root.wbSurface
+                                                Rectangle { height: parent.height; radius: 7; width: Math.max(modelData.n ? 6 : 0, parent.width * modelData.w); color: root.wbPrimary }
+                                            }
+                                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 78; horizontalAlignment: Text.AlignRight; text: modelData.n + "  (" + modelData.pct + "%)"; font.pixelSize: 12; color: root.wbText }
                                         }
                                     }
                                     Repeater {
-                                        model: respCard.resp.answers || []
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 2
-                                            property var q: root.questionFor(root.sel, modelData.questionId)
-                                            Text { textFormat: Text.PlainText;
-                                                Layout.fillWidth: true
-                                                text: parent.q ? parent.q.text : modelData.questionId
-                                                font.pixelSize: 11
-                                                color: root.wbTextTert
-                                                wrapMode: Text.WordWrap
+                                        model: sumCard.sm.bars ? [] : sumCard.sm.samples
+                                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "“" + modelData + "”"; font.pixelSize: 13; color: root.wbTextSec }
+                                    }
+                                    Text { textFormat: Text.PlainText
+                                        visible: !sumCard.sm.bars && sumCard.sm.answered > sumCard.sm.samples.length
+                                        text: "+ " + (sumCard.sm.answered - sumCard.sm.samples.length) + " more - see Table or One by one"; font.pixelSize: 11; color: root.wbTextTert }
+                                }
+                            }
+                        }
+
+                        // ── TABLE: one row per response, one column per question ──
+                        Rectangle {
+                            visible: root.respMode === "table" && root.respList.length > 0
+                            Layout.fillWidth: true
+                            implicitHeight: Math.min(tableCol.implicitHeight + 2, 560)
+                            radius: 12; color: root.wbSurfaceRaised; border.color: root.wbBorderSubtle; border.width: 1; clip: true
+                            Flickable {
+                                id: tableFlick
+                                anchors.fill: parent; anchors.margins: 1
+                                contentWidth: tableCol.implicitWidth; contentHeight: tableCol.implicitHeight
+                                clip: true; boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
+                                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                                Column {
+                                    id: tableCol
+                                    Row {   // header
+                                        Repeater {
+                                            model: ["#", "From", "When"].concat((root.sel ? root.sel.questions : []).map(function (q) { return q.text; })).concat(["Receipt"])
+                                            Rectangle {
+                                                width: index === 0 ? 44 : (index <= 2 ? 120 : 190); height: 36; color: root.wbSurface
+                                                Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter
+                                                    elide: Text.ElideRight; text: modelData; font.pixelSize: 11; font.weight: Font.DemiBold; color: root.wbTextTert }
                                             }
-                                            Text { textFormat: Text.PlainText;
+                                        }
+                                    }
+                                    Repeater {
+                                        model: root.respList
+                                        Rectangle {
+                                            id: trow
+                                            property var r: modelData
+                                            property int ri: index
+                                            width: tableCol.width > 0 ? childrenRect.width : 0; height: 40
+                                            color: trMa.containsMouse ? root.wbPrimarySubtle : (index % 2 ? root.wbSurfaceRaised : Qt.darker(root.wbSurfaceRaised, 1.08))
+                                            Row {
+                                                Repeater {
+                                                    model: 3 + root.sel.questions.length + 1
+                                                    Item {
+                                                        width: index === 0 ? 44 : (index <= 2 ? 120 : 190); height: 40
+                                                        Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                                                            font.pixelSize: 12; font.family: index === 1 ? "monospace" : ""
+                                                            color: index === 3 + root.sel.questions.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
+                                                            text: {
+                                                                if (index === 0) return String(trow.ri + 1);
+                                                                if (index === 1) return root.shortAddr(trow.r.respondent);
+                                                                if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
+                                                                if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
+                                                                var q = root.sel.questions[index - 3]; return root.answerText(q, root.answerOf(trow.r, q.id));
+                                                            } }
+                                                    }
+                                                }
+                                            }
+                                            MouseArea { id: trMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: { root.respIndex = trow.ri; root.respMode = "one"; oneNav.forceActiveFocus(); } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Text { textFormat: Text.PlainText; visible: root.respMode === "table" && root.respList.length > 0
+                            text: "Click a row to open it.  Scroll sideways for more questions."; font.pixelSize: 11; color: root.wbTextTert }
+
+                        // ── ONE BY ONE: a single response, prev / next / jump (arrow keys too) ──
+                        FocusScope {
+                            id: oneNav
+                            visible: root.respMode === "one" && root.respList.length > 0
+                            Layout.fillWidth: true
+                            implicitHeight: oneCol.implicitHeight
+                            readonly property int n: root.respList.length
+                            readonly property int at: Math.max(0, Math.min(root.respIndex, n - 1))
+                            readonly property var r: n > 0 ? root.respList[at] : null
+                            function go(i) { if (n > 0) root.respIndex = Math.max(0, Math.min(n - 1, i)); }
+                            Keys.onLeftPressed: go(at - 1)
+                            Keys.onRightPressed: go(at + 1)
+                            Keys.onPressed: function (ev) { if (ev.key === Qt.Key_Home) go(0); else if (ev.key === Qt.Key_End) go(n - 1); }
+                            ColumnLayout {
+                                id: oneCol
+                                width: parent.width
+                                spacing: 12
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    WbButton { label: "‹  Previous"; active: oneNav.at > 0; onClicked: { oneNav.go(oneNav.at - 1); oneNav.forceActiveFocus(); } }
+                                    Item { Layout.fillWidth: true }
+                                    Text { textFormat: Text.PlainText; text: "Response"; font.pixelSize: 13; color: root.wbTextSec }
+                                    InputBox {
+                                        implicitWidth: 56; implicitHeight: 32
+                                        TextField {
+                                            anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6
+                                            horizontalAlignment: TextInput.AlignHCenter; color: root.wbText; font.pixelSize: 13; background: null
+                                            text: String(oneNav.at + 1)
+                                            validator: IntValidator { bottom: 1; top: Math.max(1, oneNav.n) }
+                                            onAccepted: { oneNav.go(parseInt(text, 10) - 1); oneNav.forceActiveFocus(); }
+                                        }
+                                    }
+                                    Text { textFormat: Text.PlainText; text: "of " + oneNav.n; font.pixelSize: 13; color: root.wbTextSec }
+                                    Item { Layout.fillWidth: true }
+                                    WbButton { label: "Next  ›"; active: oneNav.at < oneNav.n - 1; onClicked: { oneNav.go(oneNav.at + 1); oneNav.forceActiveFocus(); } }
+                                }
+                                Flow {   // quick jump strip (up to 60; beyond that, type the number)
+                                    Layout.fillWidth: true
+                                    visible: oneNav.n > 1 && oneNav.n <= 60
+                                    spacing: 4
+                                    Repeater {
+                                        model: oneNav.n <= 60 ? oneNav.n : 0
+                                        Rectangle {
+                                            property var rr: root.respList[index]
+                                            width: 30; height: 24; radius: 6
+                                            color: index === oneNav.at ? root.wbPrimary : root.wbSurfaceRaised
+                                            border.color: rr && rr.confirmed ? root.wbSuccess : root.wbBorder; border.width: 1
+                                            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: String(index + 1); font.pixelSize: 10; color: index === oneNav.at ? "white" : root.wbTextSec }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { oneNav.go(index); oneNav.forceActiveFocus(); } }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: oneCard.implicitHeight + 32
+                                    radius: 14; color: root.wbSurfaceRaised; border.color: root.wbBorder; border.width: 1
+                                    ColumnLayout {
+                                        id: oneCard
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16
+                                        spacing: 14
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) : ""; font.pixelSize: 12; font.family: "monospace"; color: root.wbTextSec
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
+                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.fmtTime(oneNav.r.submittedAt) : ""; font.pixelSize: 11; color: root.wbTextTert }
+                                            Item { Layout.fillWidth: true }
+                                            Badge { visible: !!(oneNav.r && oneNav.r.confirmed); label: "Receipt sent" }
+                                            WbButton { visible: !!(oneNav.r && !oneNav.r.confirmed); implicitHeight: 28; label: "Send receipt"; onClicked: root.confirmResponse(oneNav.r.respondent) }
+                                        }
+                                        Repeater {
+                                            model: root.sel ? root.sel.questions : []
+                                            ColumnLayout {
                                                 Layout.fillWidth: true
-                                                property string v: root.answerText(parent.q, modelData.value)
-                                                text: v.length ? v : "(no answer)"
-                                                font.pixelSize: 13
-                                                color: v.length ? root.wbText : root.wbTextTert
-                                                wrapMode: Text.WordWrap
+                                                spacing: 3
+                                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: (index + 1) + ". " + modelData.text; font.pixelSize: 12; color: root.wbTextTert }
+                                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                                    property string v: root.answerText(modelData, root.answerOf(oneNav.r, modelData.id))
+                                                    text: v.length ? v : "(no answer)"; font.pixelSize: 15; color: v.length ? root.wbText : root.wbTextTert }
                                             }
                                         }
                                     }
                                 }
+                                Text { textFormat: Text.PlainText; text: "Tip: ← → move between responses, Home / End jump to the first / last."; font.pixelSize: 11; color: root.wbTextTert }
                             }
                         }
                     }
@@ -798,6 +1178,19 @@ Item {
                         visible: !!(root.sel && !root.sel.mine)
                         spacing: 14
 
+                        Text { textFormat: Text.PlainText
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
+                            visible: text.length > 0
+                            text: {
+                                var f = root.sel, parts = [];
+                                if (!f) return "";
+                                if (f.showResponseCount) parts.push(root.plural((f.confirmations || []).length, "response", "responses") + " received so far");
+                                if (f.maxResponses) parts.push("limited to " + f.maxResponses);
+                                if (f.expiresAt) parts.push((f.status === "closed" ? "closed " : "closes ") + root.fmtTime(f.expiresAt));
+                                if (f.answerDraft && !f.mySubmitted) parts.push("your unsent answers were restored");
+                                return parts.join("  ·  ");
+                            }
+                        }
                         // status banner (submitted / confirmed / closed / not allowed)
                         Rectangle {
                             Layout.fillWidth: true
@@ -924,7 +1317,7 @@ Item {
                                     }
                                 }
                                 Repeater {
-                                    model: (qBlock.qt === "radioButtons" || qBlock.qt === "checkbox") ? (qBlock.q.options || []) : []
+                                    model: (qBlock.qt === "radioButtons" || qBlock.qt === "checkbox") ? (qBlock.q.options || []) : (qBlock.qt === "boolean" ? ["Yes", "No"] : [])
                                     Rectangle {
                                         id: opt
                                         Layout.fillWidth: true
@@ -932,7 +1325,7 @@ Item {
                                         radius: 10
                                         property bool multi: qBlock.qt === "checkbox"
                                         property bool on: multi ? root.toList(root.answers[qBlock.q.id]).indexOf(index) >= 0
-                                                                : root.answers[qBlock.q.id] === index
+                                                                : (qBlock.qt === "boolean" ? root.answers[qBlock.q.id] === (index === 0) : root.answers[qBlock.q.id] === index)
                                         color: on ? root.wbPrimarySubtle : (optMa.containsMouse ? root.wbBorderSubtle : root.wbSurfaceRaised)
                                         border.color: on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)
                                         border.width: 1
@@ -956,7 +1349,7 @@ Item {
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: opt.multi ? root.toggleChoice(qBlock.q.id, index) : root.setAnswer(qBlock.q.id, index)
+                                            onClicked: opt.multi ? root.toggleChoice(qBlock.q.id, index) : root.setAnswer(qBlock.q.id, qBlock.qt === "boolean" ? index === 0 : index)
                                         }
                                     }
                                 }
@@ -1265,19 +1658,28 @@ Item {
             anchors.margins: 22
             spacing: 12
 
-            Text { textFormat: Text.PlainText; text: "New form"; font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
+            RowLayout {
+                Layout.fillWidth: true
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.draftId ? "Edit draft" : "New form"; font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
+                Text { textFormat: Text.PlainText; visible: !!root.draftId; text: root.draftDirty ? "saving..." : "draft saved"; font.pixelSize: 11; color: root.wbTextTert }
+            }
 
             Flickable {
                 id: createFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 contentWidth: width
-                contentHeight: createCol.implicitHeight
+                contentHeight: createLoader.item ? createLoader.item.implicitHeight : 0
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                ColumnLayout {
+                // Re-created on open / reorder (rebuildBuilder): typed-in fields break their
+                // bindings, so a fresh instance is the only way to show loaded / moved content.
+                Loader {
+                    id: createLoader
+                    active: root.builderLive
+                    sourceComponent: ColumnLayout {
                     id: createCol
                     width: createFlick.width - 10
                     spacing: 12
@@ -1365,12 +1767,16 @@ Item {
                                             onTextChanged: if (text !== String(dq.d.text || "")) root.setDraft(dq.qi, "text", text)
                                         }
                                     }
-                                    Text { textFormat: Text.PlainText;
-                                        text: "Remove"
-                                        visible: root.draftQuestions.length > 1
-                                        font.pixelSize: 11
-                                        color: root.wbTextTert
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.removeDraftQuestion(dq.qi) }
+                                    Repeater {   // per-question actions
+                                        model: [{ l: "\u2191", tip: "up", on: dq.qi > 0 }, { l: "\u2193", tip: "down", on: dq.qi < root.draftQuestions.length - 1 },
+                                                { l: "Copy", tip: "copy", on: true }, { l: "Remove", tip: "remove", on: root.draftQuestions.length > 1 }]
+                                        Text { textFormat: Text.PlainText
+                                            visible: modelData.on
+                                            text: modelData.l; font.pixelSize: modelData.l.length === 1 ? 14 : 11; color: root.wbTextTert
+                                            MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor
+                                                onClicked: modelData.tip === "up" ? root.moveDraftQuestion(dq.qi, -1) : modelData.tip === "down" ? root.moveDraftQuestion(dq.qi, 1)
+                                                         : modelData.tip === "copy" ? root.duplicateDraftQuestion(dq.qi) : root.removeDraftQuestion(dq.qi) }
+                                        }
                                     }
                                 }
                                 Flow {
@@ -1464,21 +1870,67 @@ Item {
                             }
                         }
                     }
+                    SectionLabel { text: "LIMITS & TIMING (OPTIONAL)" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        ColumnLayout {
+                            spacing: 4
+                            Text { textFormat: Text.PlainText; text: "Close after this many answers"; font.pixelSize: 11; color: root.wbTextTert }
+                            InputBox { implicitWidth: 120; implicitHeight: 36
+                                TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                    font.pixelSize: 13; background: null; placeholderText: "no limit"; validator: IntValidator { bottom: 1 }
+                                    text: root.draftMax; onTextChanged: root.draftMax = text } }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Text { textFormat: Text.PlainText; text: "Close at (yyyy-MM-dd HH:mm)"; font.pixelSize: 11; color: root.wbTextTert }
+                            InputBox { Layout.fillWidth: true; implicitHeight: 36
+                                TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                    font.pixelSize: 13; background: null; placeholderText: "no end date"
+                                    text: root.draftCloseAt; onTextChanged: root.draftCloseAt = text } }
+                        }
+                    }
+                    Rectangle {
+                        implicitWidth: scT.implicitWidth + 22; implicitHeight: 30; radius: 15
+                        color: root.draftShowCount ? root.wbPrimarySubtle : "transparent"
+                        border.color: root.draftShowCount ? root.wbPrimary : root.wbBorder; border.width: 1
+                        Text { id: scT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShowCount ? "\u2713 " : "") + "Show respondents how many answers came in"; font.pixelSize: 12; color: root.draftShowCount ? root.wbPrimary : root.wbTextSec }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftShowCount = !root.draftShowCount }
+                    }
                     Text { textFormat: Text.PlainText;
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         font.pixelSize: 12
                         color: root.wbTextTert
-                        text: "The form (title, questions, who may answer) is public on the network. Answers are encrypted to your key."
+                        text: "The form (title, questions, who may answer) is public on the network. Answers are encrypted to this form's own key. Drafts stay on this device."
                     }
+                }
                 }
             }
 
+            RowLayout {   // schedule
+                Layout.fillWidth: true
+                visible: root.draftScheduling
+                spacing: 8
+                Text { textFormat: Text.PlainText; text: "Publish at"; font.pixelSize: 12; color: root.wbTextSec }
+                InputBox { Layout.fillWidth: true; implicitHeight: 36
+                    TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                        font.pixelSize: 13; background: null; placeholderText: "yyyy-MM-dd HH:mm"; text: root.draftPublishAt; onTextChanged: root.draftPublishAt = text } }
+                WbButton { primary: true; label: "Schedule"; onClicked: root.doSchedule() }
+            }
+            Text { textFormat: Text.PlainText; visible: root.draftScheduling; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 11; color: root.wbTextTert
+                text: "There is no server: the form goes out when WhisperBox is running on this computer at (or after) that time." }
+
             RowLayout {
                 Layout.fillWidth: true
+                WbButton { visible: !!root.draftId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
                 Item { Layout.fillWidth: true }
-                WbButton { label: "Cancel"; onClicked: root.showCreate = false }
-                WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish form"; active: !root.busy("createForm"); onClicked: root.doCreate() }
+                WbButton { label: "Close"; onClicked: root.closeBuilder() }
+                WbButton { label: "Save draft"; onClicked: root.saveCurrentDraft(null, function () { root.toast("Draft saved"); }) }
+                WbButton { label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
+                WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
             }
         }
     }
