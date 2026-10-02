@@ -11,8 +11,9 @@ Each release folder has `SHA256SUMS`; verify before publishing.
 | `logos-whisperbox_core-module-lib-0.3.1.lgx` | Basecamp core module `whisperbox_core` 0.3.1 (linux-amd64, manifestVersion 0.3.0) | depends on `delivery_module` (0.2.3 tested) |
 | `logos-whisperbox-module-0.3.1.lgx` | Basecamp view `whisperbox` 0.3.1 (ui_qml) | install together with the core (same version) |
 
-What's new: hide forms, see your own answers, per-form sealing keys, Keycard-sealed forms (Android),
-Basecamp restarts, no public form listing - see CHANGELOG.md on `v0.2.0`.
+What's new: hide forms, see your own answers, identity kept across Basecamp restarts, no
+public form listing, per-form sealing keys, Keycard-sealed forms (Android) - see
+CHANGELOG.md on `v0.2.0`.
 
 ## Publishing to the mesh repos (jimmy-crib)
 
