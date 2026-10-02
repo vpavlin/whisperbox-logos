@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 desktop / 0.3.2 Android (2026-10-02)
+
+- **Hide forms** (both apps): Hide/Unhide on any form; hidden forms move to a collapsed
+  "Hidden" section. Local only - nothing is deleted from the shared log, your keys and
+  answers stay. Core: `hideForm` / `unhideForm`, `snapshot.hidden`, `hidden.json`.
+- **See your own answers** on forms you answered. The sent answers are sealed to the
+  creator, so each app keeps a private local copy at submit (`my_answers.json` /
+  `wb-myanswers`); answers sent by older versions show a note instead.
+- **Identity kept across restarts** (desktop): the data folder is never a relative path.
+- **No public listing**: only your forms, answered forms and forms opened from a link.
+- `hub/fill-form`: answer a form N times from fresh identities (test data).
+
 ## Unreleased - per-form keys, Keycard (Android 0.3.0)
 
 - **Android: forms sealed with your Keycard.** "Answers open with: My Keycard" exports the

@@ -159,6 +159,7 @@ void WhisperboxCoreImpl::onContextReady() {
     m_clock.primeFrom(m_log);
     loadWatched();
     loadMySubmissions();
+    loadLocalPrefs();
     loadPins();
     bootstrapDelivery();
     fprintf(stderr, "WHISPERBOX delivery bootstrapped nodeReady=%d\n", (int)m_nodeReady);
@@ -357,6 +358,27 @@ void WhisperboxCoreImpl::loadMySubmissions() {
             if (it.value().is_string() && !it.value().get<std::string>().empty()) m_myConfirmIds[lc(it.key())] = it.value().get<std::string>();
         }
     } catch (...) { /* ignore */ }
+}
+void WhisperboxCoreImpl::loadLocalPrefs() {
+    m_hidden.clear(); m_myAnswers.clear();
+    try {
+        std::ifstream h(m_dataDir + "/hidden.json");
+        if (h) { json a = json::parse(std::string((std::istreambuf_iterator<char>(h)), std::istreambuf_iterator<char>()));
+                 if (a.is_array()) for (auto& x : a) if (x.is_string()) m_hidden.insert(lc(x.get<std::string>())); }
+    } catch (...) { /* ignore */ }
+    try {
+        std::ifstream m(m_dataDir + "/my_answers.json");
+        if (m) { json o = json::parse(std::string((std::istreambuf_iterator<char>(m)), std::istreambuf_iterator<char>()));
+                 if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) m_myAnswers[lc(it.key())] = it.value(); }
+    } catch (...) { /* ignore */ }
+}
+void WhisperboxCoreImpl::saveHidden() {
+    json a = json::array(); for (auto& id : m_hidden) a.push_back(id);
+    writeAtomic(m_dataDir + "/hidden.json", a.dump());
+}
+void WhisperboxCoreImpl::saveMyAnswers() {
+    json o = json::object(); for (auto& kv : m_myAnswers) o[kv.first] = kv.second;
+    writeAtomic(m_dataDir + "/my_answers.json", o.dump());
 }
 void WhisperboxCoreImpl::saveMySubmissions() {
     json o = json::object();
@@ -678,6 +700,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["linkMismatch"] = linkMismatch;
         f["mine"] = mine;
         f["mySubmitted"] = submitted;
+        f["hidden"] = m_hidden.count(fid) > 0;
+        if (m_myAnswers.count(fid)) f["myAnswers"] = m_myAnswers[fid];
         f["myConfirmed"] = confirmed;
         f["allowed"] = allowed;
         f["canRespond"] = trusted && !mine && !submitted && allowed && f["status"].get<std::string>() == "open"
@@ -698,6 +722,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     json pendingArr = json::array();
     for (auto& id : m_watched) if (!state["forms"].contains(id)) pendingArr.push_back(id);
     snap["pendingForms"] = pendingArr;
+    json hiddenArr = json::array(); for (auto& id : m_hidden) hiddenArr.push_back(id);
+    snap["hidden"] = hiddenArr;
     json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
@@ -930,6 +956,8 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         m_mySubmissions.insert(formId);   // local, private: "I already answered this"
         m_myConfirmIds[formId] = confirmationId;
         saveMySubmissions();
+        m_myAnswers[formId] = json({{"answers", answers}, {"submittedAt", submittedAt}});
+        saveMyAnswers();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
     } catch (const std::exception& ex) {
         fprintf(stderr, "WHISPERBOX submit EXCEPTION (%s): %s\n", typeid(ex).name(), ex.what());
@@ -973,9 +1001,31 @@ std::string WhisperboxCoreImpl::deleteLocalForm(std::string formId) {
     saveWatched();
     m_mySubmissions.erase(formId);
     saveMySubmissions();
+    m_myAnswers.erase(formId);
+    saveMyAnswers();
     publishState();
     json out = {{"ok", true}, {"formId", formId}};
     return out.dump();
+}
+
+// Hide a form from my lists (any form: mine, answered, opened). Local only - the form
+// stays in the shared log, my keys and answers stay, and unhideForm brings it back.
+std::string WhisperboxCoreImpl::hideForm(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(trim(formId));
+    if (formId.empty()) return json({{"ok", false}, {"error", "formId required"}}).dump();
+    m_hidden.insert(formId);
+    saveHidden();
+    publishState();
+    return json({{"ok", true}, {"formId", formId}}).dump();
+}
+std::string WhisperboxCoreImpl::unhideForm(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(trim(formId));
+    m_hidden.erase(formId);
+    saveHidden();
+    publishState();
+    return json({{"ok", true}, {"formId", formId}}).dump();
 }
 
 std::string WhisperboxCoreImpl::importIdentity(std::string privHex) {

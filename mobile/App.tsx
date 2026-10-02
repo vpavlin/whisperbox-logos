@@ -211,8 +211,11 @@ function Banner({ text, tone = "info" }: { text: string; tone?: "ok" | "info" | 
 function Home({ snap, push, openLink }: Ctx) {
   const [link, setLink] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const forms = snap.state.forms as Record<string, any>;
-  const ids = Object.keys(forms).sort((a, b) => (forms[b].createdAt || 0) - (forms[a].createdAt || 0));
+  const all = Object.keys(forms).sort((a, b) => (forms[b].createdAt || 0) - (forms[a].createdAt || 0));
+  const hidden = all.filter((i) => forms[i].hidden);   // local hide (Hide on the form screen)
+  const ids = all.filter((i) => !forms[i].hidden);
   const mine = ids.filter((i) => forms[i].mine);
   const answered = ids.filter((i) => !forms[i].mine && forms[i].mySubmitted);
   // No public directory: only forms you own, answered, or opened from a link (anyone can
@@ -282,6 +285,14 @@ function Home({ snap, push, openLink }: Ctx) {
         <Section title="MY FORMS" list={mine} />
         <Section title="ANSWERED" list={answered} />
         <Section title="OPENED FROM LINKS" list={open} />
+        {hidden.length ? (
+          <View style={{ marginTop: 18 }}>
+            <Pressable onPress={() => setShowHidden((x) => !x)} accessibilityRole="button">
+              <Label>HIDDEN  {hidden.length}   ·  {showHidden ? "hide" : "show"}</Label>
+            </Pressable>
+            {showHidden ? hidden.map((id) => <Row key={id} id={id} />) : null}
+          </View>
+        ) : null}
         <View style={{ height: 96 }} />
       </ScrollView>
       <Pressable onPress={() => push({ k: "create" })} style={({ pressed }) => [st.fab, pressed && { backgroundColor: C.primaryHover }]} accessibilityLabel="New form">
@@ -413,7 +424,15 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
 
   return (
     <View style={st.fill}>
-      <Header onBack={pop} right={<Btn label="Share" onPress={() => push({ k: "share", id })} />} />
+      <Header onBack={pop} right={
+        <View style={st.joinRow}>
+          <Btn label={f.hidden ? "Unhide" : "Hide"} onPress={() => {
+            if (f.hidden) { client.unhideForm(id); toast("Back in your lists"); }
+            else { client.hideForm(id); toast("Hidden - find it under Hidden on the home screen"); pop(); }
+          }} />
+          <Btn label="Share" onPress={() => push({ k: "share", id })} />
+        </View>
+      } />
       <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
           <Text style={st.h1}>{f.title || "(untitled)"}</Text>
@@ -482,6 +501,26 @@ function FormScreen({ snap, pop, push, toast, id }: Ctx & { id: string }) {
           ) : (
             <View style={{ marginTop: 18 }}>
               {banner ? <Banner tone={banner.tone} text={banner.text} /> : null}
+              {f.mySubmitted ? (
+                <View style={{ marginTop: 16 }}>
+                  <Label>YOUR ANSWERS</Label>
+                  {f.myAnswers ? (
+                    <>
+                      {(f.questions || []).map((q: any) => {
+                        const v = (f.myAnswers.answers || []).find((a: any) => a.questionId === q.id)?.value;
+                        const t = answerText(q, v);
+                        return (
+                          <View key={q.id} style={{ marginTop: 10 }}>
+                            <Text style={st.qSmall}>{q.text}</Text>
+                            <Text style={[st.answer, !t && { color: C.text3 }]}>{t || "(no answer)"}</Text>
+                          </View>
+                        );
+                      })}
+                      <Text style={[st.muted, { marginTop: 12, fontSize: 12 }]}>Kept only on this phone. What went out is sealed - only the creator can open it.</Text>
+                    </>
+                  ) : <Text style={st.muted}>Sent from an older WhisperBox that didn't keep a copy. Only the creator can read them now.</Text>}
+                </View>
+              ) : null}
               {f.canRespond ? f.questions.map((q: any, qi: number) => {
                 const qt = normType(q.type); const invalid = showErrors && missing(q);
                 return (

@@ -52,6 +52,8 @@ public:
     // --- manage ---
     std::string joinForm(std::string formId);
     std::string deleteLocalForm(std::string formId);
+    std::string hideForm(std::string formId);
+    std::string unhideForm(std::string formId);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
@@ -150,4 +152,11 @@ private:
     // Appended last: layout rule above.
     std::string m_storageNote;
     bool m_storageOk = true;
+    // Local-only: forms hidden from my lists (nothing is deleted - the log is shared), and
+    // a private copy of what I answered (the sealed blob only opens for the creator).
+    std::set<std::string> m_hidden;
+    std::map<std::string, whisperbox::json> m_myAnswers;
+    void loadLocalPrefs();
+    void saveHidden();
+    void saveMyAnswers();
 };

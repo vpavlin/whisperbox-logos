@@ -425,6 +425,22 @@ int main(int argc, char** argv) {
               "after a restart every form's answers still open (keys re-derived)");
     }
 
+    // ── hide forms + my own answers (local, persisted) ───────────────────────────
+    std::printf("hide + my answers:\n");
+    {
+        CHECK(B->call(B->core->hideForm(fid)).value("ok", false), "hideForm ok");
+        CHECK(formOf(*B, fid).value("hidden", false) && B->snap()["hidden"].size() == 1, "form flagged hidden + listed in snapshot.hidden");
+        dumpFixture(*B, "hidden");      // one answered form hidden (sidebar "Hidden" section)
+        json mine = formOf(*B, fid)["myAnswers"];
+        CHECK(mine.is_object() && mine["answers"].dump() == answers.dump(), "my submitted answers are kept (sealed blob opens only for the creator)");
+        B->stop(); B->start();
+        CHECK(formOf(*B, fid).value("hidden", false), "hidden survives a restart");
+        CHECK(formOf(*B, fid).contains("myAnswers") && formOf(*B, fid)["myAnswers"]["answers"].dump() == answers.dump(), "my answers survive a restart");
+        CHECK(formOf(*A, fid).value("hidden", true) == false, "hiding is local - other peers unaffected");
+        CHECK(B->call(B->core->unhideForm(fid)).value("ok", false) && !formOf(*B, fid).value("hidden", true), "unhideForm brings it back");
+        CHECK(!formOf(*A, fid).contains("myAnswers"), "the creator has no 'myAnswers' for a form it didn't answer");
+    }
+
     // ── data folder: never relative, adopt an identity kept elsewhere ────────────
     std::printf("data folder:\n");
     {

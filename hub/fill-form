@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""fill-form - answer a WhisperBox form N times, each time as a NEW random identity.
+
+Test data for the creator's response views (one response per respondent is the protocol
+rule, so every answer needs its own identity). Runs against a dedicated headless hub
+(default profile wb-r) whose identity it overwrites - never point it at a hub whose
+identity matters.
+
+  fill-form 'whisperbox://form?id=form-xxxx&by=0x...' -n 12 [--hub R] [--seed 7]
+
+Answers are generated per question type: choice questions pick options (skewed so charts
+aren't flat), text questions draw from small pools keyed on the question wording, optional
+questions are sometimes skipped.
+"""
+import argparse, json, random, secrets, subprocess, sys, time, re
+from pathlib import Path
+
+WB = str(Path.home() / "whisperbox-hub" / "wb")
+
+def call(hub, method, *args):
+    r = subprocess.run([WB, hub, "raw", method, *args], capture_output=True, text=True)
+    try: return json.loads(r.stdout)
+    except Exception: sys.exit(f"{method}: {r.stdout.strip() or r.stderr.strip()}")
+
+NAMES = ["Ana", "Jirka", "Mei", "Tomáš", "Priya", "Lukas", "Zuzana", "Omar", "Elena", "Kofi", "Sára", "Ben", "Yuki", "Marek", "Aisha", "Pavel"]
+SHORT = ["Sounds good", "Not sure yet", "Yes, definitely", "Maybe next time", "Works for me", "Depends on the date",
+         "I'd rather not say", "Absolutely", "Pass", "Let's discuss it in person"]
+LONG = ["Honestly the last one was great - more of the same, but start a bit later so people can make it after work.",
+        "I liked the format, but it ran long. Two shorter sessions would be easier to fit in.",
+        "Please consider a vegetarian option this time; last time there was nothing for me.",
+        "No strong opinion. Happy with whatever the majority picks.",
+        "The location was hard to reach by public transport. Somewhere central would help a lot.",
+        "Everything was smooth. Maybe share the agenda a few days earlier?",
+        "I'd love more time for open discussion and less presenting.",
+        "Bring back the quiz - that was the best part 😄",
+        "Could we try a hybrid option for people who can't travel?",
+        "Too noisy last time; a quieter place would be nicer."]
+
+def text_answer(q, rng, long):
+    t = q.get("text", "").lower()
+    if re.search(r"\bname\b|who are you", t): return rng.choice(NAMES)
+    if "email" in t or "e-mail" in t: return rng.choice(NAMES).lower().replace("á", "a").replace("š", "s") + "@example.org"
+    if re.search(r"how many|number|age|years|count|\bhow much\b", t): return str(rng.choice([1, 2, 2, 3, 3, 3, 4, 5, 8, 10, 12]))
+    if long or re.search(r"why|comment|feedback|describe|suggest|anything|thoughts|explain|improve", t): return rng.choice(LONG)
+    return rng.choice(SHORT)
+
+def answers_for(form, rng):
+    out = []
+    for q in form.get("questions", []):
+        typ, req = q.get("type", "text"), bool(q.get("required"))
+        if not req and rng.random() < 0.25: out.append({"questionId": q["id"], "value": [] if typ == "checkbox" else ("" if typ in ("text", "textarea") else None)}); continue
+        opts = q.get("options") or []
+        if typ == "radioButtons" and opts:
+            w = [1.0 / (i + 1) ** 0.8 for i in range(len(opts))]   # skewed, not uniform
+            out.append({"questionId": q["id"], "value": rng.choices(range(len(opts)), weights=w)[0]})
+        elif typ == "checkbox" and opts:
+            pick = sorted(rng.sample(range(len(opts)), k=rng.randint(1 if req else 0, max(1, min(3, len(opts))))))
+            out.append({"questionId": q["id"], "value": pick})
+        else:
+            out.append({"questionId": q["id"], "value": text_answer(q, rng, typ == "textarea")})
+    return out
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("link"); ap.add_argument("-n", type=int, default=8)
+    ap.add_argument("--hub", default="R"); ap.add_argument("--seed", type=int); ap.add_argument("--gap", type=float, default=2.0)
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    imp = call(a.hub, "importForm", a.link)
+    fid = imp.get("formId") or sys.exit(f"importForm: {imp}")
+    for _ in range(60):                       # wait for the form itself to sync
+        form = call(a.hub, "snapshot")["state"]["forms"].get(fid)
+        if form: break
+        time.sleep(2)
+    else: sys.exit(f"{fid} did not sync within 2 min - is the creator's device online?")
+    if form.get("whitelist", {}).get("type") == "addresses": sys.exit("members-only form: random identities are not on its list")
+    if form.get("status") != "open": sys.exit("form is closed")
+    print(f"{fid}: {form.get('title')!r}, {len(form.get('questions', []))} questions - submitting {a.n} responses")
+    for i in range(a.n):
+        who = call(a.hub, "importIdentity", secrets.token_hex(32))["address"]
+        call(a.hub, "deleteLocalForm", fid)          # forget "already answered" from the previous identity
+        call(a.hub, "importForm", a.link)
+        r = call(a.hub, "submitResponse", fid, json.dumps(answers_for(form, rng)))
+        print(f"  {i + 1:2d}/{a.n} {who}  {'sent' if r.get('ok') else 'FAILED: ' + str(r.get('error'))}")
+        time.sleep(a.gap)
+
+if __name__ == "__main__":
+    main()

@@ -44,6 +44,7 @@ Item {
     // ── state ──
     property var st: ({})
     property string selectedId: ""
+    property bool showHidden: false   // sidebar: expand the "Hidden" section
     property string toastMsg: ""
     property bool showCreate: false
     property bool showShare: false
@@ -171,7 +172,7 @@ Item {
 
     // Sidebar rows: section headers + form rows, grouped by relationship.
     readonly property var sidebarRows: {
-        var mine = [], answered = [], open = [], rows = [];
+        var mine = [], answered = [], open = [], hidden = [], rows = [];
         var ids = Object.keys(root.forms);
         ids.sort(function (a, b) { return (root.forms[b].createdAt || 0) - (root.forms[a].createdAt || 0); });
         for (var i = 0; i < ids.length; i++) {
@@ -179,6 +180,7 @@ Item {
             // No public directory: a form is listed only if it's yours, you answered it, or you
             // opened its link. Everything else the node relays stays invisible (anyone can
             // publish, so a public list would be a spam channel).
+            if (f.hidden) { hidden.push(f.id); continue; }   // local hide (Hide button)
             if (f.mine) mine.push(f.id);
             else if (f.mySubmitted) answered.push(f.id);
             else if (root.watchedIds.indexOf(f.id) >= 0) open.push(f.id);
@@ -192,6 +194,10 @@ Item {
         add("MY FORMS", mine, "f");
         add("ANSWERED", answered, "f");
         add("OPENED FROM LINKS", open, "f");
+        if (hidden.length > 0) {
+            rows.push({ kind: "hh", label: "HIDDEN  " + hidden.length + "   \u00B7  " + (root.showHidden ? "hide" : "show") });
+            if (root.showHidden) for (var h = 0; h < hidden.length; h++) rows.push({ kind: "f", id: hidden[h] });
+        }
         return rows;
     }
 
@@ -234,6 +240,13 @@ Item {
         });
     }
     function confirmResponse(addr) { act("confirmResponse", [root.selectedId, addr], "Receipt sent"); }
+    function toggleHidden() {
+        var f = root.sel; if (!f) return;
+        var hide = !f.hidden;
+        act(hide ? "hideForm" : "unhideForm", [f.id], hide ? "Hidden - find it under Hidden in the sidebar" : "Back in your lists", function () {
+            if (hide && !root.showHidden) root.selectedId = "";
+        });
+    }
     function closeSelected() { act("closeForm", [root.selectedId], "Form closed - no new responses"); }
     function openShare() {
         var id = root.selectedId;
@@ -437,19 +450,26 @@ Item {
                     delegate: Item {
                         id: row
                         width: formList.width
-                        height: modelData.kind === "h" ? 30 : 54
+                        property bool isHead: modelData.kind === "h" || modelData.kind === "hh"
+                        height: isHead ? 30 : 54
                         property var f: modelData.kind === "f" ? root.forms[modelData.id] : null
-                        property bool current: modelData.kind !== "h" && modelData.id === root.selectedId
+                        property bool current: !isHead && modelData.id === root.selectedId
 
                         SectionLabel {
-                            visible: modelData.kind === "h"
+                            visible: row.isHead
                             anchors.left: parent.left
                             anchors.bottom: parent.bottom
                             anchors.bottomMargin: 6
-                            text: modelData.kind === "h" ? modelData.label : ""
+                            text: row.isHead ? modelData.label : ""
+                        }
+                        MouseArea {
+                            visible: modelData.kind === "hh"
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showHidden = !root.showHidden
                         }
                         Rectangle {
-                            visible: modelData.kind !== "h"
+                            visible: !row.isHead
                             anchors.fill: parent
                             radius: 10
                             color: row.current ? root.wbPrimarySubtle : (rowMa.containsMouse ? root.wbSurface : "transparent")
@@ -619,6 +639,7 @@ Item {
                             color: root.wbText
                             wrapMode: Text.WordWrap
                         }
+                        WbButton { visible: !!root.sel; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
                         WbButton { visible: !!root.sel; label: "Share"; onClicked: root.openShare() }
                     }
                     Flow {
@@ -807,6 +828,44 @@ Item {
                                     if (!f.publicKey) return "Still syncing this form...";
                                     return "";
                                 }
+                            }
+                        }
+
+                        // What I answered (a private local copy - the sent answers are sealed to the creator)
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: !!(root.sel && !root.sel.mine && root.sel.mySubmitted)
+                            spacing: 10
+                            SectionLabel { text: "YOUR ANSWERS" }
+                            Text { textFormat: Text.PlainText
+                                visible: !!(root.sel && root.sel.mySubmitted && !root.sel.myAnswers)
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Sent from an older WhisperBox that didn't keep a copy. Only the creator can read them now."
+                                font.pixelSize: 12; color: root.wbTextTert
+                            }
+                            Repeater {
+                                model: (root.sel && root.sel.myAnswers) ? root.sel.questions : []
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    property var v: {
+                                        var a = root.sel.myAnswers.answers || [];
+                                        for (var i = 0; i < a.length; i++) if (a[i].questionId === modelData.id) return a[i].value;
+                                        return null;
+                                    }
+                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                        text: modelData.text; font.pixelSize: 12; color: root.wbTextTert }
+                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                        property string t: root.answerText(modelData, parent.v)
+                                        text: t.length ? t : "(no answer)"
+                                        font.pixelSize: 14; color: t.length ? root.wbText : root.wbTextTert }
+                                }
+                            }
+                            Text { textFormat: Text.PlainText
+                                visible: !!(root.sel && root.sel.myAnswers)
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "Kept only on this device. What went out is sealed - only the creator can open it."
+                                font.pixelSize: 11; color: root.wbTextTert
                             }
                         }
 

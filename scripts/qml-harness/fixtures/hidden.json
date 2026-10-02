@@ -5,14 +5,16 @@
     "admDropSig": 0,
     "admDropType": 0,
     "legacyReseeds": 0,
-    "rbsrRx": 27,
-    "rxDup": 55,
-    "rxNew": 7,
-    "rxRaw": 91,
-    "rxSeen": 35,
-    "txTotal": 21
+    "rbsrRx": 61,
+    "rxDup": 361,
+    "rxNew": 4,
+    "rxRaw": 427,
+    "rxSeen": 191,
+    "txTotal": 43
   },
-  "hidden": [],
+  "hidden": [
+    "form-8afa151d"
+  ],
   "identity": {
     "address": "0x875eec8b3228ed7e9a637a1511ba16c253b9ac9c",
     "pubHex": "02d63698ec49fcf832311ed7e79fea8fd91b00bddf59ff147f305a42559ac4e8b7"
@@ -24,18 +26,122 @@
   "nodeReady": true,
   "pendingForms": [],
   "state": {
-    "closeHlc": {},
+    "closeHlc": {
+      "form-8afa151d": {
+        "ctr": 0,
+        "dev": "wb-a2ad41129115",
+        "wall": 1790919844626
+      }
+    },
     "creator": null,
     "dropped": {
       "count": 0,
       "reasons": {}
     },
     "feed": [
-      "form-8afa151d",
+      "form-4d5b0631",
+      "form-legacykey",
       "form-e2b15803",
-      "form-cb84b597"
+      "form-cb84b597",
+      "form-6a4abe5b",
+      "form-15ad445c",
+      "form-9e960936"
     ],
     "forms": {
+      "form-15ad445c": {
+        "allowed": true,
+        "canRespond": true,
+        "confirmations": [],
+        "contested": false,
+        "createdAt": 1790919846948,
+        "creator": "0xc254ca20564d53ec4eb01355300d6a4420f605c0",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-15ad445c",
+        "linkMismatch": false,
+        "mine": false,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "0205aca47026b2c30514f147e62fd9f29bbfe645afb8204ac0ea1b437040602d30",
+        "questions": [
+          {
+            "id": "q1",
+            "text": "?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Fresh",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
+      "form-4d5b0631": {
+        "allowed": true,
+        "canRespond": false,
+        "confirmations": [],
+        "contested": true,
+        "createdAt": 1,
+        "creator": "0xf1d6f1913f87982d8ea9c0fc8840b34d9bf103ac",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-4d5b0631",
+        "linkMismatch": false,
+        "mine": false,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "022d8657d407344a96ee03bcad343611f3ca133fdc3e9c9704cd9f0c59db14a3d6",
+        "questions": [
+          {
+            "id": "q1",
+            "required": true,
+            "text": "Salary?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Salary survey",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
+      "form-6a4abe5b": {
+        "allowed": true,
+        "canRespond": true,
+        "confirmations": [],
+        "contested": false,
+        "createdAt": 1790919846290,
+        "creator": "0xc254ca20564d53ec4eb01355300d6a4420f605c0",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-6a4abe5b",
+        "linkMismatch": false,
+        "mine": false,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "0283d682e26fd32df140b3dbd28e272efc9632fa66a964d1b92fe1416e23139220",
+        "questions": [
+          {
+            "id": "q1",
+            "text": "?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "While D was away",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
       "form-8afa151d": {
         "allowed": true,
         "canRespond": false,
@@ -47,7 +153,7 @@
         "creator": "0xc254ca20564d53ec4eb01355300d6a4420f605c0",
         "description": "Friday team lunch",
         "expiresAt": null,
-        "hidden": false,
+        "hidden": true,
         "id": "form-8afa151d",
         "linkMismatch": false,
         "mine": false,
@@ -103,8 +209,39 @@
             "type": "textarea"
           }
         ],
-        "status": "open",
+        "status": "closed",
         "title": "Lunch poll",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
+      },
+      "form-9e960936": {
+        "allowed": true,
+        "canRespond": true,
+        "confirmations": [],
+        "contested": false,
+        "createdAt": 1790919885426,
+        "creator": "0xc254ca20564d53ec4eb01355300d6a4420f605c0",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-9e960936",
+        "linkMismatch": false,
+        "mine": false,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "03e4e1c86cc13eb91c13527ec26e6d8ab135e468ac2f10c61e81eb17ec50401090",
+        "questions": [
+          {
+            "id": "q1",
+            "text": "?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Second",
         "whitelist": {
           "type": "none",
           "value": ""
@@ -183,6 +320,37 @@
           "type": "addresses",
           "value": "0x875eec8b3228ed7e9a637a1511ba16c253b9ac9c"
         }
+      },
+      "form-legacykey": {
+        "allowed": true,
+        "canRespond": true,
+        "confirmations": [],
+        "contested": false,
+        "createdAt": 1,
+        "creator": "0xc254ca20564d53ec4eb01355300d6a4420f605c0",
+        "description": "",
+        "expiresAt": null,
+        "hidden": false,
+        "id": "form-legacykey",
+        "linkMismatch": false,
+        "mine": false,
+        "myConfirmed": false,
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "03ba00d19e69f0f91e1e0fb0ee8815a7e923d15fab10e2db29cf51317670fbc574",
+        "questions": [
+          {
+            "id": "q1",
+            "text": "?",
+            "type": "text"
+          }
+        ],
+        "status": "open",
+        "title": "Legacy key",
+        "whitelist": {
+          "type": "none",
+          "value": ""
+        }
       }
     },
     "pending": {
@@ -209,6 +377,24 @@
         "id": "resp:56709e35e6e8c7fb0c075a964a4cfad939028f247fe163ba4c132cd4c0166909"
       },
       {
+        "encryptedPayload": "0103d79c952b831a5a381ca2f3fae8e13f65a9135ddeb9565f6357ccb7e8322cb80a23cd821ff1d61b11b66444b7766a5f957e6d8a412e7347e2ee7b690321d984cbb3b3d7eb44e7a80a255732999316871a174ec7b9740695203bffb9897a5cbd29ce414cee34abd7ea123dd14c3a2f1bc9325cedaca7560e9a15db705e0e56d253cd3d1056cb64432dce1320a1c36851eb7e49855f8765aa93eeac449952705352610216cef79deccdacb8fea08f1dc731e94817b8e6cd8dbb83e80857de7ae59b754ce3ea86e9a5ba3cdefa82146218acb4d0bfa2ee13f377c7a22b501e442d3077bc077fe1ffeea5459797e2",
+        "hlc": {
+          "ctr": 0,
+          "dev": "k",
+          "wall": 7
+        },
+        "id": "resp:5b42bdeb8d3f3a7ba73e5b2e7a4aa84ed219b93cb8c03fb2589e1c2c19d587f3"
+      },
+      {
+        "encryptedPayload": "010378ad66d53aac7ffd62d1995579a873354699485813834a32d0b20b31331eedb3d2bb438fc0c96943b668246a37af18f085d57dc7736941aad3aa02ee2fe740d16e72642e343e7e3253335164660956a247a27c30cca311c290ce399cc5437c00590153ac78590aa2404754f0653471839558f5ea3c69783bf3a25c582cb2a25ae6b0e89a049ea08ae2339773b2a323c59a4e95921d7741dd1d21cd6468d5e763ffc204456c78a122b404d06629459f3467b64c75071027e77e53617ef8489f19a1e7ca3da91bffdee1b441e61d20365b42a1c8dfa65a0722349aac6431b1b9b8e75370a476fd2636087fb2f7a9673b",
+        "hlc": {
+          "ctr": 0,
+          "dev": "k",
+          "wall": 9
+        },
+        "id": "resp:0685e3f4d02e12ed11db107dbbc02e972c3a042d26d6c671c85a2d4839e0557d"
+      },
+      {
         "encryptedPayload": "0102366fc85fb5ae0d5f466f734820dcd89deb72428e94e91a196cac6372ae8a2a5b47feaed2e11fe830fbbdbd888b7bf856a1e2ab90c0dc9ddce40f973e12eb5754437c7ac227dfc74f4ae53ef0bb1cf96f0db08974ec63fcc17ba508d5c876fd1ca0bd85de48e705c40bd8e4353812b0831f2b21838677c405a3d2058c26ffb2e0f2683a8798bc9d050530ea9a8cd0640243f91db051d50093404230675448bd3acca5bf828c86fff1bb6f5afac99752fa6946d62cebc34043e1d71403d680903267f74c0b44bf0352d46b13d9c2e65c20ccab9625c6dc4fdb99c2876d56da5953050884c32fd107304eb601c3333e013e50a6a5236055560683580689f5ae057528a1c4145e8fad028d1cab2bf1cf9872c7d2da209caf7b3e24574860909b8ae4a89e8d04ae1d829e87a4c4d1940bdb84ce8f0621758324200a9c261272ad254e06abd1b487b5e34a7e6c0af74358ace5d0e438f4a77f7576f7789283f5b447c79520918ac135",
         "hlc": {
           "ctr": 0,
@@ -225,6 +411,15 @@
           "wall": 1790919843260
         },
         "id": "resp:c5d35e0a204b9653a0eae2a9460a83db4e0ce23611838746b1694d2063ff07ad"
+      },
+      {
+        "encryptedPayload": "0102905acd30378bbf32e969c5b842dc0697606ff166fcff59f562efd907a4df991705ed0496e19c5353d115863e7fb736d8434f3fceaeaf34fcba893e5bbb79875f420d1e94e2ae8c66d5384132f89c6b281a24329334c5ff48faac0c113f3f79785b3e5063fcb7ff660b476b565158cbad9168a646bfa788caa8fc78956b4f5bc38f46331a60f3148e4e4d685bc3ddf7b0235c7b7bd09197bec27672719956a86d060474648abcab6fac2dc9464e7994fccfeb6f01959fc259671ada9626f12c5b90dc653c9673ac004c533edabc13970c226f540a51bb21964a916d6c097463d40396ad09e9589a3544fc154d2d31e06817709cedfb2ce6efcc64f2f831edad234b6e8d03f3dffec1893e36dcd23745dce352852951ad790f0682aa4681",
+        "hlc": {
+          "ctr": 0,
+          "dev": "wb-b3f5542f2270",
+          "wall": 1790919864226
+        },
+        "id": "resp:e00ebaf6d865c2a73bab9e2518a330bb39a1c0bc3ec7974731016e3a8eba2312"
       }
     ],
     "v": 1
