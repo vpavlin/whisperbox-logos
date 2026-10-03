@@ -49,6 +49,7 @@ inline const std::string FORM_CLOSE        = "form.close";
 inline const std::string FORM_REOPEN       = "form.reopen";   // 0.3.2+: creator re-opens
 inline const std::string FORM_UPDATE       = "form.update";   // 0.3.6+: creator edits a published form
 inline const std::string FORM_COOWNER      = "form.coowner";  // 0.3.8+: creator shares the form key
+inline const std::string RESPONSE_REPLY    = "response.reply"; // 0.3.9+: private reply to one answer
 inline const std::string TOPIC             = "/whisperbox/1/all/proto";
 
 // ── HLC total order: wall → ctr → dev. Identical on every replica. ───────────────
@@ -194,6 +195,7 @@ inline void applyEditableFields(OrderedJson& f, const json& p) {
     f["thankYou"] = str("thankYou");
     f["shuffleQuestions"] = flag("shuffleQuestions");
     f["anonymous"] = flag("anonymous");   // respondents answer as a per-form identity
+    f["quizKey"] = str("quizKey").empty() ? json(nullptr) : json(str("quizKey"));   // answer key, sealed to the form key
     // answer edits: window after the first answer, until the receipt
     const bool ae = flag("allowEdits");
     f["allowEdits"] = ae;
@@ -234,6 +236,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             f["createdAt"] = p.contains("createdAt") && p["createdAt"].is_number() ? p["createdAt"] : json(0);
             applyEditableFields(f, p);
             f["coOwners"] = json::array();   // [{address, sealedKey}] - read answers + send receipts
+            f["replies"] = json::array();    // [{to, sealed, hlc}] private replies
             f["version"] = 1;          // +1 per form.update
             f["updatedAt"] = nullptr;  // hlc.wall of the latest update
             f["status"] = "open";
@@ -269,7 +272,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             responses.push_back(r);
             return;
         }
-        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE || type == FORM_COOWNER) {
+        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE || type == FORM_COOWNER || type == RESPONSE_REPLY) {
             if (verify && e.contains("sig") && !e["sig"].is_null() && !e["sig"].get<std::string>().empty()
                 && !verify(e)) { drop(dropped, "sig-invalid"); return; }
             std::string formId = lc(p.value("formId", ""));
@@ -278,7 +281,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             OrderedJson* tf = &forms[formId];
             bool isFirst = true;
             bool coOwnerReceipt = false;   // a co-owner may send receipts (only)
-            if (type == RESPONSE_CONFIRM && (*tf).contains("coOwners"))
+            if ((type == RESPONSE_CONFIRM || type == RESPONSE_REPLY) && (*tf).contains("coOwners"))
                 for (const auto& c : (*tf)["coOwners"]) if (c.value("address", "") == author) coOwnerReceipt = true;
             if (author != (*tf)["creator"].get<std::string>() && !coOwnerReceipt) {
                 auto ai = alts.find(formId);
@@ -286,6 +289,15 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
                 tf = &ai->second[author]; isFirst = false;   // a contender's own close/confirm
             }
             OrderedJson& f = *tf;
+            if (type == RESPONSE_REPLY) {
+                if (!p.contains("to") || !p["to"].is_string() || p["to"].get<std::string>().empty()
+                    || !p.contains("sealed") || !p["sealed"].is_string() || p["sealed"].get<std::string>().empty()) { drop(dropped, "bad-reply"); return; }
+                for (const auto& r : f["replies"]) if (r.value("sealed", "") == p["sealed"].get<std::string>()) return;
+                OrderedJson r = OrderedJson::object();
+                r["to"] = p["to"]; r["sealed"] = p["sealed"]; r["hlc"] = e["hlc"];
+                f["replies"].push_back(r);
+                return;
+            }
             if (type == FORM_COOWNER) {
                 const std::string owner = lc(p.contains("owner") && p["owner"].is_string() ? p["owner"].get<std::string>() : std::string());
                 const bool okOwner = owner.size() == 42 && owner.rfind("0x", 0) == 0 && owner.find_first_not_of("0123456789abcdef", 2) == std::string::npos;
@@ -436,6 +448,13 @@ inline std::vector<std::string> whitelistAddresses(const json& wl) {
 //          blob is not for this creator / malformed. Never throws (guard here too).
 // verifyResponse — inner-signature check over the DECRYPTED content (whitelist !=
 //          none). Injected so the engine stays crypto-free.
+// An answer's one-off reply key (compressed secp256k1 pubkey, hex) - private replies go to it.
+inline bool isReplyPub(const json& dec) {
+    if (!dec.contains("replyPub") || !dec["replyPub"].is_string()) return false;
+    const std::string v = lc(dec["replyPub"].get<std::string>());
+    return v.size() == 66 && (v.rfind("02", 0) == 0 || v.rfind("03", 0) == 0) && v.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+
 inline OrderedJson creatorView(const OrderedJson& state, const std::string& identity,
                                std::function<json(const std::string&)> open,
                                std::function<bool(const json&)> verifyResponse = nullptr,
@@ -537,6 +556,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             e["answers"] = dec.value("answers", json::array());
             e["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
             e["edits"] = e["edits"].get<int>() + 1;
+            if (isReplyPub(dec)) e["replyPub"] = lc(dec["replyPub"].get<std::string>());
             continue;
         }
         EditMeta meta; meta.firstWall = blob["hlc"].value("wall", 0LL);
@@ -554,6 +574,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         // Respondent-chosen random receipt id (sealed, unlinkable); null pre-0.2.
         r["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
         r["hlc"] = blob["hlc"];
+        if (isReplyPub(dec)) r["replyPub"] = lc(dec["replyPub"].get<std::string>());
         if (allowEdits) r["edits"] = 0;   // only on editable forms (keeps older vectors stable)
         seen[respondent].index = (long long)respObj[formId].size();
         respObj[formId].push_back(r);
@@ -633,6 +654,93 @@ inline std::string validateAnswer(const json& q, const json& v) {
     if (t == "time") { static const std::regex re("^([01][0-9]|2[0-3]):[0-5][0-9]$");
         return v.is_string() && std::regex_match(v.get<std::string>(), re) ? "" : "not a time (HH:MM)"; }
     return v.is_string() ? "" : "must be text";   // unknown type: forward-compatible
+}
+
+// ── Quiz scoring (mirror of contract/src/answers.mjs scoreAnswer / scoreAnswers) ──
+// Lower-case like JS toLowerCase for Latin-1, Latin Extended-A and Cyrillic; collapse
+// whitespace (incl. NBSP) and trim - enough for accepted text answers.
+inline std::string normQuizText(const std::string& in) {
+    std::vector<uint32_t> cps;
+    for (size_t i = 0; i < in.size();) {
+        unsigned char c = (unsigned char)in[i];
+        uint32_t cp; int n;
+        if (c < 0x80) { cp = c; n = 1; } else if ((c >> 5) == 6) { cp = c & 0x1f; n = 2; } else if ((c >> 4) == 14) { cp = c & 0x0f; n = 3; } else if ((c >> 3) == 30) { cp = c & 0x07; n = 4; } else { cp = 0xfffd; n = 1; }
+        if (n > 1) { if (i + n > in.size()) { cp = 0xfffd; n = 1; } else for (int k = 1; k < n; k++) cp = (cp << 6) | ((unsigned char)in[i + k] & 0x3f); }
+        i += n;
+        if (cp >= 'A' && cp <= 'Z') cp += 32;
+        else if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) cp += 32;
+        else if (cp >= 0x100 && cp <= 0x137 && cp % 2 == 0 && cp != 0x130) cp += 1;
+        else if (cp >= 0x139 && cp <= 0x148 && cp % 2 == 1) cp += 1;
+        else if (cp >= 0x14A && cp <= 0x177 && cp % 2 == 0) cp += 1;
+        else if (cp == 0x178) cp = 0xFF;
+        else if (cp >= 0x179 && cp <= 0x17E && cp % 2 == 1) cp += 1;
+        else if (cp >= 0x410 && cp <= 0x42F) cp += 32;
+        else if (cp >= 0x400 && cp <= 0x40F) cp += 80;
+        cps.push_back(cp);
+    }
+    auto ws = [](uint32_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' || c == 0xA0 || c == 0x2028 || c == 0x2029 || c == 0x3000 || c == 0xFEFF || (c >= 0x2000 && c <= 0x200A); };
+    std::string out; bool pend = false;
+    auto put = [&out](uint32_t c) {
+        if (c < 0x80) out += (char)c;
+        else if (c < 0x800) { out += (char)(0xC0 | (c >> 6)); out += (char)(0x80 | (c & 0x3f)); }
+        else if (c < 0x10000) { out += (char)(0xE0 | (c >> 12)); out += (char)(0x80 | ((c >> 6) & 0x3f)); out += (char)(0x80 | (c & 0x3f)); }
+        else { out += (char)(0xF0 | (c >> 18)); out += (char)(0x80 | ((c >> 12) & 0x3f)); out += (char)(0x80 | ((c >> 6) & 0x3f)); out += (char)(0x80 | (c & 0x3f)); }
+    };
+    for (uint32_t c : cps) {
+        if (ws(c)) { pend = !out.empty(); continue; }
+        if (pend) { out += ' '; pend = false; }
+        put(c);
+    }
+    return out;
+}
+inline bool quizIsInt(const json& x) { return x.is_number() && std::floor(x.get<double>()) == x.get<double>() && std::isfinite(x.get<double>()); }
+// 1 correct, 0 wrong, -1 not scored
+inline int scoreAnswer(const json& q, const json& key, const json& v) {
+    if (!key.is_object() || !key.contains("answer")) return -1;
+    const std::string t = q.is_object() && q.contains("type") && q["type"].is_string() ? q["type"].get<std::string>() : "text";
+    const json& a = key["answer"];
+    if (t == "radioButtons" || t == "dropdown" || t == "scale" || t == "number")
+        return a.is_number() && v.is_number() && a.get<double>() == v.get<double>() ? 1 : 0;
+    if (t == "boolean") return a.is_boolean() && v.is_boolean() && a.get<bool>() == v.get<bool>() ? 1 : 0;
+    if (t == "date" || t == "time") return a.is_string() && v.is_string() && a == v ? 1 : 0;
+    if (t == "checkbox") {
+        if (!a.is_array() || !v.is_array()) return 0;
+        std::set<double> want, got;
+        for (const auto& x : a) if (quizIsInt(x)) want.insert(x.get<double>());
+        for (const auto& x : v) { if (!quizIsInt(x)) return 0; got.insert(x.get<double>()); }
+        return want == got ? 1 : 0;
+    }
+    if (t == "text" || t == "textarea" || t == "email" || t == "url") {
+        if (!a.is_array() || !v.is_string()) return 0;
+        const std::string nv = normQuizText(v.get<std::string>());
+        if (nv.empty()) return 0;
+        for (const auto& x : a) if (x.is_string() && normQuizText(x.get<std::string>()) == nv) return 1;
+        return 0;
+    }
+    return -1;
+}
+inline double quizPoints(const json& key) {
+    if (key.is_object() && key.contains("points") && key["points"].is_number()) { double p = key["points"].get<double>(); if (std::isfinite(p) && p >= 0) return p; }
+    return 1;
+}
+inline json scoreAnswers(const json& questions, const json& answerKey, const json& answers) {
+    std::map<std::string, json> byQ;
+    if (answers.is_array()) for (const auto& a : answers) if (a.is_object() && a.contains("questionId") && a["questionId"].is_string()) byQ[a["questionId"].get<std::string>()] = a.contains("value") ? a["value"] : json();
+    double score = 0, outOf = 0;
+    json correct = json::object();
+    if (questions.is_array()) for (const auto& q : questions) {
+        if (!q.is_object() || !q.contains("id") || !q["id"].is_string()) continue;
+        const std::string id = q["id"].get<std::string>();
+        const json key = answerKey.is_object() && answerKey.contains(id) ? answerKey[id] : json();
+        auto it = byQ.find(id);
+        int r = scoreAnswer(q, key, it == byQ.end() ? json() : it->second);
+        if (r < 0) continue;
+        outOf += quizPoints(key);
+        if (r) score += quizPoints(key);
+        correct[id] = r == 1;
+    }
+    auto num = [](double d) { return d == std::floor(d) && std::fabs(d) < 9e15 ? json((long long)d) : json(d); };
+    return json({{"score", num(score)}, {"outOf", num(outOf)}, {"correct", correct}});
 }
 
 // ── Deterministic id helpers (mirror events.mjs) ────────────────────────────────

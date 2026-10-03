@@ -8,6 +8,7 @@ import * as SecureStore from "expo-secure-store";
 import { client } from "./whisperbox";
 
 let notified: Record<string, number> = {};
+let replied: Record<string, number> = {};   // replies / scores to MY answers already seen
 let timer: ReturnType<typeof setInterval> | null = null;
 let openForm: ((formId: string) => void) | null = null;
 
@@ -39,6 +40,18 @@ function check() {
   const forms = snap?.state?.forms || {};
   const active = AppState.currentState === "active";
   for (const f of Object.values<any>(forms)) {
+    if (f.mySubmitted && !f.hidden) {   // a private reply / quiz score from the creator
+      const n = (f.myReplies || []).length;
+      const before = replied[f.id];
+      replied[f.id] = n;
+      if (before !== undefined && n > before && !active) {
+        const last = f.myReplies[n - 1];
+        Notifications.scheduleNotificationAsync({
+          content: { title: f.title || "WhisperBox", body: last?.kind === "score" ? "Your score is in - tap to see it" : "The creator replied to your answer - tap to read", data: { formId: f.id } },
+          trigger: Platform.OS === "android" ? ({ channelId: "answers" } as any) : null,
+        }).catch(() => {});
+      }
+    }
     if (!(f.mine || f.coOwner) || f.hidden) continue;
     const n = f.newResponses || 0;
     const before = notified[f.id] ?? 0;

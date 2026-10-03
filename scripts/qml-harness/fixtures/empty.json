@@ -1,6 +1,6 @@
 {
   "creatorView": null,
-  "deviceId": "wb-07fa978d9849",
+  "deviceId": "wb-9fd7c303f54d",
   "diagnostics": {
     "admDropSig": 0,
     "admDropType": 0,
@@ -15,8 +15,8 @@
   "drafts": [],
   "hidden": [],
   "identity": {
-    "address": "0xd7aaf5d06f17bb0ea0824aea0c7af7a3f167c0df",
-    "pubHex": "03298615a0ba02f31c9587426e3839053fe5d99cc64b3b60682a72f7a62c0aed2c"
+    "address": "0x50bd009385297a25249a7aa0276fb76d718a46f0",
+    "pubHex": "03955217dd5f098558d94d19ef453c15f04a12138b51a9b1802b3f6a9a451a3f23"
   },
   "mySubmissions": [],
   "newResponses": 0,
@@ -41,7 +41,7 @@
     "v": 1
   },
   "storage": {
-    "dir": "/tmp/wb-e2e-6StliA/A",
+    "dir": "/tmp/wb-e2e-tZ83RH/A",
     "note": "",
     "ok": true
   },

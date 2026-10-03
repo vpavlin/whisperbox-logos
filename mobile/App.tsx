@@ -562,6 +562,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   useEffect(() => { const t = setInterval(() => setTick(Date.now()), 20000); return () => clearInterval(t); }, []);
   const [qIdx, setQIdx] = useState(0);
   const [showCo, setShowCo] = useState(false);
+  const [replyText, setReplyText] = useState("");
   const [coCode, setCoCode] = useState("");
   const [idx, setIdx] = useState(0);
   const [filter, setFilter] = useState("");
@@ -621,6 +622,9 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
     if (r.ok) { toast(editing ? "Your edited answer is sealed and sent" : "Answers sealed and sent"); setAnswers({}); setShowErrors(false); setEditing(false); } else toast(r.error);
   };
   const unconfirmed = responses.length - confirmed;
+  const unscored = f?.quiz ? responses.filter((r) => !(r.replies > 0) && r.replyPub).length : 0;
+  const avgScore = f?.quiz && responses.length ? `${Math.round(responses.reduce((t, r) => t + Number(r.score || 0), 0) / responses.length * 10) / 10} / ${responses[0].outOf ?? 0}` : "";
+  const scoreText = (r: any) => (r && r.outOf !== undefined ? `${r.score} / ${r.outOf}` : "");
   const list = (() => {
     const t = filter.trim().toLowerCase();
     if (!t) return responses;
@@ -700,6 +704,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                 }} /> : null}
                 {f.mine && f.status === "closed" && !atCap && !ended ? <Btn label="Re-open" onPress={() => { const r = client.reopenForm(id); toast(r.ok ? "Re-opened - answers sealed while it was closed still don't count" : r.error); }} /> : null}
                 {unconfirmed > 0 ? <Btn label={`Send all receipts (${unconfirmed})`} primary onPress={() => { const r = client.confirmAll(id); toast(r.ok ? `Receipts sent for ${plural(r.confirmed, "response", "responses")}` : r.error); }} /> : null}
+                {f.quiz && unscored > 0 ? <Btn label={`Send scores (${unscored})`} primary onPress={() => { const r = client.sendScores(id); toast(r.ok ? (r.sent ? `Scores sent privately to ${plural(r.sent, "person", "people")}` : "Everyone already has a reply") : r.error); }} /> : null}
                 <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} />
                 {f.mine ? <Btn label="Edit" onPress={() => push({ k: "create", editFormId: id })} /> : null}
                 {f.mine ? <Btn label={showCo ? "Hide co-owners" : `Co-owners${(f.coOwners || []).length ? ` (${f.coOwners.length})` : ""}`} onPress={() => setShowCo((x) => !x)} /> : null}
@@ -724,6 +729,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                 <Switch value={!!f.autoReceipts} onValueChange={(v) => { client.setAutoReceipts(id, v); toast(v ? "Receipts now go out automatically" : "Automatic receipts off"); }} trackColor={{ true: C.ok, false: C.border }} thumbColor="#fff" />
               </View>
               {info ? <Text style={[st.muted, { marginTop: 8 }]}>{info}</Text> : null}
+              {f.quiz ? <Text style={[st.muted, { marginTop: 6, color: C.ok }]}>Quiz{avgScore ? ` · average ${avgScore}` : ""} · scores and replies are sealed to each person</Text> : null}
 
               {responses.length ? (
                 <View style={[st.chips, { marginTop: 16 }]}>
@@ -782,7 +788,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
               {mode === "table" && list.length ? (
                 <ScrollView horizontal style={[st.card, { padding: 0 }]} contentContainerStyle={{ flexDirection: "column" }}>
                   <View style={st.trow}>
-                    {["#", "From", ...(f.questions || []).map((q: any) => q.text), "Receipt"].map((h, i) => (
+                    {["#", "From", ...(f.questions || []).map((q: any) => q.text), "Receipt", ...(f.quiz ? ["Score"] : [])].map((h, i) => (
                       <Text key={i} style={[st.th, { width: i === 0 ? 36 : i === 1 ? 110 : 160 }]} numberOfLines={1}>{h}</Text>
                     ))}
                   </View>
@@ -792,6 +798,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                       <Text style={[st.td, { width: 110, fontFamily: MONO }]} numberOfLines={1}>{shortAddr(r.respondent)}</Text>
                       {(f.questions || []).map((q: any) => <Text key={q.id} style={[st.td, { width: 160 }]} numberOfLines={2}>{answerText(q, answerOf(r, q.id))}</Text>)}
                       <Text style={[st.td, { width: 160, color: r.confirmed ? C.ok : C.warn }]}>{r.confirmed ? "sent" : "pending"}</Text>
+                      {f.quiz ? <Text style={[st.td, { width: 160 }]}>{scoreText(r)}{r.replies > 0 ? "  ✉" : ""}</Text> : null}
                     </Pressable>
                   ))}
                 </ScrollView>
@@ -824,18 +831,27 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                       <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}</Text></Pressable>
                       <Text style={st.time}>{fmtTime(cur.submittedAt)}</Text>
                       <View style={{ flex: 1 }} />
+                      {cur.outOf !== undefined ? <Badge label={scoreText(cur)} fg={C.ok} bg={C.okSubtle} /> : null}
+                      {cur.replies > 0 ? <Badge label={`${plural(cur.replies, "reply", "replies")}`} fg={C.primary} bg={C.primarySubtle} /> : null}
                       {cur.edits > 0 ? <Badge label="edited" fg={C.accent} bg={C.warnSubtle} /> : null}
                       {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
                     </View>
                     {(f.questions || []).map((q: any, qi: number) => {
                       const v = answerText(q, answerOf(cur, q.id));
+                      const ok = cur.correct && q.id in cur.correct ? cur.correct[q.id] : null;
                       return (
                         <View key={q.id} style={{ marginTop: 12 }}>
                           <Text style={st.qSmall}>{qi + 1}. {q.text}</Text>
-                          <Text style={[st.answer, { fontSize: 16 }, !v && { color: C.text3 }]}>{v || "(no answer)"}</Text>
+                          <Text style={[st.answer, { fontSize: 16 }, !v && { color: C.text3 }, ok === true && { color: C.ok }, ok === false && { color: C.err }]}>{ok === true ? "✓ " : ok === false ? "✗ " : ""}{v || "(no answer)"}</Text>
                         </View>
                       );
                     })}
+                    {cur.replyPub ? (
+                      <View style={[st.joinRow, { marginTop: 14 }]}>
+                        <TextInput value={replyText} onChangeText={setReplyText} placeholder="Reply privately - only this person can read it" placeholderTextColor={C.text3} style={[st.input, { flex: 1, fontSize: 13 }]} />
+                        <Btn label="Send" primary disabled={!replyText.trim()} onPress={() => { const r = client.replyToResponse(id, cur.confirmationId, replyText); toast(r.ok ? "Reply sent - only this person can read it" : r.error); if (r.ok) setReplyText(""); }} />
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               ) : null}
@@ -844,6 +860,21 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             <View style={{ marginTop: 18 }}>
               {info ? <Text style={[st.muted, { marginBottom: 8 }]}>{info}</Text> : null}
               {banner ? <Banner tone={banner.tone} text={banner.text} /> : null}
+              {f.myReplies?.length ? (
+                <View style={[st.card, { borderColor: C.primary, backgroundColor: C.primarySubtle }]}>
+                  <Text style={[st.label, { color: C.primary }]}>FROM THE CREATOR - ONLY YOU CAN READ THIS</Text>
+                  {f.myReplies.map((m: any, mi: number) => (
+                    <View key={mi} style={{ marginTop: 8 }}>
+                      {m.kind === "score" ? <Text style={[st.q, { fontSize: 18 }]}>Your score: {m.score} / {m.outOf}</Text> : null}
+                      {m.kind === "score" ? (f.questions || []).filter((q: any) => m.correct && q.id in m.correct).map((q: any) => (
+                        <Text key={q.id} style={[st.muted, { color: m.correct[q.id] ? C.ok : C.err }]}>{m.correct[q.id] ? "✓" : "✗"} {q.text}</Text>
+                      )) : null}
+                      {m.message ? <Text style={[st.answer, { marginTop: 2 }]}>{m.message}</Text> : null}
+                      {m.at ? <Text style={st.time}>{fmtTime(m.at)}</Text> : null}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
               {f.mySubmitted && !editing ? (
                 <View style={{ marginTop: 16 }}>
                   <View style={[st.cardHead, { justifyContent: "space-between" }]}>
@@ -893,7 +924,34 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
 
 // ── Create ─────────────────────────────────────────────────────────────────────
 type Draft = { id?: string; type: string; text: string; required: boolean; optionsText: string; help?: string; allowOther?: boolean; shuffleOptions?: boolean;
-  min?: number; max?: number; minLabel?: string; maxLabel?: string; style?: string; numMin?: string; numMax?: string };
+  min?: number; max?: number; minLabel?: string; maxLabel?: string; style?: string; numMin?: string; numMax?: string;
+  // quiz: the right answer (choice index / yes-no), a set (checkbox), accepted spellings, a number; points
+  correct?: any; correctSet?: number[]; accepted?: string; correctNum?: string; points?: string };
+// ── quiz helpers (same rules as the desktop builder) ──
+const QUIZ_TYPES = ["radioButtons", "dropdown", "checkbox", "boolean", "text", "textarea", "email", "url", "scale", "number"];
+function quizIntoDraft(d: any, k: any) {
+  if (!k || !("answer" in k)) return d;
+  const a = k.answer, out: any = { ...d };
+  if (d.type === "checkbox") out.correctSet = Array.isArray(a) ? a.slice() : [];
+  else if (d.type === "scale" || d.type === "number") out.correctNum = String(a);
+  else if (Array.isArray(a)) out.accepted = a.join(", ");
+  else out.correct = a;
+  if (typeof k.points === "number" && k.points !== 1) out.points = String(k.points);
+  return out;
+}
+function quizKeyOf(d: Draft): any {
+  let a: any;
+  if (d.type === "radioButtons" || d.type === "dropdown") { if (typeof d.correct !== "number" || d.correct < 0) return null; a = d.correct; }
+  else if (d.type === "boolean") { if (typeof d.correct !== "boolean") return null; a = d.correct; }
+  else if (d.type === "checkbox") { if (!d.correctSet?.length) return null; a = d.correctSet.slice().sort((x, y) => x - y); }
+  else if (d.type === "scale" || d.type === "number") { const t = (d.correctNum || "").trim(); if (t === "" || isNaN(Number(t))) return null; a = Number(t); }
+  else if (QUIZ_TYPES.includes(d.type)) { a = (d.accepted || "").split(",").map((x) => x.trim()).filter(Boolean); if (!a.length) return null; }
+  else return null;
+  const k: any = { answer: a };
+  const pt = (d.points || "").trim();
+  if (pt !== "" && !isNaN(Number(pt)) && Number(pt) >= 0 && Number(pt) !== 1) k.points = Number(pt);
+  return k;
+}
 // Same starting points as the desktop builder.
 const TEMPLATES: { name: string; b: any }[] = [
   { name: "Event RSVP", b: { title: "Are you coming?", description: "Let us know by Friday.", thankYou: "Thanks - see you there!", questions: [
@@ -932,9 +990,9 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     // editing keeps question ids (answers are stored by id); a duplicate gets fresh ones
     if (f) return {
       title: editFormId ? f.title || "" : (f.title || "") + " (copy)", description: f.description || "",
-      questions: (f.questions || []).map((q: any) => { const { id: qid, options: _o, ...rest } = q; return { ...rest, ...(editFormId ? { id: qid } : {}), type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
-        ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }; }),
-      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous,
+      questions: (f.questions || []).map((q: any) => { const { id: qid, options: _o, ...rest } = q; return quizIntoDraft({ ...rest, ...(editFormId ? { id: qid } : {}), type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
+        ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }, f.quiz?.[q.id]); }),
+      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz,
       restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
       max: f.maxResponses ? String(f.maxResponses) : "", closeAt: editFormId && f.expiresAt ? fmtInput(f.expiresAt) : "", showCount: !!f.showResponseCount,
     };
@@ -952,6 +1010,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   const [shuffle, setShuffle] = useState(!!init.shuffle);
   const [allowEdits, setAllowEdits] = useState(!!(init as any).allowEdits);
   const [anonymous, setAnonymous] = useState(!!(init as any).anonymous);
+  const [quiz, setQuiz] = useState(!!(init as any).quiz);
   const useTemplate = (b: any) => { setTitle(b.title); setDesc(b.description || ""); setQs(JSON.parse(JSON.stringify(b.questions))); setThankYou(b.thankYou || ""); };
   const [scheduling, setScheduling] = useState(!!(draftId && client.drafts[draftId]?.publishAt));
   const [publishAt, setPublishAt] = useState(draftId && client.drafts[draftId]?.publishAt ? fmtInput(client.drafts[draftId].publishAt) : "");
@@ -962,7 +1021,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
   const move = (i: number, d: number) => setQs((a) => { const j = i + d; if (j < 0 || j >= a.length) return a; const b = a.slice(); [b[i], b[j]] = [b[j], b[i]]; return b; });
-  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous } as any;
+  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz } as any;
   const empty = !title.trim() && !desc.trim() && !qs.some((q) => q.text.trim());
 
   // -> {ok, def} | {ok:false, error}. strict=false never fails (autosave of a half-done form).
@@ -970,6 +1029,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     const fail = (error: string) => ({ ok: false as const, error });
     if (strict && !title.trim()) return fail("Give the form a title");
     const questions: any[] = [];
+    const answerKey: any = {};
     const used = new Set(qs.map((d) => d.id).filter(Boolean) as string[]);
     let next = 1 + Math.max(0, ...[...used].map((x) => Number(/^q(\d+)$/.exec(x)?.[1] || 0)));
     const fresh = () => { while (used.has("q" + next)) next++; used.add("q" + next); return "q" + next++; };
@@ -996,6 +1056,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
         if (mx !== "" && !isNaN(Number(mx))) q.max = Number(mx);
         if (strict && q.min !== undefined && q.max !== undefined && q.min > q.max) return fail(`"${text}": minimum is above maximum`);
       }
+      if (quiz) { const k = quizKeyOf(d); if (k) answerKey[q.id] = k; }
       questions.push(q);
     }
     if (strict && !questions.length) return fail("Add at least one question");
@@ -1012,6 +1073,10 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (thankYou.trim()) def.thankYou = thankYou.trim();
     if (shuffle) def.shuffleQuestions = true;
     if (allowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+    if (quiz) {
+      if (strict && !Object.keys(answerKey).length) return fail("Quiz: mark the right answer for at least one question");
+      if (Object.keys(answerKey).length) def.quiz = answerKey;
+    }
     if (anonymous) { if (strict && restrict) return fail("An anonymous form can't be members-only - it would need real addresses"); def.anonymous = true; }
     return { ok: true, def };
   };
@@ -1028,7 +1093,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (empty || editFormId) return;   // editing a published form: saved with "Save", no draft
     const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
     return () => clearTimeout(t);
-  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous]);
+  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz]);
   const leave = () => {
     if (editFormId) { pop(); return; }
     if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
@@ -1151,6 +1216,31 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
                     <TextInput value={q.numMax || ""} onChangeText={(t) => upd(i, { numMax: t })} keyboardType="numbers-and-punctuation" placeholder="Maximum (optional)" placeholderTextColor={C.text3} style={[st.input, { flex: 1, backgroundColor: C.surface, fontSize: 13, paddingVertical: 8 }]} />
                   </View>
                 ) : null}
+                {quiz && QUIZ_TYPES.includes(q.type) ? (
+                  <View style={{ marginTop: 10 }}>
+                    <Text style={[st.label, { color: C.ok }]}>RIGHT ANSWER</Text>
+                    {choice || q.type === "boolean" ? (
+                      <View style={st.chips}>
+                        {(q.type === "boolean" ? ["Yes", "No"] : q.optionsText.split("\n").map((x) => x.trim()).filter(Boolean)).map((o, oi) => {
+                          const on = q.type === "boolean" ? q.correct === (oi === 0) : q.type === "checkbox" ? (q.correctSet || []).includes(oi) : q.correct === oi;
+                          return (
+                            <Pressable key={oi} onPress={() => upd(i, q.type === "checkbox"
+                              ? { correctSet: on ? (q.correctSet || []).filter((x) => x !== oi) : [...(q.correctSet || []), oi] }
+                              : { correct: q.type === "boolean" ? oi === 0 : (on ? -1 : oi) })} style={[st.chip, on && { borderColor: C.ok, backgroundColor: C.okSubtle }]}>
+                              <Text style={[st.chipT, on && { color: C.ok }]}>{on ? "✓ " : ""}{o}</Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                    <View style={[st.joinRow, { marginTop: 6 }]}>
+                      {!choice && q.type !== "boolean" ? (q.type === "scale" || q.type === "number"
+                        ? <TextInput value={q.correctNum || ""} onChangeText={(t) => upd(i, { correctNum: t })} keyboardType="numbers-and-punctuation" placeholder="The right number" placeholderTextColor={C.text3} style={[st.input, { flex: 1, backgroundColor: C.surface, fontSize: 13, paddingVertical: 8 }]} />
+                        : <TextInput value={q.accepted || ""} onChangeText={(t) => upd(i, { accepted: t })} placeholder="Accepted answers, comma-separated" placeholderTextColor={C.text3} style={[st.input, { flex: 1, backgroundColor: C.surface, fontSize: 13, paddingVertical: 8 }]} />) : null}
+                      <TextInput value={q.points || ""} onChangeText={(t) => upd(i, { points: t })} keyboardType="numbers-and-punctuation" placeholder="1 point" placeholderTextColor={C.text3} style={[st.input, { width: 90, backgroundColor: C.surface, fontSize: 13, paddingVertical: 8 }]} />
+                    </View>
+                  </View>
+                ) : null}
               </View>
             );
           })}
@@ -1183,6 +1273,9 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
           </Pressable>
           <Pressable onPress={() => { setAnonymous((x) => !x); if (!anonymous) setRestrict(false); }} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, anonymous && st.chipOn]}>
             <Text style={[st.chipT, anonymous && { color: C.primary }]}>{anonymous ? "✓ " : ""}Anonymous answers (you can't link them to anyone's address)</Text>
+          </Pressable>
+          <Pressable onPress={() => setQuiz((x) => !x)} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, quiz && { borderColor: C.ok, backgroundColor: C.okSubtle }]}>
+            <Text style={[st.chipT, quiz && { color: C.ok }]}>{quiz ? "✓ " : ""}Quiz (mark right answers, send each person their score privately)</Text>
           </Pressable>
           <View style={{ marginTop: 18 }}><Label>THANK-YOU MESSAGE (OPTIONAL)</Label></View>
           <TextInput value={thankYou} onChangeText={setThankYou} placeholder="Shown to respondents after they send their answers" placeholderTextColor={C.text3} style={st.input} />

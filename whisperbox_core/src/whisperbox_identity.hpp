@@ -133,6 +133,16 @@ inline SignId deriveAnonIdentity(const SignId& identity, const std::string& form
     }
     return SignId{};
 }
+// One-off key an answer carries so the creator can reply privately (re-derivable).
+inline SignId deriveReplyKey(const SignId& identity, const std::string& formId, const std::string& confirmationId) {
+    const std::string base = toLower(formId) + "|" + confirmationId;
+    for (int i = 0; i < 8; i++) {
+        std::string info = i ? base + "#" + std::to_string(i) : base;
+        SignId k = identityFromPriv(hkdfSha256(identity.priv, strBytes("whisperbox-reply-v1"), strBytes(info), 32));
+        if (k.valid) return k;
+    }
+    return SignId{};
+}
 // Public "dev" tag on a response event, per form (answers can't be linked by device).
 inline std::string responseDevTag(const std::string& deviceId, const std::string& formId) {
     std::string s = deviceId + "|" + toLower(formId);

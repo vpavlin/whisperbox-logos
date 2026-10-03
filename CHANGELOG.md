@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.8 desktop / 0.3.9 Android (2026-10-03) - quizzes, private replies
+
+- **Private replies**: every answer now carries a one-off reply key (derived from the
+  respondent's identity per form + receipt id, so nothing new is stored and it can't be
+  linked to them). The creator or a co-owner can reply to one answer; only that respondent
+  can read it. Wire: `response.reply` {formId, author, to: receipt id, sealed}, creator /
+  co-owner gated like receipts.
+- **Quiz mode**: mark the right answer per question (choice, yes/no, checkbox set, accepted
+  spellings for text - trimmed + case-insensitive, numbers) with optional points. The answer
+  key is sealed to the form key (`quizKey`), so respondents and relays can't read it.
+  Creator / co-owners see scores (table column, one-by-one ✓/✗, average, CSV "score"
+  column) and "Send scores" delivers each person their score privately, once.
+- Respondents see "From the creator - only you can read this" with their score, per-question
+  ✓/✗ and messages; Android notifies when a reply or score arrives.
+- Fix: desktop showed the respondent view under the creator view for co-owned forms.
+- Shared fixtures: scoring rules (JS == C++, incl. Czech / Cyrillic case folding), reply key
+  vectors, golden-lifecycle reply events (creator + co-owner accepted, stranger dropped).
+
 ## 0.3.7 desktop / 0.3.8 Android (2026-10-03) - anonymous forms, co-owners
 
 - **Anonymous forms**: respondents answer under a one-off identity derived per form from

@@ -562,6 +562,43 @@ int main(int argc, char** argv) {
             CHECK(!formOf(*C, sf).value("coOwner", true) && responsesOf(*C, sf).empty(), "others still see nothing");
         }
 
+        // Quiz + private replies: the answer key is sealed; scores + replies reach only their respondent.
+        {
+            json quizQs = json::array({{{"id", "q1"}, {"type", "boolean"}, {"text", "Is the sky blue?"}, {"required", true}},
+                                       {{"id", "q2"}, {"type", "radioButtons"}, {"text", "Capital of Czechia?"}, {"options", {"Brno", "Praha"}}, {"required", true}},
+                                       {{"id", "q3"}, {"type", "text"}, {"text", "Your name"}}});
+            std::string qf = A->call(A->core->createForm(json({{"title", "Quiz"}, {"questions", quizQs},
+                {"quiz", {{"q1", {{"answer", true}}}, {"q2", {{"answer", 1}, {"points", 2}}}}}}).dump())).value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, qf) && hasForm(*C, qf); }, 3000), "quiz syncs");
+            CHECK(formOf(*C, qf)["quizKey"].is_string() && formOf(*C, qf).dump().find("Praha\"},\"q") == std::string::npos
+                  && !formOf(*C, qf).contains("quiz"), "the answer key travels sealed (others see only quizKey)");
+            CHECK(formOf(*A, qf)["quiz"]["q2"].value("points", 0) == 2, "creator opens its answer key");
+            CHECK(B->call(B->core->submitResponse(qf, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 0}}}).dump())).value("ok", false), "B answers (1 of 2 right)");
+            CHECK(C->call(C->core->submitResponse(qf, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 1}}}).dump())).value("ok", false), "C answers (both right)");
+            CHECK(waitUntil([&] { return responsesOf(*A, qf).size() == 2; }, 4000), "A gets both answers");
+            std::string cidB, cidC;
+            for (const auto& r : responsesOf(*A, qf)) {
+                if (r.value("respondent", "") == addrB) { cidB = r.value("confirmationId", ""); CHECK(r.value("score", -1) == 1 && r.value("outOf", -1) == 3 && r["correct"].value("q2", true) == false, "B scores 1/3"); }
+                if (r.value("respondent", "") == addrC) { cidC = r.value("confirmationId", ""); CHECK(r.value("score", -1) == 3, "C scores 3/3"); }
+                CHECK(r.value("replyPub", "").size() == 66, "answers carry a one-off reply key");
+            }
+            std::string qcsv = A->call(A->core->exportCsv(qf)).value("csv", "");
+            CHECK(qcsv.find(",score,") != std::string::npos && qcsv.find(",1/3,") != std::string::npos, "CSV has a score column");
+            CHECK(!B->call(B->core->sendScores(qf)).value("ok", true), "a respondent can't send scores");
+            json ss = A->call(A->core->sendScores(qf));
+            CHECK(ss.value("sent", 0) == 2, "creator sends 2 scores");
+            CHECK(waitUntil([&] { json m = formOf(*B, qf)["myReplies"]; return m.is_array() && m.size() == 1 && m[0].value("score", -1) == 1 && m[0].value("outOf", -1) == 3; }, 4000), "B privately gets 1/3");
+            CHECK(waitUntil([&] { json m = formOf(*C, qf)["myReplies"]; return m.is_array() && m.size() == 1 && m[0].value("score", -1) == 3; }, 4000), "C privately gets 3/3 (and not B's)");
+            CHECK(A->call(A->core->sendScores(qf)).value("sent", -1) == 0, "scores aren't sent twice");
+            CHECK(!C->call(C->core->replyToResponse(qf, cidB, "hi")).value("ok", true), "a respondent can't reply to others");
+            CHECK(A->call(A->core->replyToResponse(qf, cidB, "Praha, not Brno!")).value("ok", false), "creator replies to B");
+            CHECK(waitUntil([&] { json m = formOf(*B, qf)["myReplies"]; return m.is_array() && m.size() == 2 && m[1].value("message", "") == "Praha, not Brno!"; }, 4000), "B reads the private reply");
+            CHECK(formOf(*C, qf)["myReplies"].size() == 1 && formOf(*C, qf).dump().find("Brno!") == std::string::npos, "C can't read B's reply");
+            for (const auto& r : responsesOf(*A, qf)) if (r.value("confirmationId", "") == cidB) CHECK(r.value("replies", 0) == 2, "creator sees 2 replies sent to B");
+            dumpFixture(*A, "quiz");             // creator: quiz with scored answers + replies
+            dumpFixture(*B, "quiz-respondent");  // respondent: score + a private reply
+        }
+
         // Re-open an uncapped form: closed -> open again, new answers count.
         std::string rf = A->call(A->core->createForm(json({{"title", "Reopen me"}, {"questions", qs}}).dump())).value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*G, rf); }, 3000), "second form syncs");

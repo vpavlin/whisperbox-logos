@@ -64,6 +64,8 @@ public:
     std::string markSeen(std::string formId);
     std::string updateForm(std::string formId, std::string defJson);
     std::string addCoOwner(std::string formId, std::string coOwnerPubHex);
+    std::string replyToResponse(std::string formId, std::string confirmationId, std::string message);
+    std::string sendScores(std::string formId);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
@@ -187,4 +189,12 @@ private:
     bool isCoOwner(const whisperbox::OrderedJson& f) const;
     std::set<std::string> coOwnedForms(const whisperbox::OrderedJson& state);
     const whisperbox::SignId* coOwnerKey(const std::string& formId, const whisperbox::OrderedJson& f);
+    // Quiz + private replies. Appended last.
+    std::map<std::string, const whisperbox::SignId*> formKeysFor(const whisperbox::OrderedJson& state);
+    std::map<std::string, nlohmann::json> m_quizCache;    // quizKey hex -> opened answer key
+    std::map<std::string, nlohmann::json> m_replyCache;   // sealed reply hex -> opened reply
+    nlohmann::json quizOf(const whisperbox::OrderedJson& f, const std::map<std::string, const whisperbox::SignId*>& keys);
+    void enrichResponses(const whisperbox::OrderedJson& state, const std::string& formId, nlohmann::json& responses,
+                         const std::map<std::string, const whisperbox::SignId*>& keys);
+    std::string sendReply(const std::string& formId, const std::string& cid, const std::string& replyPub, const nlohmann::json& body);
 };

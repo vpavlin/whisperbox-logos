@@ -69,6 +69,7 @@ Item {
     property bool draftShuffle: false
     property bool draftAllowEdits: false
     property bool draftAnonymous: false
+    property bool draftQuiz: false
     property string editingFormId: ""     // builder is editing a PUBLISHED form (form.update)
     property bool showCoOwners: false
     property bool editing: false          // respondent is editing an already-sent answer
@@ -442,6 +443,27 @@ Item {
             root.answers = ({}); root.showErrors = false; root.editing = false;
         });
     }
+    readonly property bool selQuiz: !!(root.sel && root.sel.quiz)
+    readonly property int selUnscored: {
+        var n = 0; if (!root.selQuiz) return 0;
+        for (var i = 0; i < root.selResponses.length; i++) { var r = root.selResponses[i]; if (!(r.replies > 0) && r.replyPub) n++; }
+        return n;
+    }
+    readonly property string selAvgScore: {
+        if (!root.selQuiz || !root.selResponses.length) return "";
+        var t = 0, of = 0;
+        for (var i = 0; i < root.selResponses.length; i++) { t += Number(root.selResponses[i].score || 0); of = Number(root.selResponses[i].outOf || 0); }
+        return (Math.round(t / root.selResponses.length * 10) / 10) + " / " + of;
+    }
+    function scoreText(r) { return r && r.outOf !== undefined ? String(r.score) + " / " + String(r.outOf) : ""; }
+    function sendScoresSelected() {
+        act("sendScores", [root.selectedId], "", function (r) {
+            toast(r.sent ? "Scores sent privately to " + root.plural(r.sent, "person", "people") + (r.skipped ? " (" + r.skipped + " answered with an older WhisperBox)" : "") : "Everyone already has a reply");
+        });
+    }
+    function sendReply(cid, text, done) {
+        act("replyToResponse", [root.selectedId, cid, text], "Reply sent - only this person can read it", done);
+    }
     function confirmResponse(addr) { act("confirmResponse", [root.selectedId, addr], "Receipt sent"); }
     function toggleHidden() {
         var f = root.sel; if (!f) return;
@@ -491,7 +513,7 @@ Item {
         root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
-        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false;
+        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false; root.draftQuiz = false;
     }
     function openCreate() { resetBuilder(); root.editingFormId = ""; rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     // Edit a published form: same builder, existing questions keep their ids (answers are
@@ -503,12 +525,13 @@ Item {
             var q = f.questions[i], dq = Object.assign({}, q); delete dq.options;
             dq.type = normType(q.type); dq.optionsText = (q.options || []).join("\n");
             if (q.type === "number") { dq.numMin = q.min !== undefined ? String(q.min) : ""; dq.numMax = q.max !== undefined ? String(q.max) : ""; }
+            quizIntoDraft(dq, f.quiz && f.quiz[q.id]);
             qs.push(dq);
         }
         loadBuilder({ title: f.title || "", description: f.description || "", questions: qs, restrict: !!(f.whitelist && f.whitelist.type === "addresses"),
                       allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"), max: f.maxResponses ? String(f.maxResponses) : "",
                       closeAt: f.expiresAt ? Qt.formatDateTime(new Date(Number(f.expiresAt)), "yyyy-MM-dd HH:mm") : "",
-                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous });
+                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz });
         root.editingFormId = f.id;
         rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
     }
@@ -521,13 +544,48 @@ Item {
             root.draftDirty = false; root.showCreate = false; root.editingFormId = "";
         });
     }
+    // ── quiz: the right answer per question, kept on the draft question ──
+    //   choice/dropdown: correct = index; checkbox: correctSet = [index]; boolean: correct = true|false;
+    //   text types: accepted = "a, b"; scale/number: correctNum = "4"; points = "2"
+    function quizScorable(t) { return ["radioButtons", "dropdown", "checkbox", "boolean", "text", "textarea", "email", "url", "scale", "number"].indexOf(t) >= 0; }
+    function quizIntoDraft(dq, k) {
+        if (!k || !("answer" in k)) return;
+        var a = k.answer;
+        if (dq.type === "checkbox") dq.correctSet = Array.isArray(a) ? a.slice() : [];
+        else if (dq.type === "scale" || dq.type === "number") dq.correctNum = String(a);
+        else if (Array.isArray(a)) dq.accepted = a.join(", ");
+        else dq.correct = a;
+        if (typeof k.points === "number" && k.points !== 1) dq.points = String(k.points);
+    }
+    // -> {answer, points} | null (no right answer marked)
+    function quizKeyOf(d) {
+        var a;
+        if (d.type === "radioButtons" || d.type === "dropdown") { if (typeof d.correct !== "number" || d.correct < 0) return null; a = d.correct; }
+        else if (d.type === "boolean") { if (typeof d.correct !== "boolean") return null; a = d.correct; }
+        else if (d.type === "checkbox") { if (!Array.isArray(d.correctSet) || !d.correctSet.length) return null; a = d.correctSet.slice().sort(function (x, y) { return x - y; }); }
+        else if (d.type === "scale" || d.type === "number") { var t = String(d.correctNum || "").trim(); if (t === "" || isNaN(Number(t))) return null; a = Number(t); }
+        else if (quizScorable(d.type)) {
+            a = String(d.accepted || "").split(",").map(function (x) { return x.trim(); }).filter(function (x) { return x.length > 0; });
+            if (!a.length) return null;
+        } else return null;
+        var k = { answer: a };
+        var pt = String(d.points || "").trim();
+        if (pt !== "" && !isNaN(Number(pt)) && Number(pt) >= 0 && Number(pt) !== 1) k.points = Number(pt);
+        return k;
+    }
+    function toggleCorrectSet(qi, idx) {
+        var cur = (root.draftQuestions[qi].correctSet || []).slice();
+        var at = cur.indexOf(idx);
+        if (at >= 0) cur.splice(at, 1); else cur.push(idx);
+        root.setDraft(qi, "correctSet", cur);
+    }
     function loadBuilder(b) {
         resetBuilder();
         root.draftTitle = b.title || ""; root.draftDescription = b.description || "";
         root.draftQuestions = (b.questions && b.questions.length) ? b.questions : root.draftQuestions;
         root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
         root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
-        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits; root.draftAnonymous = !!b.anonymous;
+        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits; root.draftAnonymous = !!b.anonymous; root.draftQuiz = !!b.quiz;
     }
     function openDraft(d) {
         var b = (d.def && d.def._builder) ? d.def._builder : null;
@@ -545,12 +603,13 @@ Item {
             var q = f.questions[i];
             var dq = Object.assign({}, q); delete dq.id; delete dq.options;
             dq.type = normType(q.type); dq.text = q.text || ""; dq.required = !!q.required; dq.optionsText = (q.options || []).join("\n");
+            quizIntoDraft(dq, f.quiz && f.quiz[q.id]);
             qs.push(dq);
         }
         loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
                       restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
                       max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions,
-                      allowEdits: !!f.allowEdits, anonymous: !!f.anonymous });
+                      allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz });
         rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
     readonly property var templates: [
@@ -610,14 +669,14 @@ Item {
     // Everything the builder shows - stored inside the draft so it reopens exactly.
     readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
         restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount,
-        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous })
+        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous, quiz: root.draftQuiz })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
     function buildDef(strict) {
         var err = function (m) { return { ok: false, error: m }; };
         var title = root.draftTitle.trim();
         if (strict && !title) return err("Give the form a title");
-        var qs = [], used = {}, next = 1;
+        var qs = [], used = {}, next = 1, quiz = {}, nQuiz = 0;
         for (var u = 0; u < root.draftQuestions.length; u++) { var m0 = /^q(\d+)$/.exec(String(root.draftQuestions[u].id || "")); if (root.draftQuestions[u].id) used[root.draftQuestions[u].id] = true; if (m0) next = Math.max(next, +m0[1] + 1); }
         var fresh = function () { while (used["q" + next]) next++; used["q" + next] = true; return "q" + next++; };
         var anyIds = Object.keys(used).length > 0;
@@ -645,6 +704,7 @@ Item {
                 if (mx !== "" && !isNaN(Number(mx))) q.max = Number(mx);
                 if (strict && q.min !== undefined && q.max !== undefined && q.min > q.max) return err("\"" + text + "\": minimum is above maximum");
             }
+            if (root.draftQuiz) { var qk = quizKeyOf(d); if (qk) { quiz[q.id] = qk; nQuiz++; } }
             qs.push(q);
         }
         if (strict && qs.length === 0) return err("Add at least one question");
@@ -663,6 +723,10 @@ Item {
         if (root.draftThankYou.trim()) def.thankYou = root.draftThankYou.trim();
         if (root.draftShuffle) def.shuffleQuestions = true;
         if (root.draftAllowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+        if (root.draftQuiz) {
+            if (strict && nQuiz === 0) return err("Quiz: mark the right answer for at least one question");
+            if (nQuiz > 0) def.quiz = quiz;
+        }
         if (root.draftAnonymous) { def.anonymous = true; if (strict && root.draftRestrict) return err("An anonymous form can't be members-only - it would need real addresses"); }
         return { ok: true, def: def };
     }
@@ -1180,6 +1244,13 @@ Item {
                                 }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleAutoReceipts() }
                             }
+                            WbButton {
+                                visible: root.selQuiz && root.selUnscored > 0
+                                primary: true
+                                label: root.busy("sendScores") ? "Sending..." : "Send scores (" + root.selUnscored + ")"
+                                active: !root.busy("sendScores")
+                                onClicked: root.sendScoresSelected()
+                            }
                             WbButton { label: "Export CSV"; active: root.selResponses.length > 0; onClicked: root.openCsv() }
                             WbButton { visible: !!(root.sel && root.sel.mine); label: root.showCoOwners ? "Hide co-owners" : "Co-owners" + ((root.sel && root.sel.coOwners && root.sel.coOwners.length) ? " (" + root.sel.coOwners.length + ")" : ""); onClicked: root.showCoOwners = !root.showCoOwners }
                         }
@@ -1207,6 +1278,8 @@ Item {
                                 }
                             }
                         }
+                        Text { textFormat: Text.PlainText; visible: root.selQuiz; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbSuccess
+                            text: "Quiz" + (root.selAvgScore ? "  \u00B7  average score " + root.selAvgScore : "") + "  \u00B7  scores and replies are sealed to each person - nobody else can read them" }
                         Text { textFormat: Text.PlainText
                             Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
                             visible: text.length > 0
@@ -1352,7 +1425,7 @@ Item {
                                     id: tableCol
                                     Row {   // header
                                         Repeater {
-                                            model: ["#", "From", "When"].concat((root.sel ? root.sel.questions : []).map(function (q) { return q.text; })).concat(["Receipt"])
+                                            model: ["#", "From", "When"].concat((root.sel ? root.sel.questions : []).map(function (q) { return q.text; })).concat(["Receipt"]).concat(root.selQuiz ? ["Score"] : [])
                                             Rectangle {
                                                 width: index === 0 ? 44 : (index <= 2 ? 120 : 190); height: 36; color: root.wbSurface
                                                 Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter
@@ -1370,7 +1443,7 @@ Item {
                                             color: trMa.containsMouse ? root.wbPrimarySubtle : (index % 2 ? root.wbSurfaceRaised : Qt.darker(root.wbSurfaceRaised, 1.08))
                                             Row {
                                                 Repeater {
-                                                    model: 3 + root.sel.questions.length + 1
+                                                    model: 3 + root.sel.questions.length + 1 + (root.selQuiz ? 1 : 0)
                                                     Item {
                                                         width: index === 0 ? 44 : (index <= 2 ? 120 : 190); height: 40
                                                         Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
@@ -1381,6 +1454,7 @@ Item {
                                                                 if (index === 1) return root.shortAddr(trow.r.respondent);
                                                                 if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
                                                                 if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
+                                                                if (index === 4 + root.sel.questions.length) return root.scoreText(trow.r) + (trow.r.replies > 0 ? "  \u2709" : "");
                                                                 var q = root.sel.questions[index - 3]; return root.answerText(q, root.answerOf(trow.r, q.id));
                                                             } }
                                                     }
@@ -1464,6 +1538,8 @@ Item {
                                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
                                             Text { textFormat: Text.PlainText; text: oneNav.r ? root.fmtTime(oneNav.r.submittedAt) : ""; font.pixelSize: 11; color: root.wbTextTert }
                                             Item { Layout.fillWidth: true }
+                                            Badge { visible: !!(oneNav.r && oneNav.r.outOf !== undefined); label: "Score " + root.scoreText(oneNav.r); fg: root.wbSuccess; bg: root.wbSuccessSubtle }
+                                            Badge { visible: !!(oneNav.r && oneNav.r.replies > 0); label: oneNav.r ? root.plural(oneNav.r.replies, "reply", "replies") + " sent" : ""; fg: root.wbPrimary; bg: root.wbPrimarySubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.edits > 0); label: "edited"; fg: root.wbAccent; bg: root.wbWarningSubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.confirmed); label: "Receipt sent" }
                                             WbButton { visible: !!(oneNav.r && !oneNav.r.confirmed); implicitHeight: 28; label: "Send receipt"; onClicked: root.confirmResponse(oneNav.r.respondent) }
@@ -1476,8 +1552,19 @@ Item {
                                                 Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: (index + 1) + ". " + modelData.text; font.pixelSize: 12; color: root.wbTextTert }
                                                 Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
                                                     property string v: root.answerText(modelData, root.answerOf(oneNav.r, modelData.id))
-                                                    text: v.length ? v : "(no answer)"; font.pixelSize: 15; color: v.length ? root.wbText : root.wbTextTert }
+                                                    property var ok: oneNav.r && oneNav.r.correct && modelData.id in oneNav.r.correct ? oneNav.r.correct[modelData.id] : null
+                                                    text: (ok === true ? "\u2713 " : ok === false ? "\u2717 " : "") + (v.length ? v : "(no answer)"); font.pixelSize: 15
+                                                    color: ok === true ? root.wbSuccess : ok === false ? root.wbError : (v.length ? root.wbText : root.wbTextTert) }
                                             }
+                                        }
+                                        RowLayout {   // private reply to this one answer
+                                            Layout.fillWidth: true; spacing: 8
+                                            visible: !!(oneNav.r && oneNav.r.replyPub)
+                                            InputBox { Layout.fillWidth: true; implicitHeight: 36
+                                                TextField { id: replyField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                                    font.pixelSize: 13; background: null; placeholderText: "Reply privately - only this person can read it" } }
+                                            WbButton { label: root.busy("replyToResponse") ? "Sending..." : "Send reply"; active: !root.busy("replyToResponse") && replyField.text.trim().length > 0
+                                                onClicked: root.sendReply(oneNav.r.confirmationId, replyField.text.trim(), function () { replyField.text = ""; }) }
                                         }
                                     }
                                 }
@@ -1489,7 +1576,7 @@ Item {
                     // ══ RESPONDENT VIEW ══
                     ColumnLayout {
                         Layout.fillWidth: true
-                        visible: !!(root.sel && !root.sel.mine)
+                        visible: !!(root.sel && !root.sel.mine && !root.sel.coOwner)
                         spacing: 14
 
                         Text { textFormat: Text.PlainText
@@ -1536,6 +1623,33 @@ Item {
                                     if (!f.allowed) return "This form only accepts answers from specific addresses, and yours (" + root.shortAddr(root.myAddress) + ") isn't on the list.";
                                     if (!f.publicKey) return "Still syncing this form...";
                                     return "";
+                                }
+                            }
+                        }
+                        // private replies + quiz score from the creator (sealed to this answer)
+                        Rectangle {
+                            Layout.fillWidth: true
+                            visible: !!(root.sel && root.sel.myReplies && root.sel.myReplies.length)
+                            implicitHeight: repCol.implicitHeight + 28
+                            radius: 12; color: root.wbPrimarySubtle; border.color: root.wbPrimary; border.width: 1
+                            ColumnLayout {
+                                id: repCol; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14; spacing: 10
+                                Text { textFormat: Text.PlainText; text: "FROM THE CREATOR - ONLY YOU CAN READ THIS"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 0.8; color: root.wbPrimary }
+                                Repeater {
+                                    model: root.sel && root.sel.myReplies ? root.sel.myReplies : []
+                                    ColumnLayout {
+                                        Layout.fillWidth: true; spacing: 4
+                                        Text { textFormat: Text.PlainText; visible: modelData.kind === "score"; text: "Your score: " + modelData.score + " / " + modelData.outOf; font.pixelSize: 18; font.weight: Font.Bold; color: root.wbText }
+                                        Text { textFormat: Text.PlainText; visible: modelData.kind === "score"; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                                            text: {
+                                                if (modelData.kind !== "score" || !root.sel) return "";
+                                                var c = modelData.correct || {}, out = [];
+                                                for (var i = 0; i < root.sel.questions.length; i++) { var q = root.sel.questions[i]; if (q.id in c) out.push((c[q.id] ? "\u2713 " : "\u2717 ") + q.text); }
+                                                return out.join("\n");
+                                            } }
+                                        Text { textFormat: Text.PlainText; visible: !!modelData.message; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData.message || ""; font.pixelSize: 14; color: root.wbText }
+                                        Text { textFormat: Text.PlainText; text: modelData.at ? root.fmtTime(modelData.at) : ""; font.pixelSize: 10; color: root.wbTextTert }
+                                    }
                                 }
                             }
                         }
@@ -2319,6 +2433,48 @@ Item {
                                         }
                                     }
                                 }
+                                // ── quiz: the right answer + points ──
+                                ColumnLayout {
+                                    visible: root.draftQuiz && root.quizScorable(dq.d.type)
+                                    Layout.fillWidth: true; spacing: 6
+                                    Text { textFormat: Text.PlainText; text: "RIGHT ANSWER"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 0.8; color: root.wbSuccess }
+                                    Flow {   // choices / yes-no: tap the right one(s)
+                                        visible: dq.choice || dq.d.type === "boolean"
+                                        Layout.fillWidth: true; spacing: 6
+                                        Repeater {
+                                            model: dq.d.type === "boolean" ? ["Yes", "No"] : root.draftOptions(dq.d)
+                                            Rectangle {
+                                                property bool on: dq.d.type === "boolean" ? dq.d.correct === (index === 0)
+                                                                : dq.d.type === "checkbox" ? (dq.d.correctSet || []).indexOf(index) >= 0 : dq.d.correct === index
+                                                implicitWidth: caT.implicitWidth + 18; implicitHeight: 24; radius: 12
+                                                color: on ? root.wbSuccessSubtle : "transparent"; border.color: on ? root.wbSuccess : root.wbBorder; border.width: 1
+                                                Text { id: caT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (parent.on ? "\u2713 " : "") + modelData; font.pixelSize: 11; color: parent.on ? root.wbSuccess : root.wbTextSec }
+                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: dq.d.type === "checkbox" ? root.toggleCorrectSet(dq.qi, index)
+                                                             : root.setDraft(dq.qi, "correct", dq.d.type === "boolean" ? index === 0 : (parent.on ? -1 : index)) }
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 6
+                                        InputBox {   // typed answers: accepted spellings / the number
+                                            visible: !dq.choice && dq.d.type !== "boolean"
+                                            Layout.fillWidth: true; implicitHeight: 32; color: root.wbSurface
+                                            TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                                font.pixelSize: 12; background: null
+                                                readonly property string k: dq.d.type === "scale" || dq.d.type === "number" ? "correctNum" : "accepted"
+                                                placeholderText: k === "correctNum" ? "The right number" : "Accepted answers, comma-separated (case doesn't matter)"
+                                                text: String(dq.d[k] || ""); onTextChanged: if (text !== String(dq.d[k] || "")) root.setDraft(dq.qi, k, text) }
+                                        }
+                                        InputBox {
+                                            Layout.preferredWidth: 90; implicitHeight: 32; color: root.wbSurface
+                                            TextField { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                                font.pixelSize: 12; background: null; placeholderText: "1 point"
+                                                text: String(dq.d.points || ""); onTextChanged: if (text !== String(dq.d.points || "")) root.setDraft(dq.qi, "points", text) }
+                                        }
+                                        Text { textFormat: Text.PlainText; text: "points"; font.pixelSize: 11; color: root.wbTextTert }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2413,6 +2569,14 @@ Item {
                         Text { id: anT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftAnonymous ? root.wbPrimary : root.wbTextSec
                             text: (root.draftAnonymous ? "\u2713 " : "") + "Anonymous answers (you can't link them to anyone's address)" }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.draftAnonymous = !root.draftAnonymous; if (root.draftAnonymous) root.draftRestrict = false; } }
+                    }
+                    Rectangle {   // quiz mode
+                        implicitWidth: qzT.implicitWidth + 20; implicitHeight: 30; radius: 15
+                        color: root.draftQuiz ? root.wbSuccessSubtle : "transparent"
+                        border.color: root.draftQuiz ? root.wbSuccess : root.wbBorder; border.width: 1
+                        Text { id: qzT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftQuiz ? root.wbSuccess : root.wbTextSec
+                            text: (root.draftQuiz ? "\u2713 " : "") + "Quiz (mark right answers, send each person their score privately)" }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftQuiz = !root.draftQuiz }
                     }
                     SectionLabel { text: "THANK-YOU MESSAGE (OPTIONAL)" }
                     InputBox {

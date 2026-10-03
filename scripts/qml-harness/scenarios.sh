@@ -146,6 +146,17 @@ run coowners-panel lifecycle "{\"selectedId\":\"$CAPPED\",\"showCoOwners\":true}
 run coowner-add lifecycle "{\"selectedId\":\"$CAPPED\",\"showCoOwners\":true}" "addCoOwnerHarness"
 expect "CALL whisperbox_core addCoOwner argc=2 args=$CAPPED \\| 02" "Add co-owner -> addCoOwner(formId, code)"
 
+# ── quiz + private replies ──
+QUIZ=$(fid quiz "Quiz")
+run quiz-table quiz "{\"selectedId\":\"$QUIZ\",\"respMode\":\"table\"}"
+run quiz-one quiz "{\"selectedId\":\"$QUIZ\",\"respMode\":\"one\"}"
+run quiz-respondent quiz-respondent "{\"selectedId\":\"$QUIZ\"}"
+run quiz-builder-view empty '{"showCreate":true,"builderLive":true,"draftQuiz":true,"draftTitle":"Capitals quiz","draftQuestions":[{"type":"radioButtons","text":"Capital of Czechia?","required":true,"optionsText":"Brno\nPraha\nOstrava","correct":1,"points":"2"},{"type":"text","text":"Capital of France?","required":false,"optionsText":"","accepted":"Paris"}]}'
+run quiz-builder empty '{"draftQuiz":true,"draftTitle":"Q","draftQuestions":[{"type":"radioButtons","text":"Capital?","required":true,"optionsText":"Brno\nPraha","correct":1},{"type":"text","text":"Name it","required":false,"optionsText":"","accepted":"Praha, Prague","points":"2"}]}' "doCreate"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"quiz":\{"q1":\{"answer":1\},"q2":\{"answer":\["Praha","Prague"\],"points":2\}\}' "quiz answer key goes to the core"
+run quiz-needs-answer empty '{"draftQuiz":true,"draftTitle":"Q","draftQuestions":[{"type":"text","text":"Name it","required":false,"optionsText":""}]}' "doCreate"
+deny 'CALL whisperbox_core createForm' "a quiz with no right answers isn't published"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

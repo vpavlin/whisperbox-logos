@@ -63,6 +63,8 @@ static json callCore(WhisperboxCoreImpl* c, const std::string& m, const json& a)
     else if (m == "confirmAll") r = c->confirmAll(s(0));
     else if (m == "updateForm") r = c->updateForm(s(0), s(1));
     else if (m == "addCoOwner") r = c->addCoOwner(s(0), s(1));
+    else if (m == "replyToResponse") r = c->replyToResponse(s(0), s(1), s(2));
+    else if (m == "sendScores") r = c->sendScores(s(0));
     else return json{{"error", "unknown method " + m}};
     return json::parse(r);
 }

@@ -57,7 +57,8 @@ int main(int argc, char** argv) {
             SignId d = deriveFormKey(o, k["formId"]);
             SignId an = deriveAnonIdentity(o, k["formId"]);
             n++; if (d.valid && d.pubHex == k["pubHex"] && toHex(d.priv) == k["privHex"] && an.address == k["anonAddress"]
-                     && responseDevTag("wb-dev-" + owner, k["formId"]) == k["devTag"]) ok++;
+                     && responseDevTag("wb-dev-" + owner, k["formId"]) == k["devTag"]
+                     && deriveReplyKey(o, k["formId"], "c-" + owner).pubHex == k["replyPub"]) ok++;
         }
         CHECK(n > 0 && ok == n, "every per-form key, anonymous identity and dev tag matches TS (incl. upper-case + non-ASCII ids)");
         const json& fs = fkDoc["formSeal"];
@@ -79,6 +80,19 @@ int main(int argc, char** argv) {
             if (got == c["ok"].get<bool>()) ok++; else std::printf("    mismatch: %s <- %s\n", c["q"].dump().c_str(), c["v"].dump().c_str());
         }
         CHECK(n > 30 && ok == n, "C++ validateAnswer == JS on every fixture case");
+        int sn = 0, sok = 0;
+        for (const auto& c : av["scoring"]) {
+            sn++;
+            int r = whisperbox::scoreAnswer(c["q"], c["key"], c["v"]);
+            json got = r < 0 ? json() : json(r == 1);
+            if (got == c["r"]) sok++; else std::printf("    score mismatch: %s key %s <- %s\n", c["q"].dump().c_str(), c["key"].dump().c_str(), c["v"].dump().c_str());
+        }
+        for (const auto& t : av["scoringTotals"]) {
+            sn++;
+            json got = whisperbox::scoreAnswers(t["questions"], t["key"], t["answers"]);
+            if (got == t["result"]) sok++; else std::printf("    totals mismatch: %s vs %s\n", got.dump().c_str(), t["result"].dump().c_str());
+        }
+        CHECK(sn > 20 && sok == sn, "C++ quiz scoring == JS on every fixture case");
     }
 
     // ── 2. Signed events ──────────────────────────────────────────────────────
