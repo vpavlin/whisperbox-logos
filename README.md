@@ -29,18 +29,26 @@ module wrapper) libraries. Template: [qaku-logos](https://github.com/vpavlin/qak
 ## Protocol (one shared topic, `/whisperbox/1/all/proto`)
 | event | who | notes |
 |---|---|---|
-| `form.publish` | researcher | public form def + creator signature; deterministic id |
-| `response.submit` | respondent | WHOLE response ECIES-sealed to the form key |
-| `response.confirm` | researcher | plaintext receipt echo (confirmationId) |
-| `form.close` / `form.results` | researcher | sticky close / optional aggregates |
+| `form.publish` | creator | public form definition, signed; sealing key = the form's own key |
+| `response.submit` | respondent | the WHOLE answer ECIES-sealed to the form key; no identity on the wire |
+| `response.confirm` | creator / co-owner | receipt: echoes a random id the respondent sealed (single or batch) |
+| `form.close` / `form.reopen` | creator | closed periods are remembered; answers sealed while closed never count |
+| `form.update` | creator | edit a published form (latest wins, question ids stable) |
+| `form.coowner` | creator | the form key sealed to a co-owner |
+| `response.reply` | creator / co-owner | private reply or quiz score, sealed to the answer's reply key |
 
-Append-only event log, union-by-id merge, HLC ordering, RBSR cold-start catchup.
-One response per (form, respondent) falls out of deterministic event ids.
+Append-only event log, union-by-(id, signer) merge, HLC order, RBSR catch-up.
+Full protocol: [docs/SPEC.md](docs/SPEC.md).
+
+## Docs
+- [docs/SPEC.md](docs/SPEC.md): protocol and application specification
+- [docs/BUILD.md](docs/BUILD.md): toolchain, tests, building the `.lgx` and APK, releasing
+- [docs/adr/](docs/adr/README.md): architecture decisions (0001-0016)
 
 ## Install (Basecamp 0.2.x)
-Add the package repository in Basecamp and install **WhisperBox** (it pulls
-`whisperbox_core` and `delivery_module`):
-`https://raw.githubusercontent.com/jimmy-claw/whisperbox-basecamp/main/logos-repo.json`
+Install **WhisperBox** from the mesh Basecamp repository (it pulls `whisperbox_core` and
+`delivery_module`). Current binaries are on the
+[`artifacts`](https://github.com/vpavlin/whisperbox-logos/tree/artifacts) branch.
 
 Always update `whisperbox` and `whisperbox_core` together (same version).
 
@@ -48,9 +56,8 @@ Always update `whisperbox` and `whisperbox_core` together (same version).
 Install **Loam** (the device-wide Logos node) and **WhisperBox** from the Loam
 F-Droid repository, open Loam once and approve WhisperBox when asked. Without
 Loam, WhisperBox runs its own node (Settings → Identity & network).
-Build: `cd mobile && npm install && npx expo prebuild --platform android &&
-cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a`
-(arm64 only; release signing reads `WB_*` from `~/.gradle/gradle.properties`).
+Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release signing reads
+`WB_*` from `~/.gradle/gradle.properties` on the build host).
 
 ## Privacy model
 - Form definitions (title, questions, who may answer) are public on the topic.
@@ -70,8 +77,9 @@ cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a`
 `scripts/test.sh` runs every layer that doesn't need nix: TS engine
 (convergence + golden vectors), C++ crypto + engine parity, an end-to-end test of
 the real core module over a fake delivery bus, and the QML render harness +
-interaction scenarios. Packages are built with nix on the build host:
-`nix build .#whisperbox_core .#whisperbox` (portable `.lgx`).
+interaction scenarios, JS-client-vs-C++ interop and the Keycard simulator. Packages are
+built with nix (`nix build .#whisperbox_core .#whisperbox`); releases go through
+`scripts/release/` (see [docs/BUILD.md](docs/BUILD.md)).
 
 ## License
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
