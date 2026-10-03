@@ -68,6 +68,7 @@ Item {
     property string draftThankYou: ""
     property bool draftShuffle: false
     property bool draftAllowEdits: false
+    property string editingFormId: ""     // builder is editing a PUBLISHED form (form.update)
     property bool editing: false          // respondent is editing an already-sent answer
     property double nowTick: Date.now()   // refreshes "N min left"
     Timer { interval: 20000; running: true; repeat: true; onTriggered: root.nowTick = Date.now() }
@@ -487,7 +488,34 @@ Item {
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
         root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false;
     }
-    function openCreate() { resetBuilder(); rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
+    function openCreate() { resetBuilder(); root.editingFormId = ""; rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
+    // Edit a published form: same builder, existing questions keep their ids (answers are
+    // stored by question id), saved as a form.update - no draft, no scheduling.
+    function openEditForm() {
+        var f = root.sel; if (!f || !f.mine) return;
+        var qs = [];
+        for (var i = 0; i < (f.questions || []).length; i++) {
+            var q = f.questions[i], dq = Object.assign({}, q); delete dq.options;
+            dq.type = normType(q.type); dq.optionsText = (q.options || []).join("\n");
+            if (q.type === "number") { dq.numMin = q.min !== undefined ? String(q.min) : ""; dq.numMax = q.max !== undefined ? String(q.max) : ""; }
+            qs.push(dq);
+        }
+        loadBuilder({ title: f.title || "", description: f.description || "", questions: qs, restrict: !!(f.whitelist && f.whitelist.type === "addresses"),
+                      allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"), max: f.maxResponses ? String(f.maxResponses) : "",
+                      closeAt: f.expiresAt ? Qt.formatDateTime(new Date(Number(f.expiresAt)), "yyyy-MM-dd HH:mm") : "",
+                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits });
+        root.editingFormId = f.id;
+        rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
+    }
+    function doUpdate() {
+        var b = buildDef(true);
+        if (!b.ok) { toast(b.error); return; }
+        var def = Object.assign({}, b.def); delete def._builder;
+        var fid = root.editingFormId;
+        act("updateForm", [fid, JSON.stringify(def)], "Form updated - everyone sees the new version", function () {
+            root.draftDirty = false; root.showCreate = false; root.editingFormId = "";
+        });
+    }
     function loadBuilder(b) {
         resetBuilder();
         root.draftTitle = b.title || ""; root.draftDescription = b.description || "";
@@ -560,7 +588,8 @@ Item {
         var a = root.draftQuestions.slice(); var t = a[i]; a[i] = a[j]; a[j] = t; root.draftQuestions = a; rebuildBuilder();
     }
     function duplicateDraftQuestion(i) {
-        var a = root.draftQuestions.slice(); a.splice(i + 1, 0, Object.assign({}, a[i])); root.draftQuestions = a; rebuildBuilder();
+        var c = Object.assign({}, root.draftQuestions[i]); delete c.id;   // a copy is a NEW question
+        var a = root.draftQuestions.slice(); a.splice(i + 1, 0, c); root.draftQuestions = a; rebuildBuilder();
     }
     function setDraft(i, prop, v) { if (i < 0 || i >= root.draftQuestions.length) return; var a = root.draftQuestions.slice(); var q = Object.assign({}, a[i]); q[prop] = v; a[i] = q; root.draftQuestions = a; }
     function draftOptions(q) {
@@ -583,11 +612,15 @@ Item {
         var err = function (m) { return { ok: false, error: m }; };
         var title = root.draftTitle.trim();
         if (strict && !title) return err("Give the form a title");
-        var qs = [];
+        var qs = [], used = {}, next = 1;
+        for (var u = 0; u < root.draftQuestions.length; u++) { var m0 = /^q(\d+)$/.exec(String(root.draftQuestions[u].id || "")); if (root.draftQuestions[u].id) used[root.draftQuestions[u].id] = true; if (m0) next = Math.max(next, +m0[1] + 1); }
+        var fresh = function () { while (used["q" + next]) next++; used["q" + next] = true; return "q" + next++; };
+        var anyIds = Object.keys(used).length > 0;
         for (var i = 0; i < root.draftQuestions.length; i++) {
             var d = root.draftQuestions[i], text = String(d.text || "").trim();
             if (!text) continue;
-            var q = { id: "q" + (qs.length + 1), type: d.type, text: text, required: !!d.required };
+            // existing questions keep their id (answers are stored by id); new ones get a fresh one
+            var q = { id: d.id ? d.id : (anyIds ? fresh() : "q" + (qs.length + 1)), type: d.type, text: text, required: !!d.required };
             if (String(d.help || "").trim()) q.help = String(d.help).trim();
             if (d.type === "radioButtons" || d.type === "checkbox" || d.type === "dropdown") {
                 q.options = draftOptions(d);
@@ -647,10 +680,11 @@ Item {
         });
     }
     function saveCurrentDraftNow() { saveCurrentDraft(null, function () { toast("Draft saved"); }); }
-    Timer { id: draftAutosave; interval: 2500; repeat: true; running: root.showCreate && root.draftDirty
+    Timer { id: draftAutosave; interval: 2500; repeat: true; running: root.showCreate && root.draftDirty && !root.editingFormId
             onTriggered: if (!root.builderEmpty()) root.saveCurrentDraft(null) }
     Timer { id: answerDraftTimer; interval: 900; onTriggered: root.saveAnswerDraftNow() }
     function closeBuilder() {
+        if (root.editingFormId) { if (root.draftDirty) toast("Changes not saved"); root.showCreate = false; root.editingFormId = ""; return; }
         if (root.draftDirty && !builderEmpty()) saveCurrentDraft(null, function () { toast("Saved as a draft"); });
         else if (root.draftId && builderEmpty()) callVia("deleteDraft", [root.draftId], function () {});
         root.showCreate = false;
@@ -1033,6 +1067,7 @@ Item {
                             wrapMode: Text.WordWrap
                         }
                         WbButton { visible: !!root.sel && !root.previewDef; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
+                        WbButton { visible: !!(root.sel && root.sel.mine) && !root.previewDef; label: "Edit"; onClicked: root.openEditForm() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Duplicate"; onClicked: root.duplicateSelected() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Share"; onClicked: root.openShare() }
                     }
@@ -1053,7 +1088,8 @@ Item {
                         Text { textFormat: Text.PlainText;
                             height: 20
                             verticalAlignment: Text.AlignVCenter
-                            text: root.sel ? "by " + root.shortAddr(root.sel.creator) + (root.sel.createdAt ? "  ·  " + root.fmtTime(root.sel.createdAt) : "") : ""
+                            text: root.sel ? "by " + root.shortAddr(root.sel.creator) + (root.sel.createdAt ? "  ·  " + root.fmtTime(root.sel.createdAt) : "")
+                                  + (root.sel.version > 1 && root.sel.updatedAt ? "  ·  updated " + root.fmtTime(root.sel.updatedAt) : "") : ""
                             font.pixelSize: 12
                             color: root.wbTextTert
                         }
@@ -1993,7 +2029,7 @@ Item {
 
             RowLayout {
                 Layout.fillWidth: true
-                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.draftId ? "Edit draft" : "New form"; font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.editingFormId ? "Edit form" : (root.draftId ? "Edit draft" : "New form"); font.pixelSize: 22; font.weight: Font.Bold; color: root.wbText }
                 Text { textFormat: Text.PlainText; visible: !!root.draftId; text: root.draftDirty ? "saving..." : "draft saved"; font.pixelSize: 11; color: root.wbTextTert }
             }
 
@@ -2017,9 +2053,11 @@ Item {
                     width: createFlick.width - 10
                     spacing: 12
 
-                    SectionLabel { visible: !root.draftId && root.builderEmpty(); text: "START FROM A TEMPLATE" }
+                    Text { textFormat: Text.PlainText; visible: !!root.editingFormId; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbAccent
+                        text: "Editing a published form: everyone gets the new version. Answers already sent stay attached to their questions; removing a question hides its answers." }
+                    SectionLabel { visible: !root.draftId && !root.editingFormId && root.builderEmpty(); text: "START FROM A TEMPLATE" }
                     Flow {
-                        visible: !root.draftId && root.builderEmpty()
+                        visible: !root.draftId && !root.editingFormId && root.builderEmpty()
                         Layout.fillWidth: true; spacing: 6
                         Repeater {
                             model: root.templates
@@ -2350,13 +2388,14 @@ Item {
 
             RowLayout {
                 Layout.fillWidth: true
-                WbButton { visible: !!root.draftId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
+                WbButton { visible: !!root.draftId && !root.editingFormId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Close"; onClicked: root.closeBuilder() }
                 WbButton { label: "Preview"; onClicked: root.openPreview() }
-                WbButton { label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
-                WbButton { label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
-                WbButton { primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
+                WbButton { visible: !root.editingFormId; label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
+                WbButton { visible: !root.editingFormId; label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
+                WbButton { visible: !root.editingFormId; primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
+                WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm"); onClicked: root.doUpdate() }
             }
         }
     }

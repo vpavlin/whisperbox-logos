@@ -126,6 +126,15 @@ expect 'DUMP builderState .*"allowEdits":true' "builder keeps the edit setting i
 run builder-edits-wire creator '{"draftAllowEdits":true,"draftTitle":"E","draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]}' "doCreate"
 expect 'CALL whisperbox_core createForm argc=1 args=.*"allowEdits":true,"editWindowMinutes":15' "allowEdits + 15-minute window go on the wire"
 
+# ── edit after publishing ──
+WB_DUMP=editingFormId,builderState run edit-form lifecycle "{\"selectedId\":\"$CAPPED\"}" "openEditForm"
+expect "DUMP editingFormId \\[\"$CAPPED\"\\]" "Edit opens the builder on the published form"
+expect 'DUMP builderState .*"id":"q1"' "existing questions keep their ids in the builder"
+run edit-save lifecycle "{\"editingFormId\":\"$CAPPED\",\"draftTitle\":\"Capped v2\",\"draftQuestions\":[{\"type\":\"text\",\"text\":\"New first\",\"required\":false,\"optionsText\":\"\"},{\"id\":\"q1\",\"type\":\"boolean\",\"text\":\"Coming?\",\"required\":true,\"optionsText\":\"\"}]}" "doUpdate"
+expect "CALL whisperbox_core updateForm argc=2 args=$CAPPED \\| .*\"id\":\"q2\",\"type\":\"text\",\"text\":\"New first\".*\"id\":\"q1\",\"type\":\"boolean\"" "a question inserted above keeps q1 on the old one (new one gets q2)"
+deny 'CALL whisperbox_core createForm' "saving an edit doesn't publish a new form"
+deny '_builder' "builder state stays off the wire"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

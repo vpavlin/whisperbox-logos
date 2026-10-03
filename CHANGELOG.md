@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.6 desktop / 0.3.7 Android (2026-10-03) - edit after publishing
+
+- **Edit a published form** ("Edit" on your form): title, description, questions and
+  settings; everyone gets the new version (a creator-signed `form.update`, the latest wins;
+  updates from anyone else are dropped). Existing questions keep their ids, so answers
+  already sent stay attached even when questions are inserted or reordered. Respondents
+  see "updated <time>"; new rules (e.g. a changed limit) apply to new answers.
+- Copying a question in the builder now always creates a new question id.
+
 ## 0.3.5 desktop / 0.3.6 Android (2026-10-03) - answer edits
 
 - **Respondents can edit their answer** on forms that allow it: for 15 minutes after first

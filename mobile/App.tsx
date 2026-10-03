@@ -28,7 +28,7 @@ const C = {
 const MONO: string = Platform.OS === "android" ? "monospace" : "Courier";
 
 type Screen =
-  | { k: "home" } | { k: "form"; id: string } | { k: "create"; draftId?: string; fromForm?: string } | { k: "share"; id: string }
+  | { k: "home" } | { k: "form"; id: string } | { k: "create"; draftId?: string; fromForm?: string; editFormId?: string } | { k: "share"; id: string }
   | { k: "scan" } | { k: "identity" } | { k: "csv"; id: string; csv: string } | { k: "preview"; def: any };
 
 const QTYPES = [
@@ -208,7 +208,7 @@ function Root() {
       {screen.k === "home" && <Home {...ctx} />}
       {screen.k === "form" && <FormScreen key={screen.id} {...ctx} id={screen.id} />}
       {screen.k === "preview" && <FormScreen key="preview" {...ctx} id="preview" preview={screen.def} />}
-      {screen.k === "create" && <CreateScreen {...ctx} draftId={screen.draftId} fromForm={screen.fromForm} />}
+      {screen.k === "create" && <CreateScreen {...ctx} draftId={screen.draftId} fromForm={screen.fromForm} editFormId={screen.editFormId} />}
       {screen.k === "share" && <ShareScreen {...ctx} id={screen.id} />}
       {screen.k === "scan" && <ScanScreen {...ctx} />}
       {screen.k === "identity" && <IdentityScreen {...ctx} />}
@@ -663,7 +663,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             {f.whitelist?.type === "addresses" ? <Badge label="Members only" fg={C.accent} bg={C.warnSubtle} /> : null}
             {f.contested ? <Badge label="Contested id" fg={C.warn} bg={C.warnSubtle} /> : null}
           </View>
-          <Text style={st.meta}>by {shortAddr(f.creator)}{f.createdAt ? "  ·  " + fmtTime(f.createdAt) : ""}</Text>
+          <Text style={st.meta}>by {shortAddr(f.creator)}{f.createdAt ? "  ·  " + fmtTime(f.createdAt) : ""}{f.version > 1 && f.updatedAt ? "  ·  updated " + fmtTime(f.updatedAt) : ""}</Text>
           {f.description ? <Text style={st.desc}>{f.description}</Text> : null}
           {f.mine && f.keyMissing ? (
             <View style={{ marginTop: 14 }}>
@@ -695,6 +695,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                 {f.status === "closed" && !atCap && !ended ? <Btn label="Re-open" onPress={() => { const r = client.reopenForm(id); toast(r.ok ? "Re-opened - answers sealed while it was closed still don't count" : r.error); }} /> : null}
                 {unconfirmed > 0 ? <Btn label={`Send all receipts (${unconfirmed})`} primary onPress={() => { const r = client.confirmAll(id); toast(r.ok ? `Receipts sent for ${plural(r.confirmed, "response", "responses")}` : r.error); }} /> : null}
                 <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} />
+                <Btn label="Edit" onPress={() => push({ k: "create", editFormId: id })} />
                 <Btn label="Duplicate" onPress={() => push({ k: "create", fromForm: id })} />
               </View>
               <View style={[st.card, st.cardHead]}>
@@ -873,7 +874,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
 }
 
 // ── Create ─────────────────────────────────────────────────────────────────────
-type Draft = { type: string; text: string; required: boolean; optionsText: string; help?: string; allowOther?: boolean; shuffleOptions?: boolean;
+type Draft = { id?: string; type: string; text: string; required: boolean; optionsText: string; help?: string; allowOther?: boolean; shuffleOptions?: boolean;
   min?: number; max?: number; minLabel?: string; maxLabel?: string; style?: string; numMin?: string; numMax?: string };
 // Same starting points as the desktop builder.
 const TEMPLATES: { name: string; b: any }[] = [
@@ -903,19 +904,21 @@ function parseLocal(t: string) {
 }
 const fmtInput = (ms: number) => { const d = new Date(ms); const z = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; };
 type Builder = { title: string; description: string; questions: Draft[]; restrict: boolean; allowList: string; max: string; closeAt: string; showCount: boolean; thankYou?: string; shuffle?: boolean };
-function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { draftId?: string; fromForm?: string }) {
+function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId }: Ctx & { draftId?: string; fromForm?: string; editFormId?: string }) {
   // Start from: a saved draft, a form to duplicate, or empty.
   const init = useMemo<Builder>(() => {
     const d = draftId ? client.drafts[draftId] : null;
     if (d?.def?._builder) return d.def._builder as Builder;
-    const f = fromForm ? client.snapshot().state.forms[fromForm] : null;
+    const src = fromForm || editFormId;
+    const f = src ? client.snapshot().state.forms[src] : null;
+    // editing keeps question ids (answers are stored by id); a duplicate gets fresh ones
     if (f) return {
-      title: (f.title || "") + " (copy)", description: f.description || "",
-      questions: (f.questions || []).map((q: any) => { const { id: _i, options: _o, ...rest } = q; return { ...rest, type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
+      title: editFormId ? f.title || "" : (f.title || "") + " (copy)", description: f.description || "",
+      questions: (f.questions || []).map((q: any) => { const { id: qid, options: _o, ...rest } = q; return { ...rest, ...(editFormId ? { id: qid } : {}), type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
         ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }; }),
       thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits,
       restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
-      max: f.maxResponses ? String(f.maxResponses) : "", closeAt: "", showCount: !!f.showResponseCount,
+      max: f.maxResponses ? String(f.maxResponses) : "", closeAt: editFormId && f.expiresAt ? fmtInput(f.expiresAt) : "", showCount: !!f.showResponseCount,
     };
     return { title: "", description: "", questions: [{ type: "text", text: "", required: true, optionsText: "" }], restrict: false, allowList: "", max: "", closeAt: "", showCount: false };
   }, []);
@@ -948,9 +951,13 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
     const fail = (error: string) => ({ ok: false as const, error });
     if (strict && !title.trim()) return fail("Give the form a title");
     const questions: any[] = [];
+    const used = new Set(qs.map((d) => d.id).filter(Boolean) as string[]);
+    let next = 1 + Math.max(0, ...[...used].map((x) => Number(/^q(\d+)$/.exec(x)?.[1] || 0)));
+    const fresh = () => { while (used.has("q" + next)) next++; used.add("q" + next); return "q" + next++; };
     for (const d of qs) {
       const text = d.text.trim(); if (!text) continue;
-      const q: any = { id: "q" + (questions.length + 1), type: d.type, text, required: d.required };
+      // existing questions keep their id; new ones get a fresh one (no ids yet = q1..qn)
+      const q: any = { id: d.id || (used.size ? fresh() : "q" + (questions.length + 1)), type: d.type, text, required: d.required };
       if ((d.help || "").trim()) q.help = d.help!.trim();
       if (isChoice(d.type)) {
         q.options = d.optionsText.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -998,11 +1005,12 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
   // Autosave: drafts never get lost to a crash or an unfinished form.
   useEffect(() => {
     if (!dirty.current) { dirty.current = true; return; }   // skip the initial render
-    if (empty) return;
+    if (empty || editFormId) return;   // editing a published form: saved with "Save", no draft
     const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
     return () => clearTimeout(t);
   }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits]);
   const leave = () => {
+    if (editFormId) { pop(); return; }
     if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
     else if (empty && did.current) client.deleteDraft(did.current);
     pop();
@@ -1024,6 +1032,11 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
     const b = buildDef(true);
     if (!b.ok) { toast(b.error); return; }
     const def = b.def;
+    if (editFormId) {
+      const r = client.updateForm(editFormId, def);
+      if (r.ok) { toast("Form updated - everyone sees the new version"); pop(); } else toast(r.error);
+      return;
+    }
     if (!useCard) {
       const r = client.createForm(def);
       if (r.ok) { toast("Form published"); done(r.formId); } else toast(r.error);
@@ -1046,10 +1059,11 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
 
   return (
     <View style={st.fill}>
-      <Header title={draftId ? "Edit draft" : fromForm ? "Duplicate form" : "New form"} onBack={leave} right={<Btn label={busy ? "Publishing…" : "Publish"} primary disabled={busy} onPress={publish} />} />
+      <Header title={editFormId ? "Edit form" : draftId ? "Edit draft" : fromForm ? "Duplicate form" : "New form"} onBack={leave} right={<Btn label={busy ? "Publishing…" : editFormId ? "Save" : "Publish"} primary disabled={busy} onPress={publish} />} />
       <KeyboardAvoidingView style={st.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={st.pad} keyboardShouldPersistTaps="handled">
-          {!did.current && empty ? (
+          {editFormId ? <Banner tone="warn" text="Editing a published form: everyone gets the new version. Answers already sent stay attached to their questions; removing a question hides its answers." /> : null}
+          {!did.current && !editFormId && empty ? (
             <View style={{ marginBottom: 14 }}>
               <Label>START FROM A TEMPLATE</Label>
               <View style={st.chips}>{TEMPLATES.map((t) => <Pressable key={t.name} onPress={() => useTemplate(t.b)} style={st.chip}><Text style={st.chipT}>{t.name}</Text></Pressable>)}</View>
@@ -1081,7 +1095,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
                 <View style={[st.chips, { marginTop: 6 }]}>
                   {i > 0 ? <Pressable onPress={() => move(i, -1)} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Move question ${i + 1} up`}><Text style={st.chipT}>↑ Up</Text></Pressable> : null}
                   {i < qs.length - 1 ? <Pressable onPress={() => move(i, 1)} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Move question ${i + 1} down`}><Text style={st.chipT}>↓ Down</Text></Pressable> : null}
-                  <Pressable onPress={() => setQs((a) => [...a.slice(0, i + 1), { ...a[i] }, ...a.slice(i + 1)])} style={[st.chip, { borderColor: "transparent" }]}><Text style={st.chipT}>Copy</Text></Pressable>
+                  <Pressable onPress={() => setQs((a) => { const { id: _x, ...c } = a[i]; return [...a.slice(0, i + 1), c, ...a.slice(i + 1)]; })} style={[st.chip, { borderColor: "transparent" }]}><Text style={st.chipT}>Copy</Text></Pressable>
                   {qs.length > 1 ? (
                     <Pressable onPress={() => setQs((a) => a.filter((_, j) => j !== i))} style={[st.chip, { borderColor: "transparent" }]} accessibilityLabel={`Remove question ${i + 1}`}>
                       <Text style={[st.chipT, { color: C.err }]}>Remove</Text>
@@ -1167,14 +1181,14 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
 
           <View style={{ marginTop: 22 }}><Label>PUBLISH</Label></View>
           <View style={st.chips}>
-            <Btn label="Preview" onPress={() => {
+            {editFormId ? null : <Btn label="Preview" onPress={() => {
               const b = buildDef(false); if (!b.ok) return;
               // only the top screen is mounted: keep the edits as a draft and come back to it
               if (!empty && saveDraft(null) && did.current) replace({ k: "create", draftId: did.current });
               push({ k: "preview", def: b.def });
-            }} />
-            <Btn label="Save draft" onPress={() => { if (saveDraft(null)) toast("Draft saved"); }} />
-            <Btn label={scheduling ? "Don't schedule" : "Schedule…"} onPress={() => setScheduling((x) => !x)} />
+            }} />}
+            {!editFormId ? <Btn label="Save draft" onPress={() => { if (saveDraft(null)) toast("Draft saved"); }} /> : null}
+            {!editFormId ? <Btn label={scheduling ? "Don't schedule" : "Schedule…"} onPress={() => setScheduling((x) => !x)} /> : null}
             {did.current ? <Btn label="Delete draft" danger onPress={() => { client.deleteDraft(did.current!); dirty.current = false; toast("Draft deleted"); pop(); }} /> : null}
           </View>
           {scheduling ? (

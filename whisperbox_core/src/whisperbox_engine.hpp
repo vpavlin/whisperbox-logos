@@ -47,6 +47,7 @@ inline const std::string RESPONSE_SUBMIT   = "response.submit";
 inline const std::string RESPONSE_CONFIRM  = "response.confirm";
 inline const std::string FORM_CLOSE        = "form.close";
 inline const std::string FORM_REOPEN       = "form.reopen";   // 0.3.2+: creator re-opens
+inline const std::string FORM_UPDATE       = "form.update";   // 0.3.6+: creator edits a published form
 inline const std::string TOPIC             = "/whisperbox/1/all/proto";
 
 // ── HLC total order: wall → ctr → dev. Identical on every replica. ───────────────
@@ -170,6 +171,35 @@ struct Clock {
 // opts.verify   — authenticity hook for SIGNED gated events; null = permissive
 //                 (transition semantics — strict-drop silently hid redelivered
 //                 copies of your own submissions).
+// The fields a creator may change with form.update - normalized the same way on publish
+// and on update (mirror engine.mjs editableFields).
+inline void applyEditableFields(OrderedJson& f, const json& p) {
+    auto str = [&p](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
+    auto flag = [&p](const char* k) { return p.contains(k) && p[k].is_boolean() && p[k].get<bool>(); };
+    f["title"] = str("title");
+    f["description"] = str("description");
+    f["expiresAt"] = p.contains("expiresAt") && p["expiresAt"].is_number() ? p["expiresAt"] : json(nullptr);
+    f["questions"] = p.contains("questions") && p["questions"].is_array() ? p["questions"] : json::array();
+    f["whitelist"] = p.contains("whitelist") && p["whitelist"].is_object() ? p["whitelist"] : json({{"type", "none"}, {"value", ""}});
+    {   // answer cap: a positive integer, else null (mirror Number.isInteger)
+        json mr = nullptr;
+        if (p.contains("maxResponses") && p["maxResponses"].is_number()) {
+            double d = p["maxResponses"].get<double>();
+            if (d > 0 && d == (double)(long long)d) mr = (long long)d;
+        }
+        f["maxResponses"] = mr;
+    }
+    f["showResponseCount"] = flag("showResponseCount");
+    f["thankYou"] = str("thankYou");
+    f["shuffleQuestions"] = flag("shuffleQuestions");
+    // answer edits: window after the first answer, until the receipt
+    const bool ae = flag("allowEdits");
+    f["allowEdits"] = ae;
+    json win = nullptr;
+    if (ae) { win = 15; if (p.contains("editWindowMinutes") && p["editWindowMinutes"].is_number_integer() && p["editWindowMinutes"].get<long long>() > 0) win = p["editWindowMinutes"]; }
+    f["editWindowMinutes"] = win;
+}
+
 inline OrderedJson computeState(const std::vector<json>& mergedLog,
                                 const std::string& identity = "",
                                 std::function<bool(const json&)> verify = nullptr,
@@ -197,32 +227,12 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             std::string formId = lc(p.value("id", ""));
             OrderedJson f = OrderedJson::object();
             f["id"] = formId;
-            f["title"] = p.value("title", "");
-            f["description"] = p.value("description", "");
             f["creator"] = lc(p.value("creator", ""));
-            f["publicKey"] = p.value("publicKey", "");
-            f["createdAt"] = p.value("createdAt", 0LL);
-            f["expiresAt"] = p.contains("expiresAt") && !p["expiresAt"].is_null() ? p["expiresAt"] : nullptr;
-            f["questions"] = p.value("questions", json::array());
-            f["whitelist"] = p.value("whitelist", json({{"type", "none"}, {"value", ""}}));
-            {   // answer cap: a positive integer, else null (mirror engine.mjs Number.isInteger)
-                json mr = nullptr;
-                if (p.contains("maxResponses") && p["maxResponses"].is_number()) {
-                    double d = p["maxResponses"].get<double>();
-                    if (d > 0 && d == (double)(long long)d) mr = (long long)d;
-                }
-                f["maxResponses"] = mr;
-            }
-            f["showResponseCount"] = p.contains("showResponseCount") && p["showResponseCount"].is_boolean() && p["showResponseCount"].get<bool>();
-            f["thankYou"] = p.contains("thankYou") && p["thankYou"].is_string() ? p["thankYou"].get<std::string>() : std::string();
-            f["shuffleQuestions"] = p.contains("shuffleQuestions") && p["shuffleQuestions"].is_boolean() && p["shuffleQuestions"].get<bool>();
-            {   // answer edits (mirror engine.mjs): window after the first answer, until the receipt
-                const bool ae = p.contains("allowEdits") && p["allowEdits"].is_boolean() && p["allowEdits"].get<bool>();
-                f["allowEdits"] = ae;
-                json win = nullptr;
-                if (ae) { win = 15; if (p.contains("editWindowMinutes") && p["editWindowMinutes"].is_number_integer() && p["editWindowMinutes"].get<long long>() > 0) win = p["editWindowMinutes"]; }
-                f["editWindowMinutes"] = win;
-            }
+            f["publicKey"] = p.contains("publicKey") && p["publicKey"].is_string() ? p["publicKey"].get<std::string>() : std::string();
+            f["createdAt"] = p.contains("createdAt") && p["createdAt"].is_number() ? p["createdAt"] : json(0);
+            applyEditableFields(f, p);
+            f["version"] = 1;          // +1 per form.update
+            f["updatedAt"] = nullptr;  // hlc.wall of the latest update
             f["status"] = "open";
             f["confirmations"] = json::array();
             if (forms.contains(formId)) {
@@ -256,7 +266,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             responses.push_back(r);
             return;
         }
-        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN) {
+        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE) {
             if (verify && e.contains("sig") && !e["sig"].is_null() && !e["sig"].get<std::string>().empty()
                 && !verify(e)) { drop(dropped, "sig-invalid"); return; }
             std::string formId = lc(p.value("formId", ""));
@@ -270,6 +280,12 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
                 tf = &ai->second[author]; isFirst = false;   // a contender's own close/confirm
             }
             OrderedJson& f = *tf;
+            if (type == FORM_UPDATE) {   // latest update wins; status / receipts / closes stay
+                applyEditableFields(f, p.contains("form") && p["form"].is_object() ? p["form"] : json::object());
+                f["version"] = f["version"].get<long long>() + 1;
+                f["updatedAt"] = e.contains("hlc") && e["hlc"].contains("wall") ? e["hlc"]["wall"] : json(nullptr);
+                return;
+            }
             if (type == RESPONSE_CONFIRM) {
                 // single receipt, or many in one event ("confirm all")
                 std::vector<std::string> ids;
@@ -614,6 +630,7 @@ inline std::string responseConfirmId(const std::string& formId, const std::strin
 inline std::string formCloseId(const std::string& formId, const std::string& nonce = "") {
     return nonce.empty() ? "close:" + lc(formId) : "close:" + lc(formId) + ":" + nonce; }
 inline std::string formReopenId(const std::string& formId, const std::string& nonce) { return "reopen:" + lc(formId) + ":" + nonce; }
+inline std::string formUpdateId(const std::string& formId, const std::string& nonce) { return "update:" + lc(formId) + ":" + nonce; }
 inline std::string responseConfirmBatchId(const std::string& formId, std::vector<std::string> ids) {
     std::sort(ids.begin(), ids.end());
     std::string j; for (size_t i = 0; i < ids.size(); i++) { if (i) j += ","; j += ids[i]; }

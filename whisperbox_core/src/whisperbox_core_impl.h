@@ -62,6 +62,7 @@ public:
     std::string publishDraft(std::string draftId);
     std::string saveAnswerDraft(std::string formId, std::string answersJson);
     std::string markSeen(std::string formId);
+    std::string updateForm(std::string formId, std::string defJson);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);

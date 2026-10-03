@@ -508,6 +508,21 @@ int main(int argc, char** argv) {
         json late = B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
         CHECK(!late.value("ok", true) && late.value("error", "").find("receipt") != std::string::npos, "an edit after the receipt is refused");
 
+        // Edit after publishing: latest update wins, question ids kept, only the creator.
+        {
+            json q2 = json::array({{{"id", "q1"}, {"type", "boolean"}, {"text", "Coming? (reworded)"}, {"required", true}},
+                                   {{"id", "q2"}, {"type", "number"}, {"text", "Guests"}, {"required", false}, {"min", 0}, {"max", 5}}});
+            CHECK(A->call(A->core->updateForm(ef, json({{"title", "Editable v2"}, {"questions", q2}, {"allowEdits", true}}).dump())).value("ok", false), "creator updates the form");
+            CHECK(waitUntil([&] { return formOf(*G, ef).value("title", "") == "Editable v2" && formOf(*G, ef).value("version", 0) == 2; }, 3000), "peers see the new version");
+            CHECK(formOf(*G, ef)["questions"].size() == 2, "with the added question");
+            CHECK(!G->call(G->core->updateForm(ef, json({{"title", "hijack"}}).dump())).value("ok", true), "a non-creator can't update");
+            CHECK(G->call(G->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 3}}}).dump())).value("ok", false), "G answers the updated form");
+            CHECK(waitUntil([&] { for (auto& r : responsesOf(*A, ef)) if (r["respondent"] == G->snap()["identity"]["address"] && r["answers"].size() == 2) return true; return false; }, 3000),
+                  "creator gets the answer to the new question");
+            json bad = G->call(G->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 9}}}).dump()));
+            CHECK(!bad.value("ok", true), "updated validation applies (9 > max 5)");
+        }
+
         // Re-open an uncapped form: closed -> open again, new answers count.
         std::string rf = A->call(A->core->createForm(json({{"title", "Reopen me"}, {"questions", qs}}).dump())).value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*G, rf); }, 3000), "second form syncs");

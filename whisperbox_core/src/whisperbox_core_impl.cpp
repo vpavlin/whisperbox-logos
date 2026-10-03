@@ -679,7 +679,7 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;
     }
-    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN) {
+    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN || type == whisperbox::FORM_UPDATE) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;   // not-creator is also dropped at fold time (engine, counted there)
     }
@@ -860,6 +860,50 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
     return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse);
 }
 
+// ── create / edit ───────────────────────────────────────────────────────────────
+// The definition fields a creator sets on publish and may change with form.update
+// (the fold normalizes them the same way: whisperbox_engine.hpp applyEditableFields).
+static OrderedJson editableFromDef(const json& def) {
+    OrderedJson p = OrderedJson::object();
+    p["title"] = def.contains("title") && def["title"].is_string() ? def["title"].get<std::string>() : std::string();
+    p["description"] = def.contains("description") && def["description"].is_string() ? def["description"].get<std::string>() : std::string();
+    p["expiresAt"] = def.contains("expiresAt") && def["expiresAt"].is_number() ? def["expiresAt"] : json(nullptr);
+    p["questions"] = def.contains("questions") && def["questions"].is_array() ? def["questions"] : json::array();
+    p["whitelist"] = def.contains("whitelist") && def["whitelist"].is_object() ? def["whitelist"] : json({{"type", "none"}, {"value", ""}});
+    if (def.contains("maxResponses") && def["maxResponses"].is_number_integer() && def["maxResponses"].get<long long>() > 0) p["maxResponses"] = def["maxResponses"];
+    if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
+    if (def.contains("thankYou") && def["thankYou"].is_string() && !def["thankYou"].get<std::string>().empty()) p["thankYou"] = def["thankYou"];
+    if (def.value("shuffleQuestions", false) == true) p["shuffleQuestions"] = true;
+    if (def.value("allowEdits", false) == true) {
+        p["allowEdits"] = true;
+        p["editWindowMinutes"] = def.contains("editWindowMinutes") && def["editWindowMinutes"].is_number_integer() && def["editWindowMinutes"].get<long long>() > 0 ? def["editWindowMinutes"] : json(15);
+    }
+    return p;
+}
+
+// Edit a published form (creator). The full new definition replaces the old one on every
+// device (latest update wins); id / creator / key / creation time never change. Keep the
+// ids of existing questions - answers are stored by question id.
+std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    formId = lc(trim(formId));
+    json def;
+    try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
+    if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
+    if (def.contains("questions") && !def["questions"].is_array()) { out["ok"] = false; out["error"] = "questions must be an array"; return out.dump(); }
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    OrderedJson p = OrderedJson::object();
+    p["formId"] = formId; p["author"] = m_signId.address; p["form"] = editableFromDef(def);
+    json e = buildEvent(whisperbox::FORM_UPDATE, whisperbox::formUpdateId(formId, randomHex(6)), p, /*sign=*/true);
+    adoptLocal(e); broadcastEvent(e); publishState();
+    out["ok"] = true; out["formId"] = formId;
+    return out.dump();
+}
+
 // ── create ───────────────────────────────────────────────────────────────────────
 std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -874,23 +918,12 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
 
     OrderedJson p = OrderedJson::object();
     p["id"] = formId;
-    p["title"] = def.value("title", "");
-    p["description"] = def.value("description", "");
     p["creator"] = m_signId.address;
     // Sealing key = this form's OWN key, derived from the identity (whisperbox_identity.hpp).
     p["publicKey"] = whisperbox::deriveFormKey(m_signId, formId).pubHex;
     p["createdAt"] = nowMs();
-    p["expiresAt"] = def.contains("expiresAt") ? def["expiresAt"] : nullptr;
-    p["questions"] = def.value("questions", json::array());
-    p["whitelist"] = def.value("whitelist", json({{"type", "none"}, {"value", ""}}));
-    if (def.contains("maxResponses") && def["maxResponses"].is_number_integer() && def["maxResponses"].get<long long>() > 0) p["maxResponses"] = def["maxResponses"];
-    if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
-    if (def.contains("thankYou") && def["thankYou"].is_string() && !def["thankYou"].get<std::string>().empty()) p["thankYou"] = def["thankYou"];
-    if (def.value("shuffleQuestions", false) == true) p["shuffleQuestions"] = true;
-    if (def.value("allowEdits", false) == true) {
-        p["allowEdits"] = true;
-        p["editWindowMinutes"] = def.contains("editWindowMinutes") && def["editWindowMinutes"].is_number_integer() && def["editWindowMinutes"].get<long long>() > 0 ? def["editWindowMinutes"] : json(15);
-    }
+    OrderedJson ed = editableFromDef(def);
+    for (auto it = ed.begin(); it != ed.end(); ++it) p[it.key()] = it.value();
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
     adoptLocal(e);
