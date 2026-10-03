@@ -3,7 +3,7 @@
     "name": "WhisperBox",
     "slug": "whisperbox",
     "scheme": "whisperbox",
-    "version": "0.3.5",
+    "version": "0.3.6",
     "orientation": "portrait",
     "platforms": [
       "android",
@@ -14,7 +14,7 @@
     "backgroundColor": "#0b0b10",
     "android": {
       "package": "xyz.vpavlin.whisperbox",
-      "versionCode": 9,
+      "versionCode": 10,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0b0b10"

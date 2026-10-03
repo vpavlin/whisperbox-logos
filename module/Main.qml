@@ -67,6 +67,17 @@ Item {
     property bool draftShowCount: false
     property string draftThankYou: ""
     property bool draftShuffle: false
+    property bool draftAllowEdits: false
+    property bool editing: false          // respondent is editing an already-sent answer
+    property double nowTick: Date.now()   // refreshes "N min left"
+    Timer { interval: 20000; running: true; repeat: true; onTriggered: root.nowTick = Date.now() }
+    function minutesLeft(until) { return Math.max(0, Math.ceil((Number(until) - root.nowTick) / 60000)); }
+    function startEditing() {
+        var f = root.sel; if (!f || !f.myAnswers) return;
+        var a = {}; var l = f.myAnswers.answers || [];
+        for (var i = 0; i < l.length; i++) a[l[i].questionId] = l[i].value;
+        root.answers = a; root.showErrors = false; root.editing = true;
+    }
     property string draftPublishAt: ""     // schedule field
     property bool draftScheduling: false
     property bool draftDirty: false
@@ -313,7 +324,7 @@ Item {
     // ── actions ──
     function selectForm(id) {
         if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); }   // flush the form we're leaving
-        root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = "";
+        root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = ""; root.editing = false;
         Qt.callLater(root.checkSeen);
         restoreAnswerDraft();
     }
@@ -405,7 +416,7 @@ Item {
     function doSubmit() {
         var f = root.sel;
         if (root.previewDef) { toast("This is a preview - answers aren't sent"); return; }
-        if (!f || !f.canRespond) return;
+        if (!f || !(f.canRespond || (root.editing && f.canEdit))) return;
         for (var pi = 0; pi < f.questions.length; pi++) {
             var pq = f.questions[pi], pe = problemOf(pq);
             if (pe) { root.showErrors = true; toast(pq.text + ": " + pe); return; }
@@ -420,8 +431,9 @@ Item {
             arr.push({ questionId: q.id, value: v });
         }
         answerDraftTimer.stop();   // the core drops the answer draft on submit
-        act("submitResponse", [f.id, JSON.stringify(arr)], "Response sealed and sent", function () {
-            root.answers = ({}); root.showErrors = false;
+        var wasEditing = root.editing;
+        act("submitResponse", [f.id, JSON.stringify(arr)], wasEditing ? "Your edited answer is sealed and sent" : "Response sealed and sent", function () {
+            root.answers = ({}); root.showErrors = false; root.editing = false;
         });
     }
     function confirmResponse(addr) { act("confirmResponse", [root.selectedId, addr], "Receipt sent"); }
@@ -473,7 +485,7 @@ Item {
         root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
-        root.draftThankYou = ""; root.draftShuffle = false;
+        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false;
     }
     function openCreate() { resetBuilder(); rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     function loadBuilder(b) {
@@ -482,7 +494,7 @@ Item {
         root.draftQuestions = (b.questions && b.questions.length) ? b.questions : root.draftQuestions;
         root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
         root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
-        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle;
+        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits;
     }
     function openDraft(d) {
         var b = (d.def && d.def._builder) ? d.def._builder : null;
@@ -504,7 +516,8 @@ Item {
         }
         loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
                       restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
-                      max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions });
+                      max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions,
+                      allowEdits: !!f.allowEdits });
         rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
     readonly property var templates: [
@@ -563,7 +576,7 @@ Item {
     // Everything the builder shows - stored inside the draft so it reopens exactly.
     readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
         restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount,
-        thankYou: root.draftThankYou, shuffle: root.draftShuffle })
+        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
     function buildDef(strict) {
@@ -611,6 +624,7 @@ Item {
         if (root.draftShowCount) def.showResponseCount = true;
         if (root.draftThankYou.trim()) def.thankYou = root.draftThankYou.trim();
         if (root.draftShuffle) def.shuffleQuestions = true;
+        if (root.draftAllowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
         return { ok: true, def: def };
     }
     function builderEmpty() {
@@ -1291,7 +1305,7 @@ Item {
                                                             font.pixelSize: 12; font.family: index === 1 ? "monospace" : ""
                                                             color: index === 3 + root.sel.questions.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
                                                             text: {
-                                                                if (index === 0) return String(trow.ri + 1);
+                                                                if (index === 0) return String(trow.ri + 1) + (trow.r.edits > 0 ? " \u270E" : "");
                                                                 if (index === 1) return root.shortAddr(trow.r.respondent);
                                                                 if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
                                                                 if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
@@ -1378,6 +1392,7 @@ Item {
                                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
                                             Text { textFormat: Text.PlainText; text: oneNav.r ? root.fmtTime(oneNav.r.submittedAt) : ""; font.pixelSize: 11; color: root.wbTextTert }
                                             Item { Layout.fillWidth: true }
+                                            Badge { visible: !!(oneNav.r && oneNav.r.edits > 0); label: "edited"; fg: root.wbAccent; bg: root.wbWarningSubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.confirmed); label: "Receipt sent" }
                                             WbButton { visible: !!(oneNav.r && !oneNav.r.confirmed); implicitHeight: 28; label: "Send receipt"; onClicked: root.confirmResponse(oneNav.r.respondent) }
                                         }
@@ -1455,9 +1470,17 @@ Item {
                         // What I answered (a private local copy - the sent answers are sealed to the creator)
                         ColumnLayout {
                             Layout.fillWidth: true
-                            visible: !!(root.sel && !root.sel.mine && root.sel.mySubmitted)
+                            visible: !!(root.sel && !root.sel.mine && root.sel.mySubmitted && !root.editing)
                             spacing: 10
-                            SectionLabel { text: "YOUR ANSWERS" }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                SectionLabel { Layout.fillWidth: true; text: "YOUR ANSWERS" }
+                                WbButton {
+                                    visible: !!(root.sel && root.sel.canEdit)
+                                    label: "Edit answers (" + root.minutesLeft(root.sel ? root.sel.editUntil : 0) + " min left)"
+                                    onClicked: root.startEditing()
+                                }
+                            }
                             Text { textFormat: Text.PlainText
                                 visible: !!(root.sel && root.sel.mySubmitted && !root.sel.myAnswers)
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -1501,7 +1524,7 @@ Item {
                         }
 
                         Repeater {
-                            model: (root.sel && root.sel.canRespond) ? root.shownQuestions : []
+                            model: (root.sel && (root.sel.canRespond || (root.editing && root.sel.canEdit))) ? root.shownQuestions : []
                             ColumnLayout {
                                 id: qBlock
                                 Layout.fillWidth: true
@@ -1667,11 +1690,11 @@ Item {
                         }
 
                         WbButton {
-                            visible: !!(root.sel && root.sel.canRespond)
+                            visible: !!(root.sel && (root.sel.canRespond || (root.editing && root.sel.canEdit)))
                             Layout.fillWidth: true
                             implicitHeight: 46
                             primary: true
-                            label: root.busy("submitResponse") ? "Sealing..." : "Seal and send answers"
+                            label: root.busy("submitResponse") ? "Sealing..." : (root.editing ? "Seal and send the edited answer" : "Seal and send answers")
                             active: !root.busy("submitResponse")
                             onClicked: root.doSubmit()
                         }
@@ -2285,6 +2308,14 @@ Item {
                         border.color: root.draftShuffle ? root.wbPrimary : root.wbBorder; border.width: 1
                         Text { id: shT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShuffle ? "\u2713 " : "") + "Shuffle question order for each respondent"; font.pixelSize: 12; color: root.draftShuffle ? root.wbPrimary : root.wbTextSec }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftShuffle = !root.draftShuffle }
+                    }
+                    Rectangle {
+                        implicitWidth: aeT.implicitWidth + 22; implicitHeight: 30; radius: 15
+                        color: root.draftAllowEdits ? root.wbPrimarySubtle : "transparent"
+                        border.color: root.draftAllowEdits ? root.wbPrimary : root.wbBorder; border.width: 1
+                        Text { id: aeT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftAllowEdits ? root.wbPrimary : root.wbTextSec
+                            text: (root.draftAllowEdits ? "\u2713 " : "") + "Let people edit their answer for 15 minutes (until you send a receipt)" }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftAllowEdits = !root.draftAllowEdits }
                     }
                     SectionLabel { text: "THANK-YOU MESSAGE (OPTIONAL)" }
                     InputBox {

@@ -84,13 +84,27 @@ int main(int argc, char** argv) {
         auto openC = [&](const std::string& hex) -> json {
             try { Bytes pt = eciesOpen(cid.priv, fromHex(hex)); return json::parse(std::string(pt.begin(), pt.end())); } catch (...) { return json(); }
         };
+        // inner signature over the decrypted answer (same rule as the core's verifyInnerResponse)
+        auto verifyInner = [](const json& pseudo) -> bool {
+            const json p = pseudo.value("payload", json::object());
+            auto str = [&p](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
+            std::string pubHex = str("pub"), sigHex = str("signature");
+            if (pubHex.empty() || sigHex.empty()) return false;
+            OrderedJson m = OrderedJson::object();
+            m["formId"] = lc(p.value("formId", "")); m["respondent"] = lc(p.value("respondent", ""));
+            m["submittedAt"] = p.value("submittedAt", 0LL); m["answers"] = p.value("answers", json::array());
+            std::string msg = "whisperbox-inner-v1|" + m.dump();
+            if (!ecdsaVerify(fromHex(pubHex), sha256(Bytes(msg.begin(), msg.end())), fromHex(sigHex))) return false;
+            Bytes h = sha256(fromHex(pubHex));
+            return ("0x" + toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
+        };
         bool ok = true;
         for (int t = 0; t < 30 && ok; t++) {
             std::vector<json> order = evs; std::shuffle(order.begin(), order.end(), rng);
             std::vector<json> log; for (auto& e : order) mergeOne(log, e);
             OrderedJson st = computeState(log, creator);
             ok = json::parse(st.dump()) == json::parse(lf["state"].dump())
-              && json::parse(creatorView(st, creator, openC).dump()) == json::parse(lf["view"].dump());
+              && json::parse(creatorView(st, creator, openC, verifyInner).dump()) == json::parse(lf["view"].dump());
             if (!ok) std::printf("    got state: %.600s\n", st.dump().c_str());
         }
         CHECK(ok, "lifecycle: re-open spans, answer cap, close-at date, batch receipts == TS (30 arrival orders)");

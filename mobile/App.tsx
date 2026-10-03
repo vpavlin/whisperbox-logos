@@ -555,6 +555,9 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   const [showErrors, setShowErrors] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [mode, setMode] = useState<"summary" | "question" | "table" | "one">("summary");
+  const [editing, setEditing] = useState(false);   // changing an already-sent answer (within the window)
+  const [tick, setTick] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setTick(Date.now()), 20000); return () => clearInterval(t); }, []);
   const [qIdx, setQIdx] = useState(0);
   const [idx, setIdx] = useState(0);
   const [filter, setFilter] = useState("");
@@ -596,6 +599,12 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   const shown: any[] = f.shuffleQuestions ? seededOrder(f.questions.length, snap.identity.address + "|" + f.id).map((i) => f.questions[i]) : f.questions || [];
   const asked = shown.filter((q) => normType(q.type) !== "section");
   const done = asked.filter((q) => !emptyVal(answers[q.id])).length;
+  const startEditing = () => {
+    const a: Record<string, any> = {};
+    for (const x of f.myAnswers?.answers || []) a[x.questionId] = x.value;
+    setAnswers(a); setShowErrors(false); setEditing(true);
+  };
+  const answering = f.canRespond || (editing && f.canEdit);
   const submit = () => {
     if (preview) { toast("This is a preview - answers aren't sent"); return; }
     for (const q of f.questions) { const e = problem(q); if (e) { setShowErrors(true); toast(q.text + ": " + e); return; } }
@@ -605,7 +614,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
     });
     typed.current = false;   // submitting drops the answer draft (client)
     const r = client.submitResponse(id, arr);
-    if (r.ok) { toast("Answers sealed and sent"); setAnswers({}); setShowErrors(false); } else toast(r.error);
+    if (r.ok) { toast(editing ? "Your edited answer is sealed and sent" : "Answers sealed and sent"); setAnswers({}); setShowErrors(false); setEditing(false); } else toast(r.error);
   };
   const unconfirmed = responses.length - confirmed;
   const list = (() => {
@@ -760,7 +769,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                   </View>
                   {list.map((r, ri) => (
                     <Pressable key={r.respondent + ri} onPress={() => { setIdx(ri); setMode("one"); }} style={[st.trow, ri % 2 ? { backgroundColor: C.raised } : null]}>
-                      <Text style={[st.td, { width: 36 }]}>{ri + 1}</Text>
+                      <Text style={[st.td, { width: 36 }]}>{ri + 1}{r.edits > 0 ? " ✎" : ""}</Text>
                       <Text style={[st.td, { width: 110, fontFamily: MONO }]} numberOfLines={1}>{shortAddr(r.respondent)}</Text>
                       {(f.questions || []).map((q: any) => <Text key={q.id} style={[st.td, { width: 160 }]} numberOfLines={2}>{answerText(q, answerOf(r, q.id))}</Text>)}
                       <Text style={[st.td, { width: 160, color: r.confirmed ? C.ok : C.warn }]}>{r.confirmed ? "sent" : "pending"}</Text>
@@ -796,6 +805,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                       <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}</Text></Pressable>
                       <Text style={st.time}>{fmtTime(cur.submittedAt)}</Text>
                       <View style={{ flex: 1 }} />
+                      {cur.edits > 0 ? <Badge label="edited" fg={C.accent} bg={C.warnSubtle} /> : null}
                       {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
                     </View>
                     {(f.questions || []).map((q: any, qi: number) => {
@@ -815,9 +825,12 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             <View style={{ marginTop: 18 }}>
               {info ? <Text style={[st.muted, { marginBottom: 8 }]}>{info}</Text> : null}
               {banner ? <Banner tone={banner.tone} text={banner.text} /> : null}
-              {f.mySubmitted ? (
+              {f.mySubmitted && !editing ? (
                 <View style={{ marginTop: 16 }}>
-                  <Label>YOUR ANSWERS</Label>
+                  <View style={[st.cardHead, { justifyContent: "space-between" }]}>
+                    <Label>YOUR ANSWERS</Label>
+                    {f.canEdit ? <Btn label={`Edit (${Math.max(0, Math.ceil((f.editUntil - tick) / 60000))} min left)`} onPress={startEditing} /> : null}
+                  </View>
                   {f.myAnswers ? (
                     <>
                       {(f.questions || []).map((q: any) => {
@@ -835,17 +848,17 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                   ) : <Text style={st.muted}>Sent from an older WhisperBox that didn't keep a copy. Only the creator can read them now.</Text>}
                 </View>
               ) : null}
-              {f.canRespond && asked.length >= 4 ? (
+              {answering && asked.length >= 4 ? (
                 <View style={{ marginTop: 14 }}>
                   <Text style={st.time}>{done} of {asked.length} answered</Text>
                   <View style={[st.barTrack, { height: 4 }]}><View style={[st.barFill, { height: 4, width: `${(100 * done) / asked.length}%` }]} /></View>
                 </View>
               ) : null}
-              {f.canRespond ? shown.map((q: any, qi: number) => (
+              {answering ? shown.map((q: any, qi: number) => (
                 <QuestionInput key={q.id} q={q} n={qi + 1} value={answers[q.id]} onChange={(v) => set(q.id, v)}
                   error={showErrors ? problem(q) : ""} order={q.shuffleOptions ? seededOrder((q.options || []).length, snap.identity.address + "|" + f.id + "|" + q.id) : null} />
               )) : null}
-              {f.canRespond ? <Btn label="Seal and send answers" primary onPress={submit} style={{ marginTop: 22, paddingVertical: 15 }} /> : null}
+              {answering ? <Btn label={editing ? "Seal and send the edited answer" : "Seal and send answers"} primary onPress={submit} style={{ marginTop: 22, paddingVertical: 15 }} /> : null}
               <View style={st.privacy}>
                 <LockMark size={14} tint={C.ok} />
                 <Text style={st.privacyT}>Answers are encrypted to the creator's key before they leave this phone. Everyone else on the network - including peers that relay and store them - sees only an opaque blob. The receipt the creator sends back can't be linked to your address.</Text>
@@ -900,7 +913,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
       title: (f.title || "") + " (copy)", description: f.description || "",
       questions: (f.questions || []).map((q: any) => { const { id: _i, options: _o, ...rest } = q; return { ...rest, type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
         ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }; }),
-      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions,
+      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits,
       restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
       max: f.maxResponses ? String(f.maxResponses) : "", closeAt: "", showCount: !!f.showResponseCount,
     };
@@ -916,6 +929,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
   const [showCount, setShowCount] = useState(init.showCount);
   const [thankYou, setThankYou] = useState(init.thankYou || "");
   const [shuffle, setShuffle] = useState(!!init.shuffle);
+  const [allowEdits, setAllowEdits] = useState(!!(init as any).allowEdits);
   const useTemplate = (b: any) => { setTitle(b.title); setDesc(b.description || ""); setQs(JSON.parse(JSON.stringify(b.questions))); setThankYou(b.thankYou || ""); };
   const [scheduling, setScheduling] = useState(!!(draftId && client.drafts[draftId]?.publishAt));
   const [publishAt, setPublishAt] = useState(draftId && client.drafts[draftId]?.publishAt ? fmtInput(client.drafts[draftId].publishAt) : "");
@@ -926,7 +940,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
   useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
   const move = (i: number, d: number) => setQs((a) => { const j = i + d; if (j < 0 || j >= a.length) return a; const b = a.slice(); [b[i], b[j]] = [b[j], b[i]]; return b; });
-  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle };
+  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits } as any;
   const empty = !title.trim() && !desc.trim() && !qs.some((q) => q.text.trim());
 
   // -> {ok, def} | {ok:false, error}. strict=false never fails (autosave of a half-done form).
@@ -971,6 +985,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
     if (showCount) def.showResponseCount = true;
     if (thankYou.trim()) def.thankYou = thankYou.trim();
     if (shuffle) def.shuffleQuestions = true;
+    if (allowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
     return { ok: true, def };
   };
   const saveDraft = (publishAtMs?: number | null) => {
@@ -986,7 +1001,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
     if (empty) return;
     const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
     return () => clearTimeout(t);
-  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle]);
+  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits]);
   const leave = () => {
     if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
     else if (empty && did.current) client.deleteDraft(did.current);
@@ -1128,6 +1143,9 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm }: Ctx & { 
             : "Each form gets its own key, derived from this phone's identity key."}</Text>
           <Pressable onPress={() => setShuffle((x) => !x)} style={[st.chip, { marginTop: 18, alignSelf: "flex-start" }, shuffle && st.chipOn]}>
             <Text style={[st.chipT, shuffle && { color: C.primary }]}>{shuffle ? "✓ " : ""}Shuffle question order for each respondent</Text>
+          </Pressable>
+          <Pressable onPress={() => setAllowEdits((x) => !x)} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, allowEdits && st.chipOn]}>
+            <Text style={[st.chipT, allowEdits && { color: C.primary }]}>{allowEdits ? "✓ " : ""}Let people edit their answer for 15 minutes (until you send a receipt)</Text>
           </Pressable>
           <View style={{ marginTop: 18 }}><Label>THANK-YOU MESSAGE (OPTIONAL)</Label></View>
           <TextInput value={thankYou} onChangeText={setThankYou} placeholder="Shown to respondents after they send their answers" placeholderTextColor={C.text3} style={st.input} />

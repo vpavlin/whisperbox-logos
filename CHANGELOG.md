@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5 desktop / 0.3.6 Android (2026-10-03) - answer edits
+
+- **Respondents can edit their answer** on forms that allow it: for 15 minutes after first
+  sending it, until the creator sends a receipt, while the form is open. Edits keep the
+  original receipt id and are signed inside the sealed answer, so nobody can "edit"
+  someone else's answer. The creator sees one response, marked "edited"; edits don't
+  count against the answer limit. Wire: form `allowEdits` / `editWindowMinutes`, fold
+  `receiptHlc`; pinned by golden-lifecycle.json (edit inside the window / too late /
+  after the receipt / unsigned / signed by someone else).
+- Fix (core): a decrypted answer with a null field could throw out of the creator view
+  (a malicious respondent could break the creator's snapshot); such answers are dropped.
+
 ## 0.3.4 desktop / 0.3.5 Android (2026-10-02) - question types, polish, new answers
 
 - **New question types**: dropdown, linear scale (numbers or stars, end labels), number

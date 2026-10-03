@@ -114,6 +114,18 @@ run new-badges lifecycle "{}"
 run new-markseen lifecycle "{}" "selectCappedForSeen"
 expect "CALL whisperbox_core markSeen argc=1 args=$CAPPED\$" "opening an own form with new answers marks them seen"
 
+# ── answer edits ──
+EDITF=$(fid editable "Editable")
+run edit-offer editable "{\"selectedId\":\"$EDITF\"}"
+WB_DUMP=answers run edit-start editable "{\"selectedId\":\"$EDITF\"}" "startEditing"
+expect 'DUMP answers \{"q1":true\}' "Edit answers prefills the sent answer"
+run edit-submit editable "{\"selectedId\":\"$EDITF\"}" "startEditing,doSubmit"
+expect "CALL whisperbox_core submitResponse argc=2 args=$EDITF \\| \\[\\{\"questionId\":\"q1\",\"value\":true\\}\\]" "editing resubmits through submitResponse"
+WB_DUMP=builderState run builder-edits creator '{"draftAllowEdits":true,"draftTitle":"E"}' ""
+expect 'DUMP builderState .*"allowEdits":true' "builder keeps the edit setting in drafts"
+run builder-edits-wire creator '{"draftAllowEdits":true,"draftTitle":"E","draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]}' "doCreate"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"allowEdits":true,"editWindowMinutes":15' "allowEdits + 15-minute window go on the wire"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

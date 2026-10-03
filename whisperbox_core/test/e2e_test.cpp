@@ -491,6 +491,23 @@ int main(int argc, char** argv) {
         CHECK(formOf(*G, cf)["confirmations"].size() == 2, "anyone can count responses from receipts (show-count)");
         CHECK(A->call(A->core->confirmAll(cf)).value("confirmed", -1) == 0, "confirm all again: nothing left to confirm");
 
+        // Answer edits: 15-minute window, locked by the receipt, signed.
+        std::string ef = A->call(A->core->createForm(json({{"title", "Editable"}, {"questions", qs}, {"allowEdits", true}}).dump())).value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*B, ef); }, 3000), "editable form syncs");
+        CHECK(formOf(*B, ef).value("allowEdits", false) && formOf(*B, ef).value("editWindowMinutes", 0) == 15, "allowEdits + 15-minute window travel with the form");
+        CHECK(B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers yes");
+        CHECK(formOf(*B, ef).value("canEdit", false), "B may still edit");
+        dumpFixture(*B, "editable");   // respondent within the edit window
+        CHECK(waitUntil([&] { return responsesOf(*A, ef).size() == 1; }, 3000), "creator has B's answer");
+        CHECK(B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", false), "B edits to no");
+        CHECK(waitUntil([&] { auto r = responsesOf(*A, ef); return r.size() == 1 && r[0]["answers"][0]["value"] == false && r[0].value("edits", 0) == 1; }, 3000),
+              "creator sees ONE response, edited, with the new answer");
+        CHECK(A->call(A->core->confirmResponse(ef, addrB)).value("ok", false), "creator sends the receipt");
+        CHECK(waitUntil([&] { return formOf(*B, ef).value("myConfirmed", false); }, 3000), "B gets the receipt");
+        CHECK(!formOf(*B, ef).value("canEdit", true), "after the receipt B can no longer edit");
+        json late = B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
+        CHECK(!late.value("ok", true) && late.value("error", "").find("receipt") != std::string::npos, "an edit after the receipt is refused");
+
         // Re-open an uncapped form: closed -> open again, new answers count.
         std::string rf = A->call(A->core->createForm(json({{"title", "Reopen me"}, {"questions", qs}}).dump())).value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*G, rf); }, 3000), "second form syncs");

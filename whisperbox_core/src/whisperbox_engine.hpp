@@ -181,6 +181,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     std::map<std::string, std::map<std::string, OrderedJson>> alts;   // formId -> creator -> view
     std::map<std::string, json> closeHlcBy;                            // "formId|creator" -> hlc
     std::map<std::string, std::vector<std::pair<json, json>>> spansBy; // "formId|creator" -> closed periods (from, to|null)
+    std::map<std::string, std::map<std::string, json>> receiptHlcBy;  // "formId|creator" -> confirmationId -> first receipt hlc
 
     OrderedJson forms = OrderedJson::object();   // insertion order = HLC publish order
     std::vector<std::pair<std::string, json>> formHlc;  // (formId, publish hlc) — feed ordering
@@ -215,6 +216,13 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             f["showResponseCount"] = p.contains("showResponseCount") && p["showResponseCount"].is_boolean() && p["showResponseCount"].get<bool>();
             f["thankYou"] = p.contains("thankYou") && p["thankYou"].is_string() ? p["thankYou"].get<std::string>() : std::string();
             f["shuffleQuestions"] = p.contains("shuffleQuestions") && p["shuffleQuestions"].is_boolean() && p["shuffleQuestions"].get<bool>();
+            {   // answer edits (mirror engine.mjs): window after the first answer, until the receipt
+                const bool ae = p.contains("allowEdits") && p["allowEdits"].is_boolean() && p["allowEdits"].get<bool>();
+                f["allowEdits"] = ae;
+                json win = nullptr;
+                if (ae) { win = 15; if (p.contains("editWindowMinutes") && p["editWindowMinutes"].is_number_integer() && p["editWindowMinutes"].get<long long>() > 0) win = p["editWindowMinutes"]; }
+                f["editWindowMinutes"] = win;
+            }
             f["status"] = "open";
             f["confirmations"] = json::array();
             if (forms.contains(formId)) {
@@ -269,10 +277,11 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
                     for (const auto& c : p["confirmationIds"]) if (c.is_string()) ids.push_back(c.get<std::string>());
                 } else if (p.contains("confirmationId") && p["confirmationId"].is_string()) ids.push_back(p["confirmationId"].get<std::string>());
                 json nc = f["confirmations"];
+                auto& rh = receiptHlcBy[formId + "|" + f["creator"].get<std::string>()];
                 for (const auto& cid : ids) {
                     if (cid.empty()) continue;
                     bool has = false; for (const auto& c : nc) if (c.get<std::string>() == cid) { has = true; break; }
-                    if (!has) nc.push_back(cid);
+                    if (!has) { nc.push_back(cid); rh[cid] = e.value("hlc", json::object()); }
                 }
                 f["confirmations"] = nc;
                 return;
@@ -345,6 +354,14 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
         spj[it.key()] = arr;
     }
     state["closedSpans"] = spj;
+    OrderedJson rhj = OrderedJson::object();   // first receipt per answer (edit lock), shown creator
+    for (auto it = forms.begin(); it != forms.end(); ++it) {
+        auto r = receiptHlcBy.find(it.key() + "|" + it.value()["creator"].get<std::string>());
+        if (r == receiptHlcBy.end() || r->second.empty()) continue;
+        OrderedJson o = OrderedJson::object(); for (auto& kv : r->second) o[kv.first] = kv.second;
+        rhj[it.key()] = o;
+    }
+    state["receiptHlc"] = rhj;
     state["creator"] = nullptr;
     OrderedJson pendEvents = OrderedJson::array();
     for (const auto& e : deferred) {
@@ -410,10 +427,14 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
     Dropped dropped;
     view["undecrypted"] = 0;
 
-    std::map<std::string, std::set<std::string>> seenRespondent; // formId → respondents (earliest HLC wins)
+    struct EditMeta { long long firstWall = 0; std::string cid; long long index = -1; };
+    std::map<std::string, std::map<std::string, EditMeta>> seenRespondent; // formId → respondent → first answer
 
     const auto& pool = state["responses"];   // HLC-ordered (fold invariant)
     for (const auto& blob : pool) {
+      // A respondent controls the decrypted JSON: a malformed field (e.g. "respondent": null)
+      // must drop that one answer, never throw out of the whole creator view.
+      try {
         json dec;
         try { dec = open(blob["encryptedPayload"].get<std::string>()); } catch (...) { dec = json(); }
         if (!dec.is_object()) { view["undecrypted"] = view["undecrypted"].get<int>() + 1; continue; }
@@ -445,7 +466,8 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
 
         // Whitelist + inner signature (original: enforced only when whitelist != none).
         std::string wlType = f["whitelist"].value("type", "none");
-        if (wlType != "none" && verifyResponse) {
+        const bool allowEdits = f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>();
+        if ((wlType != "none" || allowEdits) && verifyResponse) {   // edits must be signed too
             OrderedJson pseudo = OrderedJson::object();
             pseudo["v"] = 1;
             pseudo["id"] = blob["id"];
@@ -468,8 +490,25 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             }
         }
         auto& seen = seenRespondent[formId];
-        if (seen.count(respondent)) { drop(dropped, "duplicate-respondent"); continue; }
-        seen.insert(respondent);
+        auto prevIt = seen.find(respondent);
+        if (prevIt != seen.end()) {
+            // a later response from the same respondent = an EDIT (mirror engine.mjs)
+            EditMeta& pm = prevIt->second;
+            if (!allowEdits || pm.index < 0) { drop(dropped, "duplicate-respondent"); continue; }
+            const long long win = (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+            if (blob["hlc"].value("wall", 0LL) - pm.firstWall > win) { drop(dropped, "edit-too-late"); continue; }
+            if (state.contains("receiptHlc") && state["receiptHlc"].contains(formId) && !pm.cid.empty()
+                && state["receiptHlc"][formId].contains(pm.cid) && compareHlc(blob["hlc"], state["receiptHlc"][formId][pm.cid]) >= 0) { drop(dropped, "edit-after-receipt"); continue; }
+            auto& e = respObj[formId][(size_t)pm.index];
+            e["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
+            e["answers"] = dec.value("answers", json::array());
+            e["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
+            e["edits"] = e["edits"].get<int>() + 1;
+            continue;
+        }
+        EditMeta meta; meta.firstWall = blob["hlc"].value("wall", 0LL);
+        meta.cid = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"].get<std::string>() : "";
+        seen[respondent] = meta;
         // Answer cap: the first maxResponses in HLC order count (same on every replica).
         if (f.contains("maxResponses") && f["maxResponses"].is_number()
             && (long long)respObj[formId].size() >= f["maxResponses"].get<long long>()) { drop(dropped, "over-limit"); continue; }
@@ -482,7 +521,10 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         // Respondent-chosen random receipt id (sealed, unlinkable); null pre-0.2.
         r["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
         r["hlc"] = blob["hlc"];
+        if (allowEdits) r["edits"] = 0;   // only on editable forms (keeps older vectors stable)
+        seen[respondent].index = (long long)respObj[formId].size();
         respObj[formId].push_back(r);
+      } catch (const std::exception&) { drop(dropped, "malformed"); }
     }
 
     view["responses"] = respObj;   // by-value copy — must happen after all pushes

@@ -1,29 +1,31 @@
 {
   "creatorView": null,
-  "deviceId": "wb-188d6fd4aa98",
+  "deviceId": "wb-65522eaf0dbf",
   "diagnostics": {
     "admDropSig": 0,
     "admDropType": 0,
     "legacyReseeds": 0,
-    "rbsrRx": 0,
-    "rxDup": 0,
-    "rxNew": 0,
-    "rxRaw": 0,
-    "rxSeen": 0,
-    "txTotal": 0
+    "rbsrRx": 524,
+    "rxDup": 7316,
+    "rxNew": 5,
+    "rxRaw": 7853,
+    "rxSeen": 3520,
+    "txTotal": 822
   },
   "drafts": [],
   "hidden": [],
   "identity": {
-    "address": "0xe5d48a04b268d712f5d48f473f4b7a89110bb964",
-    "pubHex": "02337a98f8f9ad8eff3be09d3ce11d0ab11bef4e9988f4fcc25e43d1cf32cf38a1"
+    "address": "0x8f4b8e3d0473ef272e599c6afc1e6b1169042569",
+    "pubHex": "03e2aa433200579395f202d7f6fd9afb5e56e9e86f0bc59d3ad42640e0a7a52c56"
   },
   "mySubmissions": [
-    "form-620c56ec",
-    "form-ea99754a"
+    "form-0be72c3e",
+    "form-4517cb58",
+    "form-966c05e9",
+    "form-a0fd1061"
   ],
   "newResponses": 0,
-  "nodeReady": false,
+  "nodeReady": true,
   "pendingForms": [],
   "state": {
     "closeHlc": {
@@ -31,11 +33,6 @@
         "ctr": 0,
         "dev": "wb-ff716c726c1d",
         "wall": 1791001851341
-      },
-      "form-620c56ec": {
-        "ctr": 0,
-        "dev": "wb-ff716c726c1d",
-        "wall": 1791001852426
       },
       "form-966c05e9": {
         "ctr": 0,
@@ -50,28 +47,6 @@
             "ctr": 0,
             "dev": "wb-ff716c726c1d",
             "wall": 1791001851341
-          },
-          "to": null
-        }
-      ],
-      "form-620c56ec": [
-        {
-          "from": {
-            "ctr": 0,
-            "dev": "wb-ff716c726c1d",
-            "wall": 1791001851818
-          },
-          "to": {
-            "ctr": 0,
-            "dev": "wb-ff716c726c1d",
-            "wall": 1791001851895
-          }
-        },
-        {
-          "from": {
-            "ctr": 0,
-            "dev": "wb-ff716c726c1d",
-            "wall": 1791001852426
           },
           "to": null
         }
@@ -100,10 +75,7 @@
       "form-ef8db648",
       "form-68db0abe",
       "form-6dc537d1",
-      "form-a0fd1061",
-      "form-3a00b61c",
-      "form-ba0d3a30",
-      "form-9aadf4fb"
+      "form-a0fd1061"
     ],
     "forms": {
       "form-0be72c3e": {
@@ -126,8 +98,18 @@
         "linkMismatch": false,
         "maxResponses": 2,
         "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
+        "myAnswers": {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": true
+            }
+          ],
+          "firstSubmittedAt": 1791001849263,
+          "submittedAt": 1791001849263
+        },
+        "myConfirmed": true,
+        "mySubmitted": true,
         "pinnedCreator": null,
         "publicKey": "0283a848641b682f0143737b77eb1ca6d90cb4ebc00f1465e71da362a035bbbb3d",
         "questions": [
@@ -148,48 +130,9 @@
           "value": ""
         }
       },
-      "form-3a00b61c": {
-        "allowEdits": false,
-        "allowed": true,
-        "autoReceipts": false,
-        "canRespond": true,
-        "confirmations": [],
-        "contested": false,
-        "createdAt": 1791001852606,
-        "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
-        "description": "",
-        "editWindowMinutes": null,
-        "expiresAt": null,
-        "hidden": false,
-        "id": "form-3a00b61c",
-        "linkMismatch": false,
-        "maxResponses": null,
-        "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
-        "pinnedCreator": null,
-        "publicKey": "03f81adebc1112acf2b186b88b72a2411a8ef4d9293da6f45d4f3bfe921f4e6c03",
-        "questions": [
-          {
-            "id": "q1",
-            "required": true,
-            "text": "Coming?",
-            "type": "boolean"
-          }
-        ],
-        "showResponseCount": false,
-        "shuffleQuestions": false,
-        "status": "open",
-        "thankYou": "",
-        "title": "Draft now",
-        "whitelist": {
-          "type": "none",
-          "value": ""
-        }
-      },
       "form-4517cb58": {
         "allowEdits": false,
-        "allowed": false,
+        "allowed": true,
         "autoReceipts": false,
         "canRespond": false,
         "confirmations": [],
@@ -204,8 +147,18 @@
         "linkMismatch": false,
         "maxResponses": null,
         "mine": false,
+        "myAnswers": {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": "yo"
+            }
+          ],
+          "firstSubmittedAt": 1791001793104,
+          "submittedAt": 1791001793104
+        },
         "myConfirmed": false,
-        "mySubmitted": false,
+        "mySubmitted": true,
         "pinnedCreator": null,
         "publicKey": "02a1ce4361c39b3c11bb54ccdd7022b5a5c7d3198564469547d2497be323482a8f",
         "questions": [
@@ -224,57 +177,6 @@
         "whitelist": {
           "type": "addresses",
           "value": "0x8f4b8e3d0473ef272e599c6afc1e6b1169042569"
-        }
-      },
-      "form-620c56ec": {
-        "allowEdits": false,
-        "allowed": true,
-        "autoReceipts": false,
-        "canRespond": false,
-        "confirmations": [
-          "e0d2dcfd7ce96e8c"
-        ],
-        "contested": false,
-        "createdAt": 1791001851771,
-        "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
-        "description": "",
-        "editWindowMinutes": null,
-        "expiresAt": null,
-        "hidden": false,
-        "id": "form-620c56ec",
-        "linkMismatch": false,
-        "maxResponses": null,
-        "mine": false,
-        "myAnswers": {
-          "answers": [
-            {
-              "questionId": "q1",
-              "value": true
-            }
-          ],
-          "firstSubmittedAt": 1791001851953,
-          "submittedAt": 1791001851953
-        },
-        "myConfirmed": true,
-        "mySubmitted": true,
-        "pinnedCreator": null,
-        "publicKey": "03f0762eff29c37935f44e42952029fabb19d8dc43218849fd3e424d919449085b",
-        "questions": [
-          {
-            "id": "q1",
-            "required": true,
-            "text": "Coming?",
-            "type": "boolean"
-          }
-        ],
-        "showResponseCount": false,
-        "shuffleQuestions": false,
-        "status": "closed",
-        "thankYou": "",
-        "title": "Reopen me",
-        "whitelist": {
-          "type": "none",
-          "value": ""
         }
       },
       "form-68db0abe": {
@@ -372,8 +274,28 @@
         "linkMismatch": false,
         "maxResponses": null,
         "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
+        "myAnswers": {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": 1
+            },
+            {
+              "questionId": "q2",
+              "value": [
+                0
+              ]
+            },
+            {
+              "questionId": "q3",
+              "value": "no olives, please"
+            }
+          ],
+          "firstSubmittedAt": 1791001793055,
+          "submittedAt": 1791001793055
+        },
+        "myConfirmed": true,
+        "mySubmitted": true,
         "pinnedCreator": null,
         "publicKey": "035e78d2baeff29b59786292a4038990f90c8809261b7d4672f3127bdcf66bbb1d",
         "questions": [
@@ -415,63 +337,18 @@
           "value": ""
         }
       },
-      "form-9aadf4fb": {
-        "allowEdits": false,
-        "allowed": true,
-        "answerDraft": [
-          {
-            "questionId": "q1",
-            "value": true
-          }
-        ],
-        "autoReceipts": false,
-        "canRespond": true,
-        "confirmations": [],
-        "contested": false,
-        "createdAt": 1791001859430,
-        "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
-        "description": "",
-        "editWindowMinutes": null,
-        "expiresAt": null,
-        "hidden": false,
-        "id": "form-9aadf4fb",
-        "linkMismatch": false,
-        "maxResponses": null,
-        "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
-        "pinnedCreator": null,
-        "publicKey": "038dbfbb316fc1ec9ea170b7f2e013ba7fff271d0e37aa99d2bbaeb7ed81081159",
-        "questions": [
-          {
-            "id": "q1",
-            "required": true,
-            "text": "Coming?",
-            "type": "boolean"
-          }
-        ],
-        "showResponseCount": false,
-        "shuffleQuestions": false,
-        "status": "open",
-        "thankYou": "",
-        "title": "Long form",
-        "whitelist": {
-          "type": "none",
-          "value": ""
-        }
-      },
       "form-a0fd1061": {
         "allowEdits": true,
         "allowed": true,
         "autoReceipts": false,
-        "canRespond": true,
-        "confirmations": [
-          "55aed53064a67f2c"
-        ],
+        "canEdit": true,
+        "canRespond": false,
+        "confirmations": [],
         "contested": false,
         "createdAt": 1791001851585,
         "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
         "description": "",
+        "editUntil": 1791002751634,
         "editWindowMinutes": 15,
         "expiresAt": null,
         "hidden": false,
@@ -479,8 +356,18 @@
         "linkMismatch": false,
         "maxResponses": null,
         "mine": false,
+        "myAnswers": {
+          "answers": [
+            {
+              "questionId": "q1",
+              "value": true
+            }
+          ],
+          "firstSubmittedAt": 1791001851634,
+          "submittedAt": 1791001851634
+        },
         "myConfirmed": false,
-        "mySubmitted": false,
+        "mySubmitted": true,
         "pinnedCreator": null,
         "publicKey": "03aba2330fc7fcb3eed8fbc8c5935d224ff6a259a8846801ed7893ecb34422caf7",
         "questions": [
@@ -541,45 +428,6 @@
           "value": ""
         }
       },
-      "form-ba0d3a30": {
-        "allowEdits": false,
-        "allowed": true,
-        "autoReceipts": false,
-        "canRespond": true,
-        "confirmations": [],
-        "contested": false,
-        "createdAt": 1791001859338,
-        "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
-        "description": "",
-        "editWindowMinutes": null,
-        "expiresAt": null,
-        "hidden": false,
-        "id": "form-ba0d3a30",
-        "linkMismatch": false,
-        "maxResponses": null,
-        "mine": false,
-        "myConfirmed": false,
-        "mySubmitted": false,
-        "pinnedCreator": null,
-        "publicKey": "024d0cd3cf696661c032082540612561eed455956d626627b552f4044205fc63ca",
-        "questions": [
-          {
-            "id": "q1",
-            "required": true,
-            "text": "Coming?",
-            "type": "boolean"
-          }
-        ],
-        "showResponseCount": false,
-        "shuffleQuestions": false,
-        "status": "open",
-        "thankYou": "",
-        "title": "Draft scheduled",
-        "whitelist": {
-          "type": "none",
-          "value": ""
-        }
-      },
       "form-ea99754a": {
         "allowEdits": false,
         "allowed": true,
@@ -587,8 +435,8 @@
         "canRespond": false,
         "confirmations": [],
         "contested": true,
-        "createdAt": 1791001803149,
-        "creator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
+        "createdAt": 1,
+        "creator": "0xeb4ff5c9ac27dab367dccc5bc9335e12d985350e",
         "description": "",
         "editWindowMinutes": null,
         "expiresAt": null,
@@ -597,20 +445,10 @@
         "linkMismatch": false,
         "maxResponses": null,
         "mine": false,
-        "myAnswers": {
-          "answers": [
-            {
-              "questionId": "q1",
-              "value": "plenty"
-            }
-          ],
-          "firstSubmittedAt": 1791001815177,
-          "submittedAt": 1791001815177
-        },
         "myConfirmed": false,
-        "mySubmitted": true,
-        "pinnedCreator": "0xc35d51bcb8a50cb23eb4730ae44cc558e3fc5df8",
-        "publicKey": "033b28a44aac211b290abb48ce4f439145073aae8fab26a38e7eb97285dd34ef02",
+        "mySubmitted": false,
+        "pinnedCreator": null,
+        "publicKey": "0322a03d4a53a01b5ba5c0855e1285789d9871573b066b15bf7d1929e1978b2baf",
         "questions": [
           {
             "id": "q1",
@@ -723,25 +561,11 @@
           "wall": 1791001851439
         }
       },
-      "form-620c56ec": {
-        "e0d2dcfd7ce96e8c": {
-          "ctr": 0,
-          "dev": "wb-ff716c726c1d",
-          "wall": 1791001852353
-        }
-      },
       "form-966c05e9": {
         "01f284076bdbc446": {
           "ctr": 0,
           "dev": "wb-ff716c726c1d",
           "wall": 1791001793065
-        }
-      },
-      "form-a0fd1061": {
-        "55aed53064a67f2c": {
-          "ctr": 0,
-          "dev": "wb-ff716c726c1d",
-          "wall": 1791001851730
         }
       },
       "form-aa4969d0": {
@@ -842,35 +666,15 @@
           "wall": 1791001851636
         },
         "id": "resp:1e3551d277ba041d5791937ea3ccb9177ddd289f6bb2891b07ed38ba20ca2922"
-      },
-      {
-        "encryptedPayload": "0102f834bf265750387825fae07c0d339cd6efa63d366641e34f2cc52ae555bddb86a3e7f035894f69b8872b959ba638f16ee0cb591355b9b46dd483b59ed0d186656dd738cce1250f92432f37a0bd85381eaf1d2a117e27ceaa9aef4b7c0293c966d377a6d6b5206406d6ec7cc497277e8b64c277d050af9b40e604f0e5df4189d8eb291e424c6631353dc785eb31903b49e83ac57d1f07d9016bdd44dc8c7e61a9edb5e780291f2a26fefd046b78a97bd6e012dec5fdd3447c8e571bf069f756582cc70587d0be6730fec6770444114376ffbc52c22331d7f09b0032f9c52766ec2b08a320e8377e5c2becc0fd22ddeb9121b465c349889576460bdcb458d486091b55f10ab71fa8adb3e14a03861c629e593bc218e9c88997aa5c8f76f53c5728383804fcbfada6c07b5b0b216ce6964bc8bce6124b14d81c744ab7a0f6fe0d69110f3b117c673600b8214b7d826dc471bd047f826ca3429d1958eafb1068aed5799d3a89103117a0932bed49541c0e0f2c8a8e26de556c8567a117028a3c87206f60f54b970e01799146a6ccb7ca8fc147c5877657745c086aa09e8be18f523b99a3bf776008a7a0442f763672ec3adb5aef81a0f358a70f02c5de660e4d67d38af6c95c317f76abaded42dd2ae83393c91184e02a533342",
-        "hlc": {
-          "ctr": 0,
-          "dev": "wb-65522eaf0dbf",
-          "wall": 1791001851685
-        },
-        "id": "resp:1d14c3844718ba27594327f5bde6dfd8af52925ccc6978f05756c44c31a93ec2"
-      },
-      {
-        "encryptedPayload": "01027090051170e6fc0f5a945c4ff8e46adade969fcd749f55da3399a44b37616eabccac12b8659b08c556ed19cb9511f47205f0a7aa9a826f1fb806b0f2cfbff18d16001e50dee983c1f3de5c573a051481ace9b549f656e1d53a3c23fe3d34b3e52dad927b2ca46423de9203bb6fb7e425086ff9ea8954694bb7a31097b88c5a2fed7e006d51198c7fceec099f94f1c8bd02940118b3cd5c6336cf42c8241b1a031b28d86d062355b09a40bb920b35062a2c87c0ff76b1a7d1b607fe66585fe4514d765f73fb815f929282914dff65a53836b58fdb0019033c42c1ddcb803a04355623f27d0ba80999c81d2059742800aaf1f8004f32599c3e6bd250899ebd9b5998000968cc40dc2a91fa60441869624f75091fb7222bf731dc",
-        "hlc": {
-          "ctr": 0,
-          "dev": "wb-188d6fd4aa98",
-          "wall": 1791001851954
-        },
-        "id": "resp:962415d236db197bdea07e39c3368b9dbef0945cb66abdc9fafbe0a6faa46f39"
       }
     ],
     "v": 1
   },
   "storage": {
-    "dir": "/tmp/wb-e2e-lcEgBx/G",
+    "dir": "/tmp/wb-e2e-lcEgBx/B",
     "note": "",
     "ok": true
   },
   "v": 1,
-  "watched": [
-    "form-ea99754a"
-  ]
+  "watched": []
 }

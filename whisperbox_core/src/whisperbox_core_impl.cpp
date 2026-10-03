@@ -104,7 +104,8 @@ static bool emptyAnswer(const json& v) {
 // ECDSA low-S, and address(pub) must equal respondent.
 static bool verifyInnerResponse(const json& pseudo) {
     const json p = pseudo.value("payload", json::object());
-    std::string pubHex = p.value("pub", ""), sigHex = p.value("signature", "");
+    auto str = [&p](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };   // null-safe ("pub": null on unsigned answers)
+    std::string pubHex = str("pub"), sigHex = str("signature");
     if (pubHex.empty() || sigHex.empty()) return false;
     OrderedJson m = OrderedJson::object();
     m["formId"] = lc(p.value("formId", ""));
@@ -759,6 +760,12 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
             f["newResponses"] = std::max(0LL, n - m_seen[fid]);
             if (!m_hidden.count(fid)) newTotal += std::max(0LL, n - m_seen[fid]);
         }
+        if (submitted && f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>() && m_myAnswers.count(fid)) {
+            const long long first = m_myAnswers[fid].value("firstSubmittedAt", m_myAnswers[fid].value("submittedAt", 0LL));
+            const long long until = first + (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+            f["editUntil"] = until;
+            f["canEdit"] = !confirmed && f["status"].get<std::string>() == "open" && nowMs() < until;
+        }
         f["hidden"] = m_hidden.count(fid) > 0;
         f["autoReceipts"] = m_autoReceipts.count(fid) > 0;
         if (m_answerDrafts.count(fid)) f["answerDraft"] = m_answerDrafts[fid];
@@ -880,6 +887,10 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
     if (def.contains("thankYou") && def["thankYou"].is_string() && !def["thankYou"].get<std::string>().empty()) p["thankYou"] = def["thankYou"];
     if (def.value("shuffleQuestions", false) == true) p["shuffleQuestions"] = true;
+    if (def.value("allowEdits", false) == true) {
+        p["allowEdits"] = true;
+        p["editWindowMinutes"] = def.contains("editWindowMinutes") && def["editWindowMinutes"].is_number_integer() && def["editWindowMinutes"].get<long long>() > 0 ? def["editWindowMinutes"] : json(15);
+    }
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
     adoptLocal(e);
@@ -957,7 +968,21 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     const auto& f = state["forms"][formId];
     if (f["status"].get<std::string>() != "open") { out["ok"] = false; out["error"] = "form is closed"; return out.dump(); }
     if (f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>()) { out["ok"] = false; out["error"] = "this form closed at its end date"; return out.dump(); }
-    if (m_mySubmissions.count(formId)) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
+    // Answer edits: the same respondent may resubmit while the form allows it - within the
+    // edit window after the FIRST answer and before the creator's receipt (the creator's
+    // view enforces the same rule on every replica; this just refuses early).
+    const bool allowEdits = f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>();
+    bool isEdit = false;
+    long long firstAt = 0;
+    if (m_mySubmissions.count(formId)) {
+        if (!allowEdits) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
+        firstAt = m_myAnswers.count(formId) ? m_myAnswers[formId].value("firstSubmittedAt", m_myAnswers[formId].value("submittedAt", 0LL)) : 0;
+        const long long win = (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+        const std::string cid0 = m_myConfirmIds.count(formId) ? m_myConfirmIds[formId] : std::string();
+        if (!cid0.empty() && containsStr(f["confirmations"], cid0)) { out["ok"] = false; out["error"] = "the creator already sent you a receipt - your answer is final"; return out.dump(); }
+        if (firstAt <= 0 || nowMs() - firstAt > win) { out["ok"] = false; out["error"] = "the time to edit your answer is over"; return out.dump(); }
+        isEdit = true;
+    }
     {
         const std::string creator = f["creator"].get<std::string>();
         const std::string pin = m_pinned.count(formId) ? m_pinned[formId] : std::string();
@@ -992,10 +1017,11 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     resp["answers"] = answers;
     // Random receipt id, sealed: the creator echoes it publicly on confirm; only
     // this device (which keeps it) can tell the receipt is its own.
-    const std::string confirmationId = randomHex(8);
+    // an edit keeps the original receipt id (a receipt locks "this person's answer")
+    const std::string confirmationId = isEdit && m_myConfirmIds.count(formId) ? m_myConfirmIds[formId] : randomHex(8);
     resp["confirmationId"] = confirmationId;
     std::string wlType = f["whitelist"].value("type", "none");
-    if (wlType != "none") {
+    if (wlType != "none" || allowEdits) {   // editable forms: signed, so nobody can "edit" someone else's answer
         // Inner signature over the canonical content (verified by the creator when
         // whitelist != none): address(pub) must equal respondent.
         OrderedJson m = OrderedJson::object();
@@ -1026,7 +1052,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         m_mySubmissions.insert(formId);   // local, private: "I already answered this"
         m_myConfirmIds[formId] = confirmationId;
         saveMySubmissions();
-        m_myAnswers[formId] = json({{"answers", answers}, {"submittedAt", submittedAt}});
+        m_myAnswers[formId] = json({{"answers", answers}, {"submittedAt", submittedAt}, {"firstSubmittedAt", isEdit ? firstAt : submittedAt}});
         saveMyAnswers();
         if (m_answerDrafts.erase(formId)) saveDrafts();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
