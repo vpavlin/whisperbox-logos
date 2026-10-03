@@ -4,12 +4,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   View, Text, TextInput, Pressable, ScrollView, StyleSheet, BackHandler, Linking, Share,
   ActivityIndicator, Animated, RefreshControl, Switch, KeyboardAvoidingView, Platform,
+  NativeModules,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
-import { CameraView, useCameraPermissions } from "expo-camera";
 import { SharedNodeStatus } from "./src/lib/loam-transport-pkg/src/SharedNodeStatus";
 import { boot, client, net, pullHistory, setSharedNode, parseLink } from "./src/lib/whisperbox";
 import { startAnswerNotifications, ensurePermission, notificationsEnabled, setNotificationsEnabled } from "./src/lib/notify";
@@ -1356,29 +1356,28 @@ function CsvScreen({ pop, toast, csv }: Ctx & { csv: string }) {
     </View>
   );
 }
+// QR scanning: ZXing's capture screen (native/qrscan) - no Google services on the device path.
 function ScanScreen({ pop, openLink, toast }: Ctx) {
-  const [perm, request] = useCameraPermissions();
-  const done = useRef(false);
-  useEffect(() => { if (perm && !perm.granted && perm.canAskAgain) request(); }, [perm, request]);
+  const [msg, setMsg] = useState("Opening the camera…");
+  const scan = useCallback(async () => {
+    const Q: any = NativeModules.WhisperboxQrScan;
+    if (!Q) { setMsg("QR scanning isn't available in this build - paste the link instead."); return; }
+    try {
+      const data: string | null = await Q.scan("Point at a WhisperBox form's QR code");
+      if (!data) { pop(); return; }
+      if (!String(data).startsWith("whisperbox://")) { toast("That QR isn't a WhisperBox link"); setMsg("That QR isn't a WhisperBox link."); return; }
+      openLink(String(data));
+    } catch (e: any) { setMsg("Couldn't open the camera: " + String(e?.message || e)); }
+  }, [pop, openLink, toast]);
+  useEffect(() => { scan(); }, []);
   return (
     <View style={st.fill}>
       <Header title="Scan a form's QR" onBack={pop} />
-      {perm?.granted ? (
-        <View style={st.fill}>
-          <CameraView style={st.fill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-            onBarcodeScanned={({ data }) => {
-              if (done.current) return;
-              if (!String(data).startsWith("whisperbox://")) { toast("That QR isn't a WhisperBox link"); return; }
-              done.current = true; openLink(String(data));
-            }} />
-          <View pointerEvents="none" style={st.scanFrame} />
-        </View>
-      ) : (
-        <View style={[st.fill, st.center, { padding: 28 }]}>
-          <Text style={[st.muted, { textAlign: "center" }]}>WhisperBox needs the camera only to read a form's QR code.</Text>
-          <Btn label="Allow camera" primary onPress={request} style={{ marginTop: 16 }} />
-        </View>
-      )}
+      <View style={[st.fill, st.center, { padding: 28 }]}>
+        <Text style={[st.muted, { textAlign: "center" }]}>{msg}</Text>
+        <Text style={[st.muted, { textAlign: "center", marginTop: 8, fontSize: 12 }]}>WhisperBox uses the camera only to read a form's QR code, on this phone.</Text>
+        <Btn label="Scan again" primary onPress={scan} style={{ marginTop: 16 }} />
+      </View>
     </View>
   );
 }

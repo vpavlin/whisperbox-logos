@@ -34,12 +34,18 @@ git add -A && git commit -q -F "$MSG" && git push -q origin "$BRANCH" && git log
 nix build .#whisperbox_core .#whisperbox --out-link "$WB_OUT/relN" > "$WB_OUT/nix.log" 2>&1; echo "nix $?"
 
 cd mobile
-npx expo prebuild --platform android --no-install > "$WB_OUT/prebuild.log" 2>&1
-echo "sdk.dir=$ANDROID_HOME" > android/local.properties     # prebuild --clean would wipe it
+# --clean: android/ is generated; stale native config (e.g. a removed plugin's manifest
+# entries) must not survive into a release.
+npx expo prebuild --platform android --clean --no-install > "$WB_OUT/prebuild.log" 2>&1
+echo "sdk.dir=$ANDROID_HOME" > android/local.properties     # --clean wipes it
 (cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon -x lintVitalRelease > "$WB_OUT/gradle.log" 2>&1; echo "gradle $?")
 APK=android/app/build/outputs/apk/release/app-release.apk
 AAPT2="$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)"
 "$AAPT2" dump badging "$APK" | grep -E "^package" | cut -c1-100
+# No Google push / Firebase / Play services in a privacy-first app (and F-Droid rejects them).
+if "$AAPT2" dump badging "$APK" | grep -qE "c2dm|finsky|badge"; then echo "APK REQUESTS GOOGLE PUSH / REFERRER / BADGE PERMISSIONS - not publishing"; exit 1; fi
+if unzip -p "$APK" 'classes*.dex' | grep -aqE "com/google/firebase|com/google/android/gms|com/google/mlkit"; then echo "APK CONTAINS FIREBASE / PLAY SERVICES / ML KIT CODE - not publishing"; exit 1; fi
+echo "apk: no Firebase / Play services / ML Kit code, no push permissions"
 for f in "$WB_OUT"/relN/*.lgx "$WB_OUT"/relN-1/*.lgx; do
   tar xzf "$f" -O manifest.json | python3 -c "import json,sys;m=json.load(sys.stdin);print(m['name'],m['version'])"
 done

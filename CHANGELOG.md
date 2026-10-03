@@ -1,5 +1,20 @@
 # Changelog
 
+## Android 0.3.10 (2026-10-03) - no Google services
+
+- **Removed all Google code from the APK.** `expo-notifications` bundled Firebase Cloud
+  Messaging + Installations and asked for `c2dm.RECEIVE`, the Play install referrer, boot /
+  wake and ~17 launcher-badge permissions; `expo-camera`'s QR scanner is Google ML Kit +
+  Play services code scanner (Play services, Firebase components / encoders). Neither was
+  needed: WhisperBox has no push server.
+- Notifications are now posted locally by a ~70-line module (`native/localnotify`); tapping
+  one opens the form via its `whisperbox://` link.
+- QR codes are read with ZXing (`native/qrscan`, zxing-android-embedded, Apache-2.0).
+- Permissions are now: internet, camera, NFC, notifications, vibrate, Loam bind. APK 39.7 ->
+  33.4 MB. `scripts/release/release.sh` refuses any APK with Firebase / Play services / ML Kit
+  code or push / referrer / badge permissions, and always prebuilds with `--clean`.
+- Docs: `docs/SPEC.md`, `docs/BUILD.md`, ADRs 0002-0017; release scripts in `scripts/release/`.
+
 ## 0.3.8 desktop / 0.3.9 Android (2026-10-03) - quizzes, private replies
 
 - **Private replies**: every answer now carries a one-off reply key (derived from the

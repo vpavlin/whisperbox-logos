@@ -18,5 +18,6 @@
 | [0014](0014-local-state-and-data-dir.md) | Local-only state and a data folder that can't silently move | 0.3.0-0.3.4 |
 | [0015](0015-shared-delivery-node.md) | Join the device's existing delivery node | 0.3.4 |
 | [0016](0016-release-and-distribution.md) | Releases: binaries on an artifacts branch, signing key on one host, no CI yet | 0.3.0 |
+| [0017](0017-no-google-services.md) | No Google services: local notifications, ZXing QR scanning | Android 0.3.10 |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.

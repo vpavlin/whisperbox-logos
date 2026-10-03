@@ -130,7 +130,7 @@ nix build .#whisperbox_core .#whisperbox --out-link out
 ```sh
 cd mobile && npm install                 # postinstall runs patch-package (react-native-keycard fix)
 export JAVA_HOME=~/jdk/17 ANDROID_HOME=~/Android/Sdk
-npx expo prebuild --platform android --no-install
+npx expo prebuild --platform android --clean --no-install
 echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon -x lintVitalRelease
 # -> android/app/build/outputs/apk/release/app-release.apk
@@ -141,12 +141,22 @@ $ANDROID_HOME/build-tools/34.0.0/aapt2 dump badging app/build/outputs/apk/releas
   plugins on every prebuild: `plugins/withLogosDelivery.js` (prebuilt `liblogosdelivery`
   .so from `native/logosdelivery`, JNI bridge), `plugins/withKeycard.js` (NFC,
   `required=false` so devices without NFC still see the app), `plugins/withReleaseSigning.js`,
+  `plugins/withLocalNotify.js` (local-only notifications, `native/localnotify`),
+  `plugins/withQrScan.js` (ZXing QR scanner, `native/qrscan`),
   plus loam-transport's `withDeliveryClient` (the Loam shared-node AIDL client).
 - Version: `mobile/app.json` `expo.version` + `expo.android.versionCode`. Bump the code by one
   every release; F-Droid/Android refuse a non-increasing code.
+- No Google services: no Firebase, Play services or push. Notifications are posted locally
+  by the app (`withLocalNotify`) and QR codes are read with ZXing (`withQrScan`).
+  `expo-notifications` (Firebase Cloud Messaging) and `expo-camera` (ML Kit + Play services
+  code scanner) were removed in 0.3.10. `release.sh` refuses an APK that contains
+  `com/google/firebase` / `com/google/android/gms` code or requests `c2dm`, install-referrer
+  or launcher-badge permissions. Check new dependencies with
+  `aapt2 dump badging <apk> | grep uses-permission` before adding them.
 - arm64-v8a only: there is no x86_64 `liblogosdelivery`, so the emulator has no node. Test
   network behaviour on a real phone.
-- `prebuild --clean` deletes `android/local.properties`; write it back before gradle.
+- Always prebuild with `--clean` (stale native config must not survive); it deletes
+  `android/local.properties`, so write that back before gradle.
 - The release build needs most of the 8 GB box: run it in the foreground (or nohup) with
   nothing else heavy running, and keep `-x lintVitalRelease` (lint alone OOMs).
 

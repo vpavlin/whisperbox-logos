@@ -3,7 +3,7 @@
     "name": "WhisperBox",
     "slug": "whisperbox",
     "scheme": "whisperbox",
-    "version": "0.3.9",
+    "version": "0.3.10",
     "orientation": "portrait",
     "platforms": [
       "android",
@@ -14,7 +14,7 @@
     "backgroundColor": "#0b0b10",
     "android": {
       "package": "xyz.vpavlin.whisperbox",
-      "versionCode": 13,
+      "versionCode": 14,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0b0b10"
@@ -47,14 +47,9 @@
       "./plugins/withLogosDelivery",
       "./plugins/withReleaseSigning",
       "./plugins/withKeycard",
+      "./plugins/withLocalNotify",
+      "./plugins/withQrScan",
       "expo-secure-store",
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "WhisperBox uses the camera only to scan a form's QR code.",
-          "recordAudioAndroid": false
-        }
-      ],
       "./src/lib/loam-transport-pkg/plugins/withDeliveryClient.js",
       [
         "expo-splash-screen",
@@ -62,13 +57,6 @@
           "image": "./assets/splash-icon.png",
           "backgroundColor": "#0b0b10",
           "imageWidth": 180
-        }
-      ],
-      [
-        "expo-notifications",
-        {
-          "color": "#7c6ff7",
-          "defaultChannel": "answers"
         }
       ]
     ],

@@ -43,7 +43,7 @@ Full protocol: [docs/SPEC.md](docs/SPEC.md).
 ## Docs
 - [docs/SPEC.md](docs/SPEC.md): protocol and application specification
 - [docs/BUILD.md](docs/BUILD.md): toolchain, tests, building the `.lgx` and APK, releasing
-- [docs/adr/](docs/adr/README.md): architecture decisions (0001-0016)
+- [docs/adr/](docs/adr/README.md): architecture decisions (0001-0017)
 
 ## Install (Basecamp 0.2.x)
 Install **WhisperBox** from the mesh Basecamp repository (it pulls `whisperbox_core` and
