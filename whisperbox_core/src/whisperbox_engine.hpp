@@ -48,6 +48,7 @@ inline const std::string RESPONSE_CONFIRM  = "response.confirm";
 inline const std::string FORM_CLOSE        = "form.close";
 inline const std::string FORM_REOPEN       = "form.reopen";   // 0.3.2+: creator re-opens
 inline const std::string FORM_UPDATE       = "form.update";   // 0.3.6+: creator edits a published form
+inline const std::string FORM_COOWNER      = "form.coowner";  // 0.3.8+: creator shares the form key
 inline const std::string TOPIC             = "/whisperbox/1/all/proto";
 
 // ── HLC total order: wall → ctr → dev. Identical on every replica. ───────────────
@@ -192,6 +193,7 @@ inline void applyEditableFields(OrderedJson& f, const json& p) {
     f["showResponseCount"] = flag("showResponseCount");
     f["thankYou"] = str("thankYou");
     f["shuffleQuestions"] = flag("shuffleQuestions");
+    f["anonymous"] = flag("anonymous");   // respondents answer as a per-form identity
     // answer edits: window after the first answer, until the receipt
     const bool ae = flag("allowEdits");
     f["allowEdits"] = ae;
@@ -231,6 +233,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             f["publicKey"] = p.contains("publicKey") && p["publicKey"].is_string() ? p["publicKey"].get<std::string>() : std::string();
             f["createdAt"] = p.contains("createdAt") && p["createdAt"].is_number() ? p["createdAt"] : json(0);
             applyEditableFields(f, p);
+            f["coOwners"] = json::array();   // [{address, sealedKey}] - read answers + send receipts
             f["version"] = 1;          // +1 per form.update
             f["updatedAt"] = nullptr;  // hlc.wall of the latest update
             f["status"] = "open";
@@ -266,7 +269,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             responses.push_back(r);
             return;
         }
-        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE) {
+        if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE || type == FORM_COOWNER) {
             if (verify && e.contains("sig") && !e["sig"].is_null() && !e["sig"].get<std::string>().empty()
                 && !verify(e)) { drop(dropped, "sig-invalid"); return; }
             std::string formId = lc(p.value("formId", ""));
@@ -274,12 +277,25 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             const std::string author = lc(p.value("author", ""));
             OrderedJson* tf = &forms[formId];
             bool isFirst = true;
-            if (author != (*tf)["creator"].get<std::string>()) {
+            bool coOwnerReceipt = false;   // a co-owner may send receipts (only)
+            if (type == RESPONSE_CONFIRM && (*tf).contains("coOwners"))
+                for (const auto& c : (*tf)["coOwners"]) if (c.value("address", "") == author) coOwnerReceipt = true;
+            if (author != (*tf)["creator"].get<std::string>() && !coOwnerReceipt) {
                 auto ai = alts.find(formId);
                 if (ai == alts.end() || !ai->second.count(author)) { drop(dropped, "not-creator"); return; }
                 tf = &ai->second[author]; isFirst = false;   // a contender's own close/confirm
             }
             OrderedJson& f = *tf;
+            if (type == FORM_COOWNER) {
+                const std::string owner = lc(p.contains("owner") && p["owner"].is_string() ? p["owner"].get<std::string>() : std::string());
+                const bool okOwner = owner.size() == 42 && owner.rfind("0x", 0) == 0 && owner.find_first_not_of("0123456789abcdef", 2) == std::string::npos;
+                if (!okOwner || !p.contains("sealedKey") || !p["sealedKey"].is_string() || p["sealedKey"].get<std::string>().empty()) { drop(dropped, "bad-coowner"); return; }
+                json list = json::array();
+                for (const auto& c : f["coOwners"]) if (c.value("address", "") != owner) list.push_back(json::parse(c.dump()));
+                list.push_back(json({{"address", owner}, {"sealedKey", p["sealedKey"]}}));
+                f["coOwners"] = list;
+                return;
+            }
             if (type == FORM_UPDATE) {   // latest update wins; status / receipts / closes stay
                 applyEditableFields(f, p.contains("form") && p["form"].is_object() ? p["form"] : json::object());
                 f["version"] = f["version"].get<long long>() + 1;
@@ -422,13 +438,14 @@ inline std::vector<std::string> whitelistAddresses(const json& wl) {
 //          none). Injected so the engine stays crypto-free.
 inline OrderedJson creatorView(const OrderedJson& state, const std::string& identity,
                                std::function<json(const std::string&)> open,
-                               std::function<bool(const json&)> verifyResponse = nullptr) {
+                               std::function<bool(const json&)> verifyResponse = nullptr,
+                               const std::set<std::string>& alsoForms = {}) {   // forms I co-own
     const std::string ident = lc(identity);
     const auto& forms = state["forms"];
 
     std::vector<std::string> mine;
     for (auto it = forms.begin(); it != forms.end(); ++it)
-        if (it.value()["creator"].get<std::string>() == ident) mine.push_back(it.key());
+        if (it.value()["creator"].get<std::string>() == ident || alsoForms.count(it.key())) mine.push_back(it.key());
 
     OrderedJson view = OrderedJson::object();
     view["address"] = ident;
@@ -456,7 +473,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         if (!dec.is_object()) { view["undecrypted"] = view["undecrypted"].get<int>() + 1; continue; }
 
         std::string formId = lc(dec.value("formId", ""));
-        if (!forms.contains(formId) || forms.at(formId)["creator"].get<std::string>() != ident) continue; // not mine
+        if (!forms.contains(formId) || (forms.at(formId)["creator"].get<std::string>() != ident && !alsoForms.count(formId))) continue; // not mine / not co-owned
 
         const auto& f = forms.at(formId);
         const OrderedJson* spans = (state.contains("closedSpans") && state["closedSpans"].contains(formId)) ? &state["closedSpans"][formId] : nullptr;

@@ -679,7 +679,7 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;
     }
-    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN || type == whisperbox::FORM_UPDATE) {
+    if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN || type == whisperbox::FORM_UPDATE || type == whisperbox::FORM_COOWNER) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;   // not-creator is also dropped at fold time (engine, counted there)
     }
@@ -711,7 +711,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     // response confirmed by matching its receipt id against the public set
     // (module layer, NOT the engine - keeps the TS/C++ engine parity intact).
     json creatorViewJson;
-    if (state["creator"] != nullptr && m_signId.valid) {
+    if (m_signId.valid && (state["creator"] != nullptr || !coOwnedForms(state).empty())) {
         OrderedJson cv = decryptView(state);
         for (auto it = cv["responses"].begin(); it != cv["responses"].end(); ++it) {
             const std::string fid = it.key();
@@ -732,6 +732,8 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         const std::string fid = it.key();
         auto& f = it.value();
         const bool mine = m_signId.valid && f["creator"].get<std::string>() == m_signId.address;
+        const bool coOwner = !mine && isCoOwner(f);
+        f["coOwner"] = coOwner;
         const bool submitted = m_mySubmissions.count(fid) > 0;
         bool confirmed = false;
         if (submitted && m_signId.valid) {
@@ -753,7 +755,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["linkMismatch"] = linkMismatch;
         f["mine"] = mine;
         f["mySubmitted"] = submitted;
-        if (mine) {   // "N new" since the creator last looked
+        if (mine || coOwner) {   // "N new" since the creator / co-owner last looked
             long long n = (creatorViewJson.is_object() && creatorViewJson.contains("responses") && creatorViewJson["responses"].contains(fid))
                           ? (long long)creatorViewJson["responses"][fid].size() : 0;
             if (!m_seen.count(fid)) { m_seen[fid] = n; seenDirty = true; }   // first sight: nothing is "new"
@@ -841,6 +843,12 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
         if (c == m_formKeyCache.end()) c = m_formKeyCache.emplace(it.key(), whisperbox::deriveFormKey(m_signId, it.key())).first;
         if (c->second.valid && c->second.pubHex == pub) keys[pub] = &c->second;
     }
+    // forms I co-own: their key arrives sealed to my identity (form.coowner)
+    const std::set<std::string> also = coOwnedForms(state);
+    for (const auto& fid : also) {
+        const auto& f = state["forms"][fid];
+        if (const whisperbox::SignId* k = coOwnerKey(fid, f)) keys[k->pubHex] = k;
+    }
     auto open = [&](const std::string& hexBlob) -> json {
         auto c = m_openCache.find(hexBlob);
         if (c != m_openCache.end() && (!c->second.dec.is_null() || c->second.nKeys == keys.size())) return c->second.dec;
@@ -857,7 +865,68 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
         m_openCache[hexBlob] = Opened{dec, keys.size()};
         return dec;
     };
-    return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse);
+    return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse, also);
+}
+
+bool WhisperboxCoreImpl::isCoOwner(const OrderedJson& f) const {
+    if (!m_signId.valid || !f.contains("coOwners") || !f["coOwners"].is_array()) return false;
+    for (const auto& c : f["coOwners"]) if (c.is_object() && c.value("address", "") == m_signId.address) return true;
+    return false;
+}
+std::set<std::string> WhisperboxCoreImpl::coOwnedForms(const OrderedJson& state) {
+    std::set<std::string> out;
+    if (state.contains("forms")) for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it)
+        if (it.value().value("creator", "") != m_signId.address && isCoOwner(it.value())) out.insert(it.key());
+    return out;
+}
+// The form key a creator sealed to me; checked against the form's public key.
+const whisperbox::SignId* WhisperboxCoreImpl::coOwnerKey(const std::string& formId, const OrderedJson& f) {
+    for (const auto& c : f["coOwners"]) {
+        if (!c.is_object() || c.value("address", "") != m_signId.address || !c.contains("sealedKey") || !c["sealedKey"].is_string()) continue;
+        const std::string cacheKey = formId + "|" + c["sealedKey"].get<std::string>();
+        auto it = m_coKeyCache.find(cacheKey);
+        if (it == m_coKeyCache.end()) {
+            whisperbox::SignId k;
+            try {
+                whisperbox::Bytes pt = whisperbox::eciesOpen(m_signId.priv, whisperbox::fromHex(c["sealedKey"].get<std::string>()));
+                k = whisperbox::identityFromPriv(whisperbox::fromHex(std::string(pt.begin(), pt.end())));
+            } catch (...) {}
+            it = m_coKeyCache.emplace(cacheKey, k).first;
+        }
+        if (it->second.valid && it->second.pubHex == f.value("publicKey", "")) return &it->second;
+    }
+    return nullptr;
+}
+
+// Share a form's key with a co-owner (creator): they can read answers and send receipts.
+// coOwnerPubHex = their "co-owner code" (33-byte compressed public key). Can't be revoked.
+std::string WhisperboxCoreImpl::addCoOwner(std::string formId, std::string coOwnerPubHex) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    formId = lc(trim(formId)); coOwnerPubHex = lc(trim(coOwnerPubHex));
+    if (!isHex(coOwnerPubHex, 66) || (coOwnerPubHex.rfind("02", 0) != 0 && coOwnerPubHex.rfind("03", 0) != 0)) { out["ok"] = false; out["error"] = "that isn't a co-owner code (66 hex characters)"; return out.dump(); }
+    OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    const auto& f = state["forms"][formId];
+    if (f["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    // my key for this form (derived; legacy forms use the identity key)
+    whisperbox::SignId fk = f.value("publicKey", "") == m_signId.pubHex ? m_signId : whisperbox::deriveFormKey(m_signId, formId);
+    if (!fk.valid || fk.pubHex != f.value("publicKey", "")) { out["ok"] = false; out["error"] = "this form's key isn't on this device (Keycard form?) - add co-owners from the phone"; return out.dump(); }
+    whisperbox::Bytes pub = whisperbox::fromHex(coOwnerPubHex);
+    whisperbox::Bytes h = whisperbox::sha256(pub);
+    const std::string ownerAddr = "0x" + whisperbox::toHex(h.data(), 32).substr(24, 40);
+    if (ownerAddr == m_signId.address) { out["ok"] = false; out["error"] = "that's your own code"; return out.dump(); }
+    const std::string privHex = whisperbox::toHex(fk.priv);
+    std::string sealed;
+    try { sealed = whisperbox::toHex(whisperbox::eciesSeal(pub, whisperbox::Bytes(privHex.begin(), privHex.end()))); }
+    catch (...) { out["ok"] = false; out["error"] = "that co-owner code isn't a valid key"; return out.dump(); }
+    OrderedJson p = OrderedJson::object();
+    p["formId"] = formId; p["author"] = m_signId.address; p["owner"] = ownerAddr; p["sealedKey"] = sealed;
+    json e = buildEvent(whisperbox::FORM_COOWNER, "coowner:" + formId + ":" + ownerAddr, p, /*sign=*/true);
+    adoptLocal(e); broadcastEvent(e); publishState();
+    out["ok"] = true; out["formId"] = formId; out["owner"] = ownerAddr;
+    return out.dump();
 }
 
 // ── create / edit ───────────────────────────────────────────────────────────────
@@ -874,6 +943,7 @@ static OrderedJson editableFromDef(const json& def) {
     if (def.value("showResponseCount", false) == true) p["showResponseCount"] = true;
     if (def.contains("thankYou") && def["thankYou"].is_string() && !def["thankYou"].get<std::string>().empty()) p["thankYou"] = def["thankYou"];
     if (def.value("shuffleQuestions", false) == true) p["shuffleQuestions"] = true;
+    if (def.value("anonymous", false) == true) p["anonymous"] = true;
     if (def.value("allowEdits", false) == true) {
         p["allowEdits"] = true;
         p["editWindowMinutes"] = def.contains("editWindowMinutes") && def["editWindowMinutes"].is_number_integer() && def["editWindowMinutes"].get<long long>() > 0 ? def["editWindowMinutes"] : json(15);
@@ -893,6 +963,8 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
     if (def.contains("questions") && !def["questions"].is_array()) { out["ok"] = false; out["error"] = "questions must be an array"; return out.dump(); }
+    if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
+        out["ok"] = false; out["error"] = "an anonymous form can't be members-only (that needs real addresses)"; return out.dump(); }
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
@@ -912,6 +984,8 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     json def;
     try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
+    if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
+        out["ok"] = false; out["error"] = "an anonymous form can't be members-only (that needs real addresses)"; return out.dump(); }
     std::string formId = lc(def.value("id", ""));
     if (formId.empty()) formId = "form-" + randomHex(4);
     if (def.contains("questions") && !def["questions"].is_array()) { out["ok"] = false; out["error"] = "questions must be an array"; return out.dump(); }
@@ -962,7 +1036,7 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     respondentAddr = lc(respondentAddr);
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
-    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address && !isCoOwner(state["forms"][formId])) { out["ok"] = false; out["error"] = "not the creator or a co-owner"; return out.dump(); }
 
     // The receipt id is the one the respondent SEALED inside its response (random,
     // unlinkable); legacy responses fall back to the old (form, respondent) hash.
@@ -1045,7 +1119,10 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     long long submittedAt = nowMs();
     OrderedJson resp = OrderedJson::object();
     resp["formId"] = formId;
-    resp["respondent"] = m_signId.address;
+    // anonymous form: answer as the per-form identity (no link to my address / other forms)
+    const bool anonymous = f.contains("anonymous") && f["anonymous"].is_boolean() && f["anonymous"].get<bool>();
+    const whisperbox::SignId me = anonymous ? whisperbox::deriveAnonIdentity(m_signId, formId) : m_signId;
+    resp["respondent"] = me.address;
     resp["submittedAt"] = submittedAt;
     resp["answers"] = answers;
     // Random receipt id, sealed: the creator echoes it publicly on confirm; only
@@ -1059,13 +1136,13 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         // whitelist != none): address(pub) must equal respondent.
         OrderedJson m = OrderedJson::object();
         m["formId"] = formId;
-        m["respondent"] = m_signId.address;
+        m["respondent"] = me.address;
         m["submittedAt"] = submittedAt;
         m["answers"] = answers;
         std::string msg = "whisperbox-inner-v1|" + m.dump();
         whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
-        resp["signature"] = whisperbox::toHex(whisperbox::ecdsaSignLowS(m_signId.priv, digest));
-        resp["pub"] = m_signId.pubHex;
+        resp["signature"] = whisperbox::toHex(whisperbox::ecdsaSignLowS(me.priv, digest));
+        resp["pub"] = me.pubHex;
     } else {
         resp["signature"] = nullptr;
         resp["pub"] = nullptr;
@@ -1079,6 +1156,9 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         std::string sealedHex = whisperbox::toHex(sealed);
         json p = {{"encryptedPayload", sealedHex}};
         json e = buildEvent(RESPONSE_SUBMIT, whisperbox::responseSubmitId(sealedHex), p, /*sign=*/false);
+        // per-form device tag on the wire: answers to different forms can't be linked by device
+        const std::string tag = whisperbox::responseDevTag(m_deviceId, formId);
+        e["dev"] = tag; if (e.contains("hlc") && e["hlc"].is_object()) e["hlc"]["dev"] = tag;
         adoptLocal(e);
         broadcastEvent(e);
         publishState();
@@ -1103,7 +1183,7 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
     formId = lc(formId);
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
-    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address && !isCoOwner(state["forms"][formId])) { out["ok"] = false; out["error"] = "not the creator or a co-owner"; return out.dump(); }
 
     OrderedJson view = decryptView(state);
     if (view["responses"].contains(formId))
@@ -1183,7 +1263,7 @@ std::string WhisperboxCoreImpl::confirmAll(std::string formId) {
     formId = lc(trim(formId));
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
-    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address && !isCoOwner(state["forms"][formId])) { out["ok"] = false; out["error"] = "not the creator or a co-owner"; return out.dump(); }
     OrderedJson cv = decryptView(state);
     const json confs = json::parse(state["forms"][formId]["confirmations"].dump());
     std::vector<std::string> todo;
@@ -1271,12 +1351,20 @@ void WhisperboxCoreImpl::housekeeping() {
 
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     bool anyMine = false;
-    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) if (it.value()["creator"].get<std::string>() == m_signId.address) { anyMine = true; break; }
+    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) if (it.value()["creator"].get<std::string>() == m_signId.address || isCoOwner(it.value())) { anyMine = true; break; }
     if (!anyMine) return;
     OrderedJson cv = decryptView(state);
     for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) {
         const auto& f = it.value();
-        if (f["creator"].get<std::string>() != m_signId.address) continue;
+        if (f["creator"].get<std::string>() != m_signId.address) {
+            // co-owned: automatic receipts only (closing stays the creator's)
+            const std::string cfid = it.key();
+            if (isCoOwner(f) && m_autoReceipts.count(cfid) && cv["responses"].contains(cfid)) {
+                const json confs = json::parse(f["confirmations"].dump());
+                for (const auto& r : cv["responses"][cfid]) if (!containsStr(confs, confirmIdOf(json::parse(r.dump()), cfid))) { confirmAll(cfid); break; }
+            }
+            continue;
+        }
         const std::string fid = it.key();
         if (f["status"].get<std::string>() == "open") {
             size_t n = cv["responses"].contains(fid) ? cv["responses"][fid].size() : 0;
@@ -1438,7 +1526,7 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
     formId = lc(formId);
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
-    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address && !isCoOwner(state["forms"][formId])) { out["ok"] = false; out["error"] = "not the creator or a co-owner"; return out.dump(); }
 
     OrderedJson view = decryptView(state);
 

@@ -63,6 +63,7 @@ public:
     std::string saveAnswerDraft(std::string formId, std::string answersJson);
     std::string markSeen(std::string formId);
     std::string updateForm(std::string formId, std::string defJson);
+    std::string addCoOwner(std::string formId, std::string coOwnerPubHex);
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
@@ -181,4 +182,9 @@ private:
     // starts at N (no stale badge on upgrade). Appended last: layout rule above.
     std::map<std::string, long long> m_seen;
     void saveSeen();
+    // Co-owned forms: formId|sealedKey -> the form key opened with my identity. Appended last.
+    std::map<std::string, whisperbox::SignId> m_coKeyCache;
+    bool isCoOwner(const whisperbox::OrderedJson& f) const;
+    std::set<std::string> coOwnedForms(const whisperbox::OrderedJson& state);
+    const whisperbox::SignId* coOwnerKey(const std::string& formId, const whisperbox::OrderedJson& f);
 };

@@ -275,11 +275,12 @@ function Home({ snap, push, openLink }: Ctx) {
   const hidden = all.filter((i) => forms[i].hidden);   // local hide (Hide on the form screen)
   const ids = all.filter((i) => !forms[i].hidden);
   const mine = ids.filter((i) => forms[i].mine);
-  const answered = ids.filter((i) => !forms[i].mine && forms[i].mySubmitted);
+  const coOwned = ids.filter((i) => forms[i].coOwner);
+  const answered = ids.filter((i) => !forms[i].mine && !forms[i].coOwner && forms[i].mySubmitted);
   // No public directory: only forms you own, answered, or opened from a link (anyone can
   // publish a form, so listing everything on the network would be a spam channel).
   const opened = new Set<string>(snap.watched || []);
-  const open = ids.filter((i) => !forms[i].mine && !forms[i].mySubmitted && opened.has(i));
+  const open = ids.filter((i) => !forms[i].mine && !forms[i].coOwner && !forms[i].mySubmitted && opened.has(i));
   const pending: string[] = snap.pendingForms;
   const responsesFor = (id: string) => snap.creatorView?.responses?.[id]?.length || 0;
 
@@ -357,6 +358,7 @@ function Home({ snap, push, openLink }: Ctx) {
         ) : null}
         <Section title="WAITING FOR SYNC" list={pending} pend />
         <Section title="MY FORMS" list={mine} />
+        <Section title="CO-OWNED" list={coOwned} />
         <Section title="ANSWERED" list={answered} />
         <Section title="OPENED FROM LINKS" list={open} />
         {hidden.length ? (
@@ -559,6 +561,8 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   const [tick, setTick] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setTick(Date.now()), 20000); return () => clearInterval(t); }, []);
   const [qIdx, setQIdx] = useState(0);
+  const [showCo, setShowCo] = useState(false);
+  const [coCode, setCoCode] = useState("");
   const [idx, setIdx] = useState(0);
   const [filter, setFilter] = useState("");
   const [jump, setJump] = useState("");
@@ -575,7 +579,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   // leaving the screen (back, switching forms) saves at once instead of dropping the pending save
   useEffect(() => () => saveNow(), []);
   // looking at your own form = its answers are seen (clears the "N new" badge)
-  const newHere = !preview && f?.mine ? f.newResponses || 0 : 0;
+  const newHere = !preview && (f?.mine || f?.coOwner) ? f.newResponses || 0 : 0;
   useEffect(() => { if (newHere > 0) client.markSeen(id); }, [newHere]);
 
   if (pending) {
@@ -631,6 +635,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
     f.maxResponses ? (f.mine ? "closes automatically at " : "limited to ") + f.maxResponses : null,
     f.expiresAt ? (f.status === "closed" || ended ? "closed " : "closes ") + fmtTime(f.expiresAt) : null,
     restored && !f.mine && !f.mySubmitted ? "your unsent answers were restored" : null,
+    f.anonymous && !f.mine ? "anonymous: you answer under a one-off identity for this form - the creator can't link it to your address" : null,
   ].filter(Boolean).join("  ·  ");
   const banner = (() => {
     if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it.` } as const;
@@ -662,6 +667,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             {f.mine && f.keycard ? <Badge label="Keycard" fg={C.accent} bg={C.warnSubtle} /> : null}
             {f.whitelist?.type === "addresses" ? <Badge label="Members only" fg={C.accent} bg={C.warnSubtle} /> : null}
             {f.contested ? <Badge label="Contested id" fg={C.warn} bg={C.warnSubtle} /> : null}
+            {f.anonymous ? <Badge label="Anonymous" fg={C.primary} bg={C.primarySubtle} /> : null}
           </View>
           <Text style={st.meta}>by {shortAddr(f.creator)}{f.createdAt ? "  ·  " + fmtTime(f.createdAt) : ""}{f.version > 1 && f.updatedAt ? "  ·  updated " + fmtTime(f.updatedAt) : ""}</Text>
           {f.description ? <Text style={st.desc}>{f.description}</Text> : null}
@@ -680,7 +686,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             </View>
           ) : null}
 
-          {f.mine ? (
+          {f.mine || f.coOwner ? (
             <View style={{ marginTop: 18 }}>
               <View style={st.stats}>
                 {[{ n: responses.length, l: "Responses", c: C.primary }, { n: confirmed, l: "Receipts sent", c: C.ok }, { n: responses.length - confirmed, l: "Awaiting", c: C.warn }].map((x) => (
@@ -688,16 +694,28 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                 ))}
               </View>
               <View style={[st.chips, { marginTop: 12 }]}>
-                {f.status === "open" ? <Btn label={confirmClose ? "Tap again to close" : "Close form"} danger onPress={() => {
+                {f.mine && f.status === "open" ? <Btn label={confirmClose ? "Tap again to close" : "Close form"} danger onPress={() => {
                   if (!confirmClose) { setConfirmClose(true); setTimeout(() => setConfirmClose(false), 3000); return; }
                   const r = client.closeForm(id); toast(r.ok ? "Form closed - no new answers" : r.error); setConfirmClose(false);
                 }} /> : null}
-                {f.status === "closed" && !atCap && !ended ? <Btn label="Re-open" onPress={() => { const r = client.reopenForm(id); toast(r.ok ? "Re-opened - answers sealed while it was closed still don't count" : r.error); }} /> : null}
+                {f.mine && f.status === "closed" && !atCap && !ended ? <Btn label="Re-open" onPress={() => { const r = client.reopenForm(id); toast(r.ok ? "Re-opened - answers sealed while it was closed still don't count" : r.error); }} /> : null}
                 {unconfirmed > 0 ? <Btn label={`Send all receipts (${unconfirmed})`} primary onPress={() => { const r = client.confirmAll(id); toast(r.ok ? `Receipts sent for ${plural(r.confirmed, "response", "responses")}` : r.error); }} /> : null}
                 <Btn label="Export CSV" disabled={!responses.length} onPress={() => { const r = client.exportCsv(id); if (r.ok) push({ k: "csv", id, csv: r.csv }); else toast(r.error); }} />
-                <Btn label="Edit" onPress={() => push({ k: "create", editFormId: id })} />
+                {f.mine ? <Btn label="Edit" onPress={() => push({ k: "create", editFormId: id })} /> : null}
+                {f.mine ? <Btn label={showCo ? "Hide co-owners" : `Co-owners${(f.coOwners || []).length ? ` (${f.coOwners.length})` : ""}`} onPress={() => setShowCo((x) => !x)} /> : null}
                 <Btn label="Duplicate" onPress={() => push({ k: "create", fromForm: id })} />
               </View>
+              {f.coOwner ? <Text style={[st.muted, { marginTop: 10 }]}>You co-own this form: you can read its answers and send receipts. Closing and editing stay with its creator ({shortAddr(f.creator)}).</Text> : null}
+              {f.mine && showCo ? (
+                <View style={st.card}>
+                  <Text style={st.muted}>A co-owner can read every answer and send receipts. They give you their co-owner code (Identity in their WhisperBox). Access can't be taken back once given, and the list of co-owner addresses is public.</Text>
+                  {(f.coOwners || []).map((c: any) => <Text key={c.address} style={[st.addr, { marginTop: 6 }]}>• {c.address}</Text>)}
+                  <View style={[st.joinRow, { marginTop: 10 }]}>
+                    <TextInput value={coCode} onChangeText={setCoCode} autoCapitalize="none" placeholder="Co-owner code (66 characters)" placeholderTextColor={C.text3} style={[st.input, { flex: 1, fontFamily: MONO, fontSize: 12 }]} />
+                    <Btn label="Add" primary disabled={!coCode.trim()} onPress={() => { const r = client.addCoOwner(id, coCode); toast(r.ok ? "Co-owner added - they can read answers now" : r.error); if (r.ok) setCoCode(""); }} />
+                  </View>
+                </View>
+              ) : null}
               <View style={[st.card, st.cardHead]}>
                 <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={{ color: C.text, fontWeight: "600" }}>Automatic receipts</Text>
@@ -916,7 +934,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
       title: editFormId ? f.title || "" : (f.title || "") + " (copy)", description: f.description || "",
       questions: (f.questions || []).map((q: any) => { const { id: qid, options: _o, ...rest } = q; return { ...rest, ...(editFormId ? { id: qid } : {}), type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
         ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }; }),
-      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits,
+      thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous,
       restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
       max: f.maxResponses ? String(f.maxResponses) : "", closeAt: editFormId && f.expiresAt ? fmtInput(f.expiresAt) : "", showCount: !!f.showResponseCount,
     };
@@ -933,6 +951,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   const [thankYou, setThankYou] = useState(init.thankYou || "");
   const [shuffle, setShuffle] = useState(!!init.shuffle);
   const [allowEdits, setAllowEdits] = useState(!!(init as any).allowEdits);
+  const [anonymous, setAnonymous] = useState(!!(init as any).anonymous);
   const useTemplate = (b: any) => { setTitle(b.title); setDesc(b.description || ""); setQs(JSON.parse(JSON.stringify(b.questions))); setThankYou(b.thankYou || ""); };
   const [scheduling, setScheduling] = useState(!!(draftId && client.drafts[draftId]?.publishAt));
   const [publishAt, setPublishAt] = useState(draftId && client.drafts[draftId]?.publishAt ? fmtInput(client.drafts[draftId].publishAt) : "");
@@ -943,7 +962,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
   const move = (i: number, d: number) => setQs((a) => { const j = i + d; if (j < 0 || j >= a.length) return a; const b = a.slice(); [b[i], b[j]] = [b[j], b[i]]; return b; });
-  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits } as any;
+  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous } as any;
   const empty = !title.trim() && !desc.trim() && !qs.some((q) => q.text.trim());
 
   // -> {ok, def} | {ok:false, error}. strict=false never fails (autosave of a half-done form).
@@ -993,6 +1012,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (thankYou.trim()) def.thankYou = thankYou.trim();
     if (shuffle) def.shuffleQuestions = true;
     if (allowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+    if (anonymous) { if (strict && restrict) return fail("An anonymous form can't be members-only - it would need real addresses"); def.anonymous = true; }
     return { ok: true, def };
   };
   const saveDraft = (publishAtMs?: number | null) => {
@@ -1008,7 +1028,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (empty || editFormId) return;   // editing a published form: saved with "Save", no draft
     const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
     return () => clearTimeout(t);
-  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits]);
+  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous]);
   const leave = () => {
     if (editFormId) { pop(); return; }
     if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
@@ -1138,7 +1158,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
           <View style={{ marginTop: 22 }}><Label>WHO CAN ANSWER</Label></View>
           <View style={st.chips}>
             {[{ r: false, l: "Anyone with the link" }, { r: true, l: "Only listed addresses" }].map((x) => (
-              <Pressable key={x.l} onPress={() => setRestrict(x.r)} style={[st.chip, restrict === x.r && st.chipOn]}>
+              <Pressable key={x.l} onPress={() => { setRestrict(x.r); if (x.r) setAnonymous(false); }} style={[st.chip, restrict === x.r && st.chipOn]}>
                 <Text style={[st.chipT, restrict === x.r && { color: C.primary }]}>{x.l}</Text>
               </Pressable>
             ))}
@@ -1160,6 +1180,9 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
           </Pressable>
           <Pressable onPress={() => setAllowEdits((x) => !x)} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, allowEdits && st.chipOn]}>
             <Text style={[st.chipT, allowEdits && { color: C.primary }]}>{allowEdits ? "✓ " : ""}Let people edit their answer for 15 minutes (until you send a receipt)</Text>
+          </Pressable>
+          <Pressable onPress={() => { setAnonymous((x) => !x); if (!anonymous) setRestrict(false); }} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, anonymous && st.chipOn]}>
+            <Text style={[st.chipT, anonymous && { color: C.primary }]}>{anonymous ? "✓ " : ""}Anonymous answers (you can't link them to anyone's address)</Text>
           </Pressable>
           <View style={{ marginTop: 18 }}><Label>THANK-YOU MESSAGE (OPTIONAL)</Label></View>
           <TextInput value={thankYou} onChangeText={setThankYou} placeholder="Shown to respondents after they send their answers" placeholderTextColor={C.text3} style={st.input} />
@@ -1283,6 +1306,11 @@ function IdentityScreen({ snap, pop, toast }: Ctx) {
         <Pressable onPress={async () => { await Clipboard.setStringAsync(snap.identity.address); toast("Address copied"); }} style={st.card}>
           <Text style={[st.addr, { fontSize: 13 }]} selectable>{snap.identity.address}</Text>
           <Text style={[st.muted, { marginTop: 6 }]}>Tap to copy. Creators of members-only forms need this address. The key behind it never leaves this phone.</Text>
+        </Pressable>
+        <View style={{ marginTop: 18 }}><Label>YOUR CO-OWNER CODE</Label></View>
+        <Pressable onPress={async () => { await Clipboard.setStringAsync(snap.identity.pubHex); toast("Co-owner code copied"); }} style={st.card}>
+          <Text style={[st.addr, { fontSize: 12 }]} selectable>{snap.identity.pubHex}</Text>
+          <Text style={[st.muted, { marginTop: 6 }]}>Tap to copy. Give it to a form's creator to become a co-owner - you'll be able to read that form's answers.</Text>
         </Pressable>
         <View style={{ marginTop: 18 }}><Label>NETWORK</Label></View>
         <View style={st.card}>

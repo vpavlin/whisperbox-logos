@@ -523,6 +523,45 @@ int main(int argc, char** argv) {
             CHECK(!bad.value("ok", true), "updated validation applies (9 > max 5)");
         }
 
+        // Anonymous forms: per-form respondent identity; device tag per form on the wire.
+        {
+            CHECK(!A->call(A->core->createForm(json({{"title", "x"}, {"anonymous", true}, {"whitelist", {{"type", "addresses"}, {"value", addrB}}}}).dump())).value("ok", true),
+                  "anonymous + members-only is refused");
+            std::string an = A->call(A->core->createForm(json({{"title", "Anonymous"}, {"anonymous", true}, {"questions", qs}}).dump())).value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, an); }, 3000) && formOf(*B, an).value("anonymous", false), "anonymous flag travels with the form");
+            CHECK(B->call(B->core->submitResponse(an, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers the anonymous form");
+            CHECK(waitUntil([&] { return responsesOf(*A, an).size() == 1; }, 3000), "creator decrypts it");
+            std::string who = responsesOf(*A, an)[0].value("respondent", "");
+            CHECK(!who.empty() && who != addrB, "the creator sees a per-form identity, not B's address");
+            std::ifstream bf(B->dir + "/identity.json"); json bj = json::parse(bf);
+            whisperbox::SignId bid = whisperbox::identityFromPriv(whisperbox::fromHex(bj["privHex"].get<std::string>()));
+            CHECK(who == whisperbox::deriveAnonIdentity(bid, an).address, "it is B's derived anonymous identity for THIS form");
+            CHECK(!B->call(B->core->submitResponse(an, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", true), "still one answer per person");
+            CHECK(A->call(A->core->confirmResponse(an, who)).value("ok", false) && waitUntil([&] { return formOf(*B, an).value("myConfirmed", false); }, 3000), "receipts still reach B");
+            std::ifstream evf(B->dir + "/events.json"); json evs = json::parse(evf);
+            std::string devB = B->snap()["deviceId"]; bool leaked = false;
+            for (auto& ev : evs) if (ev.value("type", "") == "response.submit" && (ev.value("dev", "") == devB || ev["hlc"].value("dev", "") == devB)) leaked = true;
+            CHECK(!leaked, "no answer event carries the respondent's real device id");
+        }
+
+        // Co-owners: read answers + send receipts, nothing else.
+        {
+            std::string sf = A->call(A->core->createForm(json({{"title", "Shared"}, {"questions", qs}}).dump())).value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, sf) && hasForm(*G, sf); }, 3000), "shared form syncs");
+            CHECK(B->call(B->core->submitResponse(sf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers");
+            const std::string gCode = G->snap()["identity"]["pubHex"];
+            CHECK(!A->call(A->core->addCoOwner(sf, "02abc")).value("ok", true), "a malformed co-owner code is refused");
+            CHECK(!G->call(G->core->addCoOwner(sf, A->snap()["identity"]["pubHex"])).value("ok", true), "only the creator can add co-owners");
+            CHECK(A->call(A->core->addCoOwner(sf, gCode)).value("ok", false), "creator adds G as co-owner");
+            CHECK(waitUntil([&] { return formOf(*G, sf).value("coOwner", false) && responsesOf(*G, sf).size() == 1; }, 4000), "G (co-owner) decrypts B's answer");
+            CHECK(G->call(G->core->exportCsv(sf)).value("ok", false), "co-owner can export the CSV");
+            CHECK(G->call(G->core->confirmResponse(sf, addrB)).value("ok", false), "co-owner sends the receipt");
+            CHECK(waitUntil([&] { return formOf(*B, sf).value("myConfirmed", false); }, 3000), "B gets the co-owner's receipt");
+            CHECK(!G->call(G->core->closeForm(sf)).value("ok", true), "co-owner can't close");
+            CHECK(!G->call(G->core->updateForm(sf, json({{"title", "x"}}).dump())).value("ok", true), "co-owner can't edit");
+            CHECK(!formOf(*C, sf).value("coOwner", true) && responsesOf(*C, sf).empty(), "others still see nothing");
+        }
+
         // Re-open an uncapped form: closed -> open again, new answers count.
         std::string rf = A->call(A->core->createForm(json({{"title", "Reopen me"}, {"questions", qs}}).dump())).value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*G, rf); }, 3000), "second form syncs");

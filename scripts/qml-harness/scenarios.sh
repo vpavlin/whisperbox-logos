@@ -135,6 +135,17 @@ expect "CALL whisperbox_core updateForm argc=2 args=$CAPPED \\| .*\"id\":\"q2\",
 deny 'CALL whisperbox_core createForm' "saving an edit doesn't publish a new form"
 deny '_builder' "builder state stays off the wire"
 
+# ── anonymous forms ──
+run anon-wire creator '{"draftAnonymous":true,"draftTitle":"A","draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]}' "doCreate"
+expect 'CALL whisperbox_core createForm argc=1 args=.*"anonymous":true' "anonymous goes on the wire"
+run anon-members creator '{"draftAnonymous":true,"draftRestrict":true,"draftAllowList":"0x1111111111111111111111111111111111111111","draftTitle":"A","draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]}' "doCreate"
+deny 'CALL whisperbox_core createForm' "anonymous + members-only is not published"
+
+# ── co-owners ──
+run coowners-panel lifecycle "{\"selectedId\":\"$CAPPED\",\"showCoOwners\":true}"
+run coowner-add lifecycle "{\"selectedId\":\"$CAPPED\",\"showCoOwners\":true}" "addCoOwnerHarness"
+expect "CALL whisperbox_core addCoOwner argc=2 args=$CAPPED \\| 02" "Add co-owner -> addCoOwner(formId, code)"
+
 echo
 [ $FAIL -eq 0 ] && echo "SCENARIOS GREEN" || echo "SCENARIOS FAILED"
 exit $FAIL

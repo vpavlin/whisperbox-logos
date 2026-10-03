@@ -55,9 +55,11 @@ int main(int argc, char** argv) {
             const std::string owner = k["owner"];
             const SignId& o = owner == "alice" ? byName[0] : owner == "bob" ? byName[1] : byName[2];
             SignId d = deriveFormKey(o, k["formId"]);
-            n++; if (d.valid && d.pubHex == k["pubHex"] && toHex(d.priv) == k["privHex"]) ok++;
+            SignId an = deriveAnonIdentity(o, k["formId"]);
+            n++; if (d.valid && d.pubHex == k["pubHex"] && toHex(d.priv) == k["privHex"] && an.address == k["anonAddress"]
+                     && responseDevTag("wb-dev-" + owner, k["formId"]) == k["devTag"]) ok++;
         }
-        CHECK(n > 0 && ok == n, "every per-form key matches TS (incl. upper-case + non-ASCII ids)");
+        CHECK(n > 0 && ok == n, "every per-form key, anonymous identity and dev tag matches TS (incl. upper-case + non-ASCII ids)");
         const json& fs = fkDoc["formSeal"];
         SignId fk = deriveFormKey(byName[1], fs["formId"]);
         Bytes pt = eciesOpen(fk.priv, fromHex(fs["sealedHex"]));

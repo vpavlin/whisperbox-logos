@@ -68,7 +68,9 @@ Item {
     property string draftThankYou: ""
     property bool draftShuffle: false
     property bool draftAllowEdits: false
+    property bool draftAnonymous: false
     property string editingFormId: ""     // builder is editing a PUBLISHED form (form.update)
+    property bool showCoOwners: false
     property bool editing: false          // respondent is editing an already-sent answer
     property double nowTick: Date.now()   // refreshes "N min left"
     Timer { interval: 20000; running: true; repeat: true; onTriggered: root.nowTick = Date.now() }
@@ -123,6 +125,7 @@ Item {
     function selectCappedForSeen() {   // (harness) open the first own form that has new answers
         for (var k in root.forms) if (root.forms[k].mine && root.forms[k].newResponses > 0 && root.forms[k].title === "Capped") { selectForm(k); return; }
     }
+    function addCoOwnerHarness() { act("addCoOwner", [root.selectedId, "02" + "11".repeat(32)], ""); }   // (harness)
     function checkSeen() {
         var f = root.previewDef ? null : root.forms[root.selectedId];
         if (!f || !f.mine || !(f.newResponses > 0) || root.seenBusy) return;
@@ -287,7 +290,7 @@ Item {
 
     // Sidebar rows: section headers + form rows, grouped by relationship.
     readonly property var sidebarRows: {
-        var mine = [], answered = [], open = [], hidden = [], rows = [];
+        var mine = [], answered = [], open = [], hidden = [], coOwned = [], rows = [];
         var ids = Object.keys(root.forms);
         ids.sort(function (a, b) { return (root.forms[b].createdAt || 0) - (root.forms[a].createdAt || 0); });
         for (var i = 0; i < ids.length; i++) {
@@ -297,6 +300,7 @@ Item {
             // publish, so a public list would be a spam channel).
             if (f.hidden) { hidden.push(f.id); continue; }   // local hide (Hide button)
             if (f.mine) mine.push(f.id);
+            else if (f.coOwner) coOwned.push(f.id);
             else if (f.mySubmitted) answered.push(f.id);
             else if (root.watchedIds.indexOf(f.id) >= 0) open.push(f.id);
         }
@@ -313,6 +317,7 @@ Item {
         }
         add("WAITING FOR SYNC", root.pendingForms, "p");
         add("MY FORMS", mine, "f");
+        add("CO-OWNED", coOwned, "f");
         add("ANSWERED", answered, "f");
         add("OPENED FROM LINKS", open, "f");
         if (hidden.length > 0) {
@@ -486,7 +491,7 @@ Item {
         root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
-        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false;
+        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false;
     }
     function openCreate() { resetBuilder(); root.editingFormId = ""; rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     // Edit a published form: same builder, existing questions keep their ids (answers are
@@ -503,7 +508,7 @@ Item {
         loadBuilder({ title: f.title || "", description: f.description || "", questions: qs, restrict: !!(f.whitelist && f.whitelist.type === "addresses"),
                       allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"), max: f.maxResponses ? String(f.maxResponses) : "",
                       closeAt: f.expiresAt ? Qt.formatDateTime(new Date(Number(f.expiresAt)), "yyyy-MM-dd HH:mm") : "",
-                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits });
+                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous });
         root.editingFormId = f.id;
         rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
     }
@@ -522,7 +527,7 @@ Item {
         root.draftQuestions = (b.questions && b.questions.length) ? b.questions : root.draftQuestions;
         root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
         root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
-        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits;
+        root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits; root.draftAnonymous = !!b.anonymous;
     }
     function openDraft(d) {
         var b = (d.def && d.def._builder) ? d.def._builder : null;
@@ -545,7 +550,7 @@ Item {
         loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
                       restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
                       max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions,
-                      allowEdits: !!f.allowEdits });
+                      allowEdits: !!f.allowEdits, anonymous: !!f.anonymous });
         rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
     readonly property var templates: [
@@ -605,7 +610,7 @@ Item {
     // Everything the builder shows - stored inside the draft so it reopens exactly.
     readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
         restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount,
-        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits })
+        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
     function buildDef(strict) {
@@ -658,6 +663,7 @@ Item {
         if (root.draftThankYou.trim()) def.thankYou = root.draftThankYou.trim();
         if (root.draftShuffle) def.shuffleQuestions = true;
         if (root.draftAllowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+        if (root.draftAnonymous) { def.anonymous = true; if (strict && root.draftRestrict) return err("An anonymous form can't be members-only - it would need real addresses"); }
         return { ok: true, def: def };
     }
     function builderEmpty() {
@@ -1067,6 +1073,7 @@ Item {
                             wrapMode: Text.WordWrap
                         }
                         WbButton { visible: !!root.sel && !root.previewDef; label: root.sel && root.sel.hidden ? "Unhide" : "Hide"; enabled: !root.busy(root.sel && root.sel.hidden ? "unhideForm" : "hideForm"); onClicked: root.toggleHidden() }
+                        Badge { visible: !!(root.sel && root.sel.coOwner); label: "Co-owner"; fg: root.wbPrimary; bg: root.wbPrimarySubtle }
                         WbButton { visible: !!(root.sel && root.sel.mine) && !root.previewDef; label: "Edit"; onClicked: root.openEditForm() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Duplicate"; onClicked: root.duplicateSelected() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Share"; onClicked: root.openShare() }
@@ -1085,6 +1092,7 @@ Item {
                             label: "Members only"; fg: root.wbAccent; bg: root.wbWarningSubtle
                         }
                         Badge { visible: !!(root.sel && root.sel.contested); label: "Contested id"; fg: root.wbWarning; bg: root.wbWarningSubtle }
+                        Badge { visible: !!(root.sel && root.sel.anonymous); label: "Anonymous"; fg: root.wbPrimary; bg: root.wbPrimarySubtle }
                         Text { textFormat: Text.PlainText;
                             height: 20
                             verticalAlignment: Text.AlignVCenter
@@ -1106,8 +1114,11 @@ Item {
                     // ══ CREATOR VIEW ══
                     ColumnLayout {
                         Layout.fillWidth: true
-                        visible: !!(root.sel && root.sel.mine)
+                        visible: !!(root.sel && (root.sel.mine || root.sel.coOwner))
                         spacing: 16
+
+                        Text { textFormat: Text.PlainText; visible: !!(root.sel && root.sel.coOwner); Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                            text: "You co-own this form: you can read its answers and send receipts. Closing and editing stay with its creator (" + root.shortAddr(root.sel ? root.sel.creator : "") + ")." }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -1138,13 +1149,13 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             WbButton {
-                                visible: !!(root.sel && root.sel.status === "open")
+                                visible: !!(root.sel && root.sel.mine && root.sel.status === "open")
                                 label: "Close form"; danger: true
                                 onClicked: root.closeSelected()
                             }
                             WbButton {
                                 // not when it closed at its answer limit or end date (it would just close again)
-                                visible: !!(root.sel && root.sel.status === "closed" && !(root.sel.maxResponses && root.selResponses.length >= root.sel.maxResponses)
+                                visible: !!(root.sel && root.sel.mine && root.sel.status === "closed" && !(root.sel.maxResponses && root.selResponses.length >= root.sel.maxResponses)
                                             && !(root.sel.expiresAt && Date.now() > root.sel.expiresAt))
                                 label: root.busy("reopenForm") ? "Re-opening..." : "Re-open form"
                                 active: !root.busy("reopenForm")
@@ -1170,6 +1181,31 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleAutoReceipts() }
                             }
                             WbButton { label: "Export CSV"; active: root.selResponses.length > 0; onClicked: root.openCsv() }
+                            WbButton { visible: !!(root.sel && root.sel.mine); label: root.showCoOwners ? "Hide co-owners" : "Co-owners" + ((root.sel && root.sel.coOwners && root.sel.coOwners.length) ? " (" + root.sel.coOwners.length + ")" : ""); onClicked: root.showCoOwners = !root.showCoOwners }
+                        }
+                        // ── co-owners panel ──
+                        Rectangle {
+                            visible: root.showCoOwners && !!(root.sel && root.sel.mine)
+                            Layout.fillWidth: true
+                            implicitHeight: coCol.implicitHeight + 24
+                            radius: 12; color: root.wbSurfaceRaised; border.color: root.wbBorder; border.width: 1
+                            ColumnLayout {
+                                id: coCol; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 8
+                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                                    text: "A co-owner can read every answer and send receipts. They need to give you their co-owner code (Identity in their WhisperBox). Access can't be taken back once given, and the list of co-owner addresses is public." }
+                                Repeater {
+                                    model: root.sel && root.sel.coOwners ? root.sel.coOwners : []
+                                    Text { textFormat: Text.PlainText; text: "\u2022 " + modelData.address; font.pixelSize: 12; font.family: "monospace"; color: root.wbText }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 8
+                                    InputBox { Layout.fillWidth: true; implicitHeight: 36
+                                        TextField { id: coField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                            font.pixelSize: 12; font.family: "monospace"; background: null; placeholderText: "Co-owner code (66 characters)" } }
+                                    WbButton { label: root.busy("addCoOwner") ? "Adding..." : "Add co-owner"; active: !root.busy("addCoOwner") && coField.text.trim().length > 0
+                                        onClicked: act("addCoOwner", [root.selectedId, coField.text.trim()], "Co-owner added - they can read answers now", function () { coField.text = ""; }) }
+                                }
+                            }
                         }
                         Text { textFormat: Text.PlainText
                             Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
@@ -1466,6 +1502,7 @@ Item {
                                 if (f.maxResponses) parts.push("limited to " + f.maxResponses);
                                 if (f.expiresAt) parts.push((f.status === "closed" ? "closed " : "closes ") + root.fmtTime(f.expiresAt));
                                 if (f.answerDraft && !f.mySubmitted) parts.push("your unsent answers were restored");
+                                if (f.anonymous) parts.push("anonymous: you answer under a one-off identity for this form - the creator can't link it to your address");
                                 return parts.join("  ·  ");
                             }
                         }
@@ -1946,6 +1983,20 @@ Item {
                 color: root.wbTextTert
                 text: "Creators who restrict a form to specific addresses need this one. It is an Ethereum-style address of this device's key."
             }
+            SectionLabel { text: "YOUR CO-OWNER CODE" }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                InputBox {
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: Text.AlignVCenter
+                        text: (root.st.identity && root.st.identity.pubHex) || "-"; font.pixelSize: 12; font.family: "monospace"; color: root.wbText; elide: Text.ElideMiddle }
+                }
+                WbButton { label: "Copy"; onClicked: root.copyText(root.st.identity ? root.st.identity.pubHex : "", "Co-owner code") }
+            }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
+                text: "Give this to a form's creator to become a co-owner: you'll be able to read that form's answers." }
             SectionLabel { text: "NETWORK" }
             GridLayout {
                 columns: 4
@@ -2287,7 +2338,7 @@ Item {
                                 border.color: on ? root.wbPrimary : root.wbBorder
                                 border.width: 1
                                 Text { textFormat: Text.PlainText; id: wT; anchors.centerIn: parent; text: modelData.l; font.pixelSize: 12; color: parent.on ? root.wbPrimary : root.wbTextSec }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftRestrict = modelData.r }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.draftRestrict = modelData.r; if (modelData.r) root.draftAnonymous = false; } }
                             }
                         }
                     }
@@ -2354,6 +2405,14 @@ Item {
                         Text { id: aeT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftAllowEdits ? root.wbPrimary : root.wbTextSec
                             text: (root.draftAllowEdits ? "\u2713 " : "") + "Let people edit their answer for 15 minutes (until you send a receipt)" }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftAllowEdits = !root.draftAllowEdits }
+                    }
+                    Rectangle {
+                        implicitWidth: anT.implicitWidth + 22; implicitHeight: 30; radius: 15
+                        color: root.draftAnonymous ? root.wbPrimarySubtle : "transparent"
+                        border.color: root.draftAnonymous ? root.wbPrimary : root.wbBorder; border.width: 1
+                        Text { id: anT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftAnonymous ? root.wbPrimary : root.wbTextSec
+                            text: (root.draftAnonymous ? "\u2713 " : "") + "Anonymous answers (you can't link them to anyone's address)" }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.draftAnonymous = !root.draftAnonymous; if (root.draftAnonymous) root.draftRestrict = false; } }
                     }
                     SectionLabel { text: "THANK-YOU MESSAGE (OPTIONAL)" }
                     InputBox {

@@ -39,7 +39,7 @@ function check() {
   const forms = snap?.state?.forms || {};
   const active = AppState.currentState === "active";
   for (const f of Object.values<any>(forms)) {
-    if (!f.mine || f.hidden) continue;
+    if (!(f.mine || f.coOwner) || f.hidden) continue;
     const n = f.newResponses || 0;
     const before = notified[f.id] ?? 0;
     if (active || n <= before) { notified[f.id] = n; continue; }   // visible on screen, or nothing new

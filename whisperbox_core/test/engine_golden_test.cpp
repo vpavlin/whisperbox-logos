@@ -108,6 +108,12 @@ int main(int argc, char** argv) {
             if (!ok) std::printf("    got state: %.600s\n", st.dump().c_str());
         }
         CHECK(ok, "lifecycle: re-open spans, answer cap, close-at date, batch receipts == TS (30 arrival orders)");
+        {   // co-owner's view of the shared form
+            std::vector<json> log; for (auto& e : evs) mergeOne(log, e);
+            OrderedJson cs = computeState(log, lf["coOwner"].get<std::string>());
+            json cv = json::parse(creatorView(cs, lf["coOwner"].get<std::string>(), openC, verifyInner, {"shared"}).dump());
+            CHECK(cv == json::parse(lf["coView"].dump()), "co-owner view (alsoForms) == TS");
+        }
         std::vector<std::string> ids = {"c-life-350", "c-life-150"};
         bool idOk = false;
         for (auto& e : lf["log"]) if (e["id"].get<std::string>().rfind("confirm:life:b:", 0) == 0) idOk = e["id"] == responseConfirmBatchId("life", ids);

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.7 desktop / 0.3.8 Android (2026-10-03) - anonymous forms, co-owners
+
+- **Anonymous forms**: respondents answer under a one-off identity derived per form from
+  their key - one answer per person, but the creator can't link it to their address or
+  across forms. Not combinable with members-only.
+- **Privacy fix (all forms)**: answer events carried the respondent's device id in plain
+  text, so anyone could link answers to different forms by device. They now carry a
+  per-form tag.
+- **Co-owners**: the creator seals the form's key to a colleague's co-owner code (shown
+  under Identity); co-owners read every answer, export CSV and send receipts (also
+  automatically); closing / re-opening / editing stay with the creator. Access can't be
+  revoked; the co-owner list (addresses) is public. Wire: `form.coowner`; pinned by
+  golden-lifecycle (co-owner receipt accepted, co-owner close rejected, co-owner view).
+
 ## 0.3.6 desktop / 0.3.7 Android (2026-10-03) - edit after publishing
 
 - **Edit a published form** ("Edit" on your form): title, description, questions and
