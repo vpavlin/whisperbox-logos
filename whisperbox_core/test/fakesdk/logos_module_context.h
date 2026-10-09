@@ -1,10 +1,9 @@
 #pragma once
 // FAKE logos SDK (test-only). Just enough of the universal-module surface for
 // whisperbox_core_impl.cpp to compile and run OUTSIDE nix/Basecamp:
-// LogosModuleContext + modules().delivery_module backed by an in-process bus
-// (fake_bus.h) that mimics delivery_module semantics (relay echo to self,
-// SDS channel self-filter by senderId, {"_bytes": base64} receive wrapping,
-// async callbacks on the Qt event loop). NOT shipped; the real header comes
+// LogosModuleContext + modules().loam_core backed by an in-process bus
+// (fake_bus.h) that mimics loam_core semantics (shared node, SDS self-filter by
+// senderId, base64 payloads, async callbacks on the Qt event loop). NOT shipped; the real header comes
 // from logos-module-builder at nix build time.
 #include <functional>
 #include <string>
@@ -18,19 +17,23 @@ using LogosMap = nlohmann::json;
 struct StdLogosResult { bool success = true; std::string error; LogosMap value; };
 
 struct FakeNode;   // fake_bus.h
-struct FakeDeliveryModule {
+// loam_core as the app sees it (Basecamp 0.3): one shared transport; start -> statusChanged
+// "Connected"; join(topic); sendSealed(topic, base64(bytes)); received(topic, senderId,
+// base64(bytes), ts) for everyone else's frames on joined topics.
+struct FakeLoamCore {
     FakeNode* node = nullptr;
-    using MsgFn = std::function<void(const std::string&, const std::string&, const LogosMap&, int64_t)>;
-    bool onMessageReceived(MsgFn fn);
-    bool onChannelMessageReceived(MsgFn fn);
-    void createNodeAsync(const std::string& cfg, std::function<void(StdLogosResult)> cb);
-    void startAsync(std::function<void(StdLogosResult)> cb);
-    void subscribeAsync(const std::string& topic, std::function<void(StdLogosResult)> cb);
-    void channelCreateAsync(const std::string& channelId, const std::string& topic, const std::string& senderId, std::function<void(StdLogosResult)> cb);
-    void channelSendAsync(const std::string& channelId, const LogosMap& payload, std::function<void(StdLogosResult)> cb);
-    void sendAsync(const std::string& topic, const std::vector<uint8_t>& raw, std::function<void(StdLogosResult)> cb);
+    using RxFn = std::function<void(const std::string&, const std::string&, const std::string&, int64_t)>;
+    using StatusFn = std::function<void(const std::string&)>;
+    using StrCb = std::function<void(std::string)>;
+    void onReceived(RxFn fn);
+    void onStatusChanged(StatusFn fn);
+    void setSenderIdAsync(const std::string& id, StrCb cb);
+    void startAsync(const std::string& cfg, StrCb cb);
+    void statusAsync(StrCb cb);
+    void joinAsync(const std::string& topic, StrCb cb);
+    void sendSealedAsync(const std::string& topic, const std::string& sealedB64, StrCb cb);
 };
-struct FakeModules { FakeDeliveryModule delivery_module; };
+struct FakeModules { FakeLoamCore loam_core; };
 
 class LogosModuleContext {
 public:

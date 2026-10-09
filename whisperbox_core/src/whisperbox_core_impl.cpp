@@ -1,6 +1,6 @@
 // WhisperboxCoreImpl implementation. Engine/crypto/wire are the std-only headers
 // (whisperbox_engine.hpp etc., byte-parity with the TS reference). This file wires
-// the mutation API + the delivery_module transport (SDS Reliable Channels) over ONE
+// the mutation API + the loam_core transport (reliable channels over Waku, BLE) over ONE
 // shared topic, routing incoming envelopes into the single merged log.
 //
 // Every delivery call is async / fire-and-forget (a synchronous send on the
@@ -38,11 +38,6 @@ static long long nowMs() {
 static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"); if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\r\n"); return s.substr(a, b - a + 1);
-}
-// The delivery send() payload must be a JSON byte ARRAY under the current cpp-sdk
-// (a JSON string throws in the marshaling); this produces the same wire bytes.
-static LogosMap bytesPayload(const std::string& s) {
-    LogosMap a = LogosMap::array(); for (unsigned char c : s) a.push_back((unsigned)c); return a;
 }
 static bool isHex(const std::string& s, size_t len) {
     if (s.size() != len) return false;
@@ -162,15 +157,20 @@ void WhisperboxCoreImpl::onContextReady() {
     loadMySubmissions();
     loadLocalPrefs();
     loadPins();
-    bootstrapDelivery();
-    fprintf(stderr, "WHISPERBOX delivery bootstrapped nodeReady=%d\n", (int)m_nodeReady);
+    // Basecamp 0.3 rejects calls to other modules made inside onContextReady(): the hub tick
+    // below starts the transport a second later.
     // Hub tick: retry node start until ready, then a rate-limited periodic seed so
     // late joiners on a sparse mesh still converge (idempotent — peers dedup by id).
     m_hubTimer = new QTimer();
     QObject::connect(m_hubTimer, &QTimer::timeout, [this] {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
-        if (!m_nodeReady) bootstrapDelivery();
-        else {
+        if (!m_nodeReady) {
+            bootstrapDelivery();
+            if (m_deliveryStarting && nowMs() - m_lastStatusPollMs >= 3000) {
+                m_lastStatusPollMs = nowMs();
+                try { modules().loam_core.statusAsync([this](std::string st) { onLoop([this, st] { onTransportStatus(st); }); }); } catch (...) {}
+            }
+        } else {
             // Catch-up schedule: an RBSR round at 3s, 10s, 25s after node-up (the first
             // answer may come from a peer holding only part of the log), then every 60s.
             // A round is ONE bounded fingerprint message; peers reply with the exact delta
@@ -422,97 +422,70 @@ void WhisperboxCoreImpl::saveMySubmissions() {
     writeAtomic(m_dataDir + "/my_submissions.json", o.dump());
 }
 
-// ── delivery bootstrap (mirrors qaku: logos.test fleet pinned, async only) ───────
+// ── transport: loam_core (Basecamp 0.3) ───────────────────────────────────────────
+// WhisperBox no longer runs its own delivery node: loam_core is the one transport every Loam app
+// shares (Waku via upstream delivery_module 0.3.x, BLE mesh when present). Its config owns the
+// fleet, shards and RLN; we only say "Core mode on logos.test, reliable channels".
+//
+// Wire: unchanged. The bytes on the topic are the base64 envelope TEXT, as before (and as the
+// phones send through loam-transport): sendSealed takes base64 of those bytes, received() hands
+// them back base64'd once more.
 void WhisperboxCoreImpl::bootstrapDelivery() {
     if (m_nodeReady || m_deliveryStarting) return;
     if (!m_signId.valid) { setStatus("No identity"); return; }
     m_deliveryStarting = true;
-    // Register BOTH receive paths BEFORE createNode (qaku lesson): the channel path
-    // is authoritative (unwrapped payload); the raw relay path fires too with SDS
-    // wire frames — ingest best-effort, silent on failure.
-    auto toWire = [](const LogosMap& v) -> std::string {
-        if (v.is_string()) return v.get<std::string>();
-        if (v.is_array()) { std::string s; s.reserve(v.size()); for (const auto& c : v) if (c.is_number_integer()) s.push_back((char)c.get<int>()); return s; }
-        if (v.is_object() && v.contains("_bytes") && v["_bytes"].is_string()) return v["_bytes"].get<std::string>();
-        return std::string();
-    };
-    bool subMsg = modules().delivery_module.onMessageReceived(
-        [this, toWire](const std::string&, const std::string& contentTopic, const LogosMap& payload, int64_t) {
-            fprintf(stderr, "WHISPERBOX onMessageReceived topic=%s size=%zu\n", contentTopic.c_str(), payload.size());
-            if (contentTopic != TOPIC) return;
-            std::string p = toWire(payload);
-            if (p.empty() && payload.is_object() && payload.contains("payload")) p = toWire(payload["payload"]);
-            if (!p.empty()) ingestEnvelopeText(p, /*channelPath=*/false);
-        });
-    bool subCh = modules().delivery_module.onChannelMessageReceived(
-        [this, toWire](const std::string& channelId, const std::string&, const LogosMap& payload, int64_t) {
-            fprintf(stderr, "WHISPERBOX onChannelMessageReceived channel=%s size=%zu\n", channelId.c_str(), payload.size());
-            if (channelId != TOPIC) return;
-            std::string p = toWire(payload);
-            if (p.empty() && payload.is_object() && payload.contains("payload")) p = toWire(payload["payload"]);
-            if (!p.empty()) ingestEnvelopeText(p, /*channelPath=*/true);
-        });
-    fprintf(stderr, "WHISPERBOX event subs msg=%d ch=%d\n", (int)subMsg, (int)subCh);
-    setStatus("Connecting...");
-    // RELAY node with the logos.test fleet entry nodes PINNED (qaku lesson: bare
-    // {mode:Core,preset} gives ZERO bootstrap nodes — "Connected" but meshes with
-    // nothing). Keep in lockstep with qaku's mobile ENTRY_NODES.
-    LogosMap cfg = {
-        {"logLevel", "INFO"}, {"mode", "Core"}, {"preset", "logos.test"}, {"relay", true},
-        {"entryNodes", LogosMap::array({
-            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
-            "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
-            "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
-            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
-            "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
-            "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV",
-        })},
-    };
+    json cfg = {{"mode", "Core"}, {"preset", "logos.test"}, {"useChannels", true}};
     if (const char* ov = std::getenv("WHISPERBOX_DELIVERY_CFG")) {
         auto j = json::parse(ov, nullptr, false);
-        if (j.is_object()) for (auto it = j.begin(); it != j.end(); ++it) cfg[it.key()] = it.value();
+        if (j.is_object()) cfg = j;
     }
-    std::string cfgStr = cfg.dump();
-    fprintf(stderr, "WHISPERBOX bootstrapDelivery cfg=%s\n", cfgStr.c_str());
-    auto startNode = [this, cfgStr]() {
-        auto onUp = [this]() {
-            std::lock_guard<std::recursive_mutex> lk(m_mtx);
-            m_nodeReady = true;
-            joinTransport();
-            requestSync();     // legacy (0.1.x) peers answer with their log
-            catchupRound();    // RBSR peers reconcile the exact delta both ways
-            setStatus("Connected");
-            publishState();
-        };
-        modules().delivery_module.createNodeAsync(cfgStr, [this, onUp](StdLogosResult r) {
-            if (!r.success) {
-                // Basecamp runs ONE delivery_module for every app: when scala / kym / qaku (or
-                // loam_core on their behalf) already created the node, createNode answers
-                // "Context already initialized". That node is ours too - join it; never start
-                // it a second time (the owner did). Was: reported as an error + retried forever,
-                // so WhisperBox never connected when another Logos app started first.
-                if (r.error.find("already initialized") != std::string::npos) {
-                    fprintf(stderr, "WHISPERBOX delivery node already running (another app) - joining it\n");
-                    onUp();
-                    return;
-                }
-                m_deliveryStarting = false; setStatus("Delivery error (createNode): " + r.error); return;
-            }
-            modules().delivery_module.startAsync([this, onUp](StdLogosResult r2) {
-                if (!r2.success) { m_deliveryStarting = false; setStatus("Delivery error (start): " + r2.error); return; }
-                onUp();
-            });
+    try {
+        // Callbacks arrive on the IPC thread. Never call a module from inside one (each call would
+        // wait out the IPC timeout): hand the work to this module's thread.
+        modules().loam_core.onReceived([this](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t) {
+            if (topic != TOPIC) return;
+            // as the old receive path did: the payload still base64'd; the ingest peels one or two
+            // layers (phones send base64(envelope) or the raw envelope)
+            onLoop([this, payloadB64] { ingestEnvelopeText(payloadB64, /*channelPath=*/true); });
         });
-    };
-    startNode();
+        modules().loam_core.onStatusChanged([this](const std::string& st) { onLoop([this, st] { onTransportStatus(st); }); });
+        modules().loam_core.setSenderIdAsync(m_deviceId, [](std::string) {});
+        modules().loam_core.startAsync(cfg.dump(), [this](std::string err) {
+            if (err.empty() || err == "{}" || err.find("\"ok\":true") != std::string::npos) return;
+            onLoop([this, err] { std::lock_guard<std::recursive_mutex> lk(m_mtx); if (!m_nodeReady) setStatus("Transport error: " + err); });
+        });
+        setStatus("Connecting...");
+    } catch (const std::exception& e) {
+        m_deliveryStarting = false;
+        setStatus(std::string("loam_core unavailable: ") + e.what());
+    }
+}
+
+// loam_core reports "Connected" by event; the event can be lost or come before we listened, so
+// the hub timer also asks for the status until we're up.
+void WhisperboxCoreImpl::onTransportStatus(const std::string& st) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (st.empty()) return;
+    if (st == "Connected" && !m_nodeReady) {
+        m_nodeReady = true;
+        joinTransport();
+        requestSync();     // legacy (0.1.x) peers answer with their log
+        catchupRound();    // RBSR peers reconcile the exact delta both ways
+        setStatus("Connected");
+        publishState();
+    } else if (!m_nodeReady) {
+        setStatus(st);
+    }
+}
+
+void WhisperboxCoreImpl::onLoop(std::function<void()> fn) {
+    if (!m_hubTimer) return;
+    QMetaObject::invokeMethod(m_hubTimer, std::move(fn), Qt::QueuedConnection);
 }
 
 void WhisperboxCoreImpl::joinTransport() {
     if (!m_nodeReady || m_subscribed) return;
-    // SDS Reliable Channels: subscribe THEN channelCreate (channelCreate does not
-    // itself subscribe the content topic). channelId == contentTopic == TOPIC.
-    modules().delivery_module.subscribeAsync(TOPIC, [](StdLogosResult){});
-    modules().delivery_module.channelCreateAsync(TOPIC, TOPIC, m_deviceId, [](StdLogosResult){});
+    modules().loam_core.joinAsync(TOPIC, [](std::string) {});
     m_subscribed = true;
 }
 
@@ -533,12 +506,7 @@ void WhisperboxCoreImpl::catchupRound() {
     sendControl(logos_sync::catchup::buildInitial(evs, m_deviceId));
 }
 void WhisperboxCoreImpl::sendControl(const json& msg) {
-    const std::string b64 = whisperbox::b64encode(msg.dump());
-    try {
-        std::vector<uint8_t> raw(b64.begin(), b64.end());
-        modules().delivery_module.sendAsync(TOPIC, raw, [](StdLogosResult){});
-    } catch (...) { /* best-effort */ }
-    if (deliverySend(TOPIC, b64)) m_txTotal++;
+    if (deliverySend(TOPIC, whisperbox::b64encode(msg.dump()))) m_txTotal++;
 }
 
 // Ask peers for state (flagged rbsr: 0.2+ peers ignore it and reconcile via RBSR;
@@ -554,21 +522,9 @@ void WhisperboxCoreImpl::requestSync() {
 
 bool WhisperboxCoreImpl::deliverySend(const std::string& topic, const std::string& b64Text) {
     if (!m_nodeReady) return false;
-    // SINGLE-base64 (qaku's proven shape): hand the transport the base64 TEXT as
-    // bytes; delivery_module base64-encodes once more on the wire. Robust to either
-    // IPC shape: JSON byte ARRAY (repr 1) or string (repr 2); probe once, cache.
-    auto attempt = [&](int repr) -> bool {
-        try {
-            LogosMap p = (repr == 1) ? bytesPayload(b64Text) : LogosMap(b64Text);
-            modules().delivery_module.channelSendAsync(topic, p, [](StdLogosResult){});
-            return true;
-        } catch (...) { return false; }
-    };
-    if (m_sendRepr == 1 || m_sendRepr == 2) { if (attempt(m_sendRepr)) return true; m_sendRepr = 0; }
-    if (attempt(1)) { m_sendRepr = 1; return true; }
-    if (attempt(2)) { m_sendRepr = 2; return true; }
-    fprintf(stderr, "WHISPERBXTX deliverySend: no working payload representation\n");
-    return false;
+    try { modules().loam_core.sendSealedAsync(topic, whisperbox::b64encode(b64Text), [](std::string) {}); }
+    catch (...) { return false; }
+    return true;
 }
 
 // ── event lifecycle ──────────────────────────────────────────────────────────────
@@ -596,22 +552,11 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
 }
 
 void WhisperboxCoreImpl::broadcastEvent(const json& e) {
-    // Guarded: calling delivery methods BEFORE the node is up fails with
-    // "no provider registered" and can wedge the FFI result plumbing so the
-    // createNode/start callbacks never fire (observed live — node up, module stuck).
-    // The event stays in the local log; reseed/SYNC_REQ delivers it later.
+    // Before the transport is up the event stays in the local log; catch-up delivers it later.
     if (!m_nodeReady) return;
     std::string text = whisperbox::eventToJsonText(whisperbox::envEvent(e));
-    const std::string b64 = whisperbox::b64encode(text);
-    // PRIMARY: relay publish — reaches every subscriber of the topic via the relay
-    // infrastructure; needs NO direct peer discovery (the original whisperbox Waku
-    // model). Channel send alone only works once peers have discovered each other.
-    try {
-        std::vector<uint8_t> raw(b64.begin(), b64.end());
-        modules().delivery_module.sendAsync(TOPIC, raw, [](StdLogosResult){});
-    } catch (...) { /* relay path best-effort; channel path + reseed still converge */ }
-    // SECONDARY: SDS channel send — fast path when a direct connection exists.
-    if (deliverySend(TOPIC, b64)) m_txTotal++;
+    // loam_core fans out to every bearer (relay + channel on Waku, BLE mesh) and dedups
+    if (deliverySend(TOPIC, whisperbox::b64encode(text))) m_txTotal++;
 }
 
 // ── ingest (receive path) ────────────────────────────────────────────────────────

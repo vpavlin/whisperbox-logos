@@ -1,5 +1,5 @@
 // e2e_test.cpp — runs the REAL whisperbox_core_impl.cpp (N instances, one
-// process) over an in-process fake of delivery_module (test/fakesdk). Covers the
+// process) over an in-process fake of loam_core (test/fakesdk). Covers the
 // PLAN Phase 6 scenarios that don't need a real Basecamp/Waku fleet:
 //   A  create → feed on peers → respond → creator decrypts → confirm → respondent
 //      sees "confirmed" → CSV matches
@@ -45,7 +45,7 @@ struct Peer {
         setenv("WHISPERBOX_CORE_DATA", dir.c_str(), 1);
         node = std::make_unique<FakeNode>(); node->name = name;
         core = std::make_unique<WhisperboxCoreImpl>();
-        core->modules().delivery_module.node = node.get();
+        core->modules().loam_core.node = node.get();
         FakeBus::get().nodes.push_back(node.get());
         core->fakeStart();
     }
@@ -261,10 +261,10 @@ int main(int argc, char** argv) {
     {
         // A node that only speaks the old protocol: sends an UNFLAGGED SYNC_REQ and expects
         // the whole log back as EVENT envelopes.
-        FakeNode old; old.name = "legacy"; old.up = true; old.subscribed = true; old.senderId = "legacy";
+        FakeNode old; old.name = "legacy"; old.up = true; old.subscribed = true; old.senderId = "legacy"; old.joined.insert(whisperbox::TOPIC);
         std::set<std::string> got;
-        old.onMsg = [&](const std::string&, const std::string&, const LogosMap& p, int64_t) {
-            std::string once = whisperbox::b64decode(p["_bytes"].get<std::string>());
+        old.onRx = [&](const std::string&, const std::string&, const std::string& payloadB64, int64_t) {
+            std::string once = whisperbox::b64decode(payloadB64);
             for (const std::string& t : {whisperbox::b64decode(once), once}) {
                 json env = whisperbox::parseEnvelope(t);
                 if (env.is_object() && env.value("type", "") == "EVENT") { got.insert(env["event"].value("id", "")); break; }
@@ -447,13 +447,13 @@ int main(int argc, char** argv) {
     // ── shared delivery node: another Logos app started it first ──────────────
     std::printf("shared node (another app first):\n");
     {
-        // Same delivery_module, node already created + started by e.g. scala via loam_core.
+        // The shared loam_core node, already started by another Loam app (e.g. scala).
         auto S = std::make_unique<Peer>(); S->name = "S"; S->dir = g_base + "/S";
         setenv("WHISPERBOX_CORE_DATA", S->dir.c_str(), 1);
         S->node = std::make_unique<FakeNode>(); S->node->name = "S";
         S->node->created = true; S->node->up = true;              // owned by the other app
         S->core = std::make_unique<WhisperboxCoreImpl>();
-        S->core->modules().delivery_module.node = S->node.get();
+        S->core->modules().loam_core.node = S->node.get();
         FakeBus::get().nodes.push_back(S->node.get());
         S->core->fakeStart();
         CHECK(waitUntil([&] { return S->snap().value("nodeReady", false); }, 3000), "WhisperBox joins a node another app already started");
@@ -660,7 +660,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(pwHome);
         auto startCore = [&](auto&& check) {
             FakeNode n; n.name = "h"; n.online = false;
-            WhisperboxCoreImpl c; c.modules().delivery_module.node = &n;
+            WhisperboxCoreImpl c; c.modules().loam_core.node = &n;
             FakeBus::get().nodes.push_back(&n);
             c.fakeStart();
             check(json::parse(c.snapshot()));

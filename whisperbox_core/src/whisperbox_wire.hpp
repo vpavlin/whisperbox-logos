@@ -37,6 +37,7 @@ inline std::string b64encode(const std::string& in) {
 inline std::string b64decode(const std::string& in) {
     std::vector<int> T(256, -1);
     for (int i = 0; i < 64; i++) T[(unsigned char)kB64T[i]] = i;
+    T['-'] = 62; T['_'] = 63;   // the URL-safe alphabet too: delivery 0.3 emits it
     std::string o; int val = 0, bits = -8;
     for (unsigned char c : in) {
         if (c == '=') break;

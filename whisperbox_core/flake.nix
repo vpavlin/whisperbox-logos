@@ -1,13 +1,11 @@
 {
-  description = "WhisperBox privacy-first forms CORE module (event log + ECIES sealing + delivery sync); headless AND the desktop ui backend.";
+  description = "WhisperBox privacy-first forms CORE module (event log + ECIES sealing, synced over loam_core); headless AND the desktop ui backend (Basecamp 0.3).";
 
   inputs = {
-    # Same pinned SDK rev + channel-capable delivery_module as qaku-logos, so both
-    # modules build against ONE SDK (avoids cross-module IPC skew). Re-pin to the
-    # rev your installed Basecamp was built on.
-    delivery_module.url = "github:logos-co/logos-delivery-module/0fb3a7427b29c98ab0fa2465bcd1e90cbfdf50a3";
-    logos-module-builder.url = "github:logos-co/logos-module-builder/afe4430ee6eb7ba45c08a516a43e18500720c715";
-    delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
+    # Basecamp 0.3 stack: builder 0.3.1 and loam_core (upstream delivery_module 0.3.x underneath),
+    # the same pins as the other Loam apps (scala, swamp) so one transport serves them all.
+    logos-module-builder.url = "github:logos-co/logos-module-builder/0.3.1";
+    loam_core.url = "github:vpavlin/loam-basecamp/5db9069d7b953b5876210576393b1dc9ffc19fdf?dir=core";
   };
 
   # mkLogosModule (not mkLogosQmlModule): a headless core module — no QML view,

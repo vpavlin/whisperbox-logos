@@ -1,9 +1,10 @@
 #pragma once
-// In-process stand-in for the Waku fleet + delivery_module (test-only).
+// In-process stand-in for the Waku fleet + loam_core (test-only).
 #include "logos_module_context.h"
 #include <QCoreApplication>
 #include <QTimer>
 #include <map>
+#include <set>
 #include <memory>
 #include <openssl/evp.h>
 
@@ -16,7 +17,9 @@ struct FakeNode {
     bool created = false, up = false, online = true, subscribed = false, channel = false;
     int starts = 0;   // start() calls (a second start on a shared node is a bug)
     std::string senderId;
-    FakeDeliveryModule::MsgFn onMsg, onCh;
+    std::set<std::string> joined;
+    FakeLoamCore::RxFn onRx;
+    FakeLoamCore::StatusFn onStatus;
     long rx = 0, tx = 0;
 };
 
@@ -34,63 +37,55 @@ struct FakeBus {
         for (FakeNode* n : nodes) if (n->serial == serial) return n;
         return nullptr;
     }
-    // Receive wrapping like delivery 0.1.3+: {"_bytes": base64(raw)}.
-    static LogosMap wrap(const std::string& raw) { return LogosMap{{"_bytes", b64(raw)}}; }
-    void relay(FakeNode* from, const std::string& topic, const std::string& raw) {
-        if (!from->online) { dropped++; return; }
+    // A frame on a topic: every OTHER node that joined it gets it (SDS drops frames carrying the
+    // receiver's own senderId). relay() is what tests use to inject a frame "from the network".
+    void deliver(FakeNode* from, const std::string& topic, const std::string& raw, bool selfToo) {
+        if (from && !from->online) { dropped++; return; }
+        std::string sid = from ? from->senderId : std::string("net");
         for (FakeNode* n : nodes) {
-            if (!n->up || !n->online || !n->subscribed || !n->onMsg) continue;
-            long sid = n->serial;
-            later([sid, topic, raw] {
-                FakeNode* nn = FakeBus::get().alive(sid);
-                if (nn && nn->online && nn->onMsg) { nn->rx++; auto fn = nn->onMsg; fn("hash", topic, wrap(raw), 0); }
-            });
-        }
-    }
-    void channel(FakeNode* from, const std::string& chId, const std::string& raw) {
-        if (!from->online) { dropped++; return; }
-        for (FakeNode* n : nodes) {
-            // SDS: a node never delivers frames carrying its OWN senderId.
-            if (n == from || !n->up || !n->online || !n->channel || !n->onCh) continue;
-            if (n->senderId == from->senderId) { dropped++; continue; }
-            long serial = n->serial; std::string sid = from->senderId;
-            later([serial, chId, sid, raw] {
+            if ((n == from && !selfToo) || !n->up || !n->online || !n->onRx || !n->joined.count(topic)) continue;
+            if (from && n->senderId == from->senderId) { dropped++; continue; }
+            long serial = n->serial;
+            later([serial, topic, sid, raw] {
                 FakeNode* nn = FakeBus::get().alive(serial);
-                if (nn && nn->online && nn->onCh) { nn->rx++; auto fn = nn->onCh; fn(chId, sid, wrap(raw), 0); }
+                if (nn && nn->online && nn->onRx) { nn->rx++; auto fn = nn->onRx; fn(topic, sid, b64(raw), 0); }
             });
         }
     }
+    void relay(FakeNode* from, const std::string& topic, const std::string& raw) { deliver(from, topic, raw, false); }
+    void channel(FakeNode* from, const std::string& topic, const std::string& raw) { deliver(from, topic, raw, false); }
 };
 
-inline bool FakeDeliveryModule::onMessageReceived(MsgFn fn) { node->onMsg = fn; return true; }
-inline bool FakeDeliveryModule::onChannelMessageReceived(MsgFn fn) { node->onCh = fn; return true; }
-inline void FakeDeliveryModule::createNodeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
-    // Like the real delivery_module (one node per Basecamp, shared by every app): a second
-    // createNode is rejected with "Context already initialized".
-    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) {
-        if (n->created) { cb(StdLogosResult{false, "Context already initialized", nullptr}); return; }
-        n->created = true; cb(StdLogosResult{}); } });
+static inline std::string fakeB64decode(const std::string& in) {
+    std::string out(in.size(), '\0');
+    int n = EVP_DecodeBlock((unsigned char*)out.data(), (const unsigned char*)in.data(), (int)in.size());
+    if (n < 0) return std::string();
+    size_t pad = 0; for (size_t i = in.size(); i > 0 && in[i - 1] == '='; i--) pad++;
+    out.resize(n - pad); return out;
 }
-inline void FakeDeliveryModule::startAsync(std::function<void(StdLogosResult)> cb) {
-    long sid = node->serial; FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) { n->up = true; n->starts++; cb(StdLogosResult{}); } });
+inline void FakeLoamCore::onReceived(RxFn fn) { node->onRx = fn; }
+inline void FakeLoamCore::onStatusChanged(StatusFn fn) { node->onStatus = fn; }
+inline void FakeLoamCore::setSenderIdAsync(const std::string& id, StrCb cb) { node->senderId = id; FakeBus::later([cb] { cb("{\"ok\":true}"); }); }
+inline void FakeLoamCore::startAsync(const std::string&, StrCb cb) {
+    // Like loam_core on Basecamp: one node for every app. Starting it again (another app did, or
+    // this one restarted) is fine - it just reports Connected.
+    long sid = node->serial;
+    FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) {
+        if (!n->up) { n->up = true; n->starts++; }
+        cb("{\"ok\":true}");
+        if (n->onStatus) { auto fn = n->onStatus; fn("Connected"); } } });
 }
-inline void FakeDeliveryModule::subscribeAsync(const std::string&, std::function<void(StdLogosResult)> cb) {
-    if (!node->up) throw std::runtime_error("no provider registered");
-    node->subscribed = true; FakeBus::later([cb] { cb(StdLogosResult{}); });
+inline void FakeLoamCore::statusAsync(StrCb cb) {
+    long sid = node->serial;
+    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); cb(n && n->up ? "Connected" : "Connecting..."); });
 }
-inline void FakeDeliveryModule::channelCreateAsync(const std::string&, const std::string&, const std::string& senderId, std::function<void(StdLogosResult)> cb) {
-    if (!node->up) throw std::runtime_error("no provider registered");
-    node->channel = true; node->senderId = senderId; FakeBus::later([cb] { cb(StdLogosResult{}); });
+inline void FakeLoamCore::joinAsync(const std::string& topic, StrCb cb) {
+    if (!node->up) throw std::runtime_error("loam_core: not started");
+    node->joined.insert(topic); node->subscribed = node->channel = true;
+    FakeBus::later([cb] { cb("{\"ok\":true}"); });
 }
-inline void FakeDeliveryModule::channelSendAsync(const std::string& chId, const LogosMap& payload, std::function<void(StdLogosResult)> cb) {
-    if (!node->up) throw std::runtime_error("no provider registered");
-    std::string raw;
-    if (payload.is_array()) { for (auto& c : payload) raw.push_back((char)c.get<int>()); }
-    else if (payload.is_string()) raw = payload.get<std::string>();
-    else throw std::runtime_error("bad payload repr");
-    node->tx++; FakeBus::get().channel(node, chId, raw); FakeBus::later([cb] { cb(StdLogosResult{}); });
-}
-inline void FakeDeliveryModule::sendAsync(const std::string& topic, const std::vector<uint8_t>& raw, std::function<void(StdLogosResult)> cb) {
-    if (!node->up) throw std::runtime_error("no provider registered");
-    node->tx++; FakeBus::get().relay(node, topic, std::string(raw.begin(), raw.end())); FakeBus::later([cb] { cb(StdLogosResult{}); });
+inline void FakeLoamCore::sendSealedAsync(const std::string& topic, const std::string& sealedB64, StrCb cb) {
+    if (!node->up) throw std::runtime_error("loam_core: not started");
+    node->tx++; FakeBus::get().channel(node, topic, fakeB64decode(sealedB64));
+    FakeBus::later([cb] { cb("{\"ok\":true}"); });
 }

@@ -24,6 +24,7 @@
 #include <map>
 #include <unordered_map>
 #include <mutex>
+#include <functional>
 #include "logos_module_context.h"
 #include "whisperbox_engine.hpp"
 #include "whisperbox_crypto.hpp"
@@ -111,8 +112,10 @@ private:
     void savePins();
     std::string randomHex(int bytes);
 
-    // --- delivery (all calls async / fire-and-forget) ---
+    // --- transport: loam_core (all calls async / fire-and-forget) ---
     void bootstrapDelivery();
+    void onTransportStatus(const std::string& st);
+    void onLoop(std::function<void()> fn);   // run on the module's thread
     void joinTransport();
     void seedBroadcast();
     void requestSync();
@@ -131,7 +134,7 @@ private:
     bool m_nodeReady = false;
     bool m_deliveryStarting = false;
     bool m_subscribed = false;
-    int m_sendRepr = 0;
+    int64_t m_lastStatusPollMs = 0;
 
     // diagnostic counters (surfaced in snapshot, per logos-distributed-debugging)
     long m_rxRaw = 0, m_rxSeen = 0, m_rxNew = 0, m_rxDup = 0, m_txTotal = 0;

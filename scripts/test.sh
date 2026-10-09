@@ -33,7 +33,7 @@ g++ -std=c++17 -O1 -Wno-deprecated-declarations -I"$ROOT/whisperbox_core" -I"$RO
     "$ROOT/whisperbox_core/test/engine_golden_test.cpp" -lcrypto -o "$WB_TMP/engine_golden_test"
 "$WB_TMP/engine_golden_test" "$ROOT"
 
-step "5/8 core end-to-end (fake delivery bus)"
+step "5/8 core end-to-end (fake loam_core bus)"
 WB_TEST_OUT="$WB_TMP" "$ROOT/whisperbox_core/test/run-e2e.sh" 2>"$WB_TMP/e2e.stderr" | grep -vE '^  ok' 
 
 step "6/8 view (QML render + scenarios)"

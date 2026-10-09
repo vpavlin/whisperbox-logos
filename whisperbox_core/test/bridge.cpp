@@ -38,7 +38,7 @@ static void spawn(const std::string& name) {
     Peer& p = peers[name];
     p.node = std::make_unique<FakeNode>(); p.node->name = name;
     p.core = std::make_unique<WhisperboxCoreImpl>();
-    p.core->modules().delivery_module.node = p.node.get();
+    p.core->modules().loam_core.node = p.node.get();
     FakeBus::get().nodes.push_back(p.node.get());
     p.core->fakeStart();
 }
@@ -75,10 +75,9 @@ int main(int argc, char** argv) {
 
     // The phone: a node on the bus that hands everything it receives to stdout.
     FakeNode phone; phone.name = "phone"; phone.up = true; phone.subscribed = true; phone.channel = true; phone.senderId = "phone";
-    auto toPhone = [](const std::string&, const std::string&, const LogosMap& p, int64_t) {
-        out(json{{"rx", p["_bytes"].get<std::string>()}});
-    };
-    phone.onMsg = toPhone; phone.onCh = toPhone;
+    phone.joined.insert(whisperbox::TOPIC);
+    // what the phone's transport sees: base64 of the bytes on the topic
+    phone.onRx = [](const std::string&, const std::string&, const std::string& payloadB64, int64_t) { out(json{{"rx", payloadB64}}); };
     FakeBus::get().nodes.push_back(&phone);
     spawn("A");
 
