@@ -434,7 +434,12 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
     if (m_nodeReady || m_deliveryStarting) return;
     if (!m_signId.valid) { setStatus("No identity"); return; }
     m_deliveryStarting = true;
-    json cfg = {{"mode", "Core"}, {"preset", "logos.test"}, {"useChannels", true}};
+    // useChannels:false = plain relay. Delivery 0.3's reliable channels hold back every message whose
+    // causal history this node never saw ("SDS message has missing dependencies", then "stash full"),
+    // so a desktop never received anything from a phone with history (2026-10-09). loam_core still
+    // unwraps the phones' channel frames on the relay path, and phones accept plain relay frames;
+    // WhisperBox's own RBSR catch-up does the reliability.
+    json cfg = {{"mode", "Core"}, {"preset", "logos.test"}, {"useChannels", false}};
     if (const char* ov = std::getenv("WHISPERBOX_DELIVERY_CFG")) {
         auto j = json::parse(ov, nullptr, false);
         if (j.is_object()) cfg = j;
