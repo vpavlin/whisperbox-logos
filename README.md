@@ -45,12 +45,18 @@ Full protocol: [docs/SPEC.md](docs/SPEC.md).
 - [docs/BUILD.md](docs/BUILD.md): toolchain, tests, building the `.lgx` and APK, releasing
 - [docs/adr/](docs/adr/README.md): architecture decisions (0001-0017)
 
-## Install (Basecamp 0.2.x)
-Install **WhisperBox** from the mesh Basecamp repository (it pulls `whisperbox_core` and
-`delivery_module`). Current binaries are on the
-[`artifacts`](https://github.com/vpavlin/whisperbox-logos/tree/artifacts) branch.
+## Install (Basecamp 0.3)
+In Basecamp 0.3, add the repository `https://apps.vpavlin.xyz/logos-repo.json` and install
+**WhisperBox**. It pulls `whisperbox_core` and its transport (`loam_core`, which brings the
+official `delivery_module`).
 
-Always update `whisperbox` and `whisperbox_core` together (same version).
+| Package | Platforms |
+|---|---|
+| `whisperbox_core` | Linux x64, Linux ARM64, macOS (Apple Silicon) |
+| `whisperbox` (the view) | Linux x64, Linux ARM64; macOS from 0.4.2 |
+
+Always update `whisperbox` and `whisperbox_core` together (same version line). Basecamp 0.2.x
+builds (0.3.x) are no longer maintained.
 
 ## Android
 Install **Loam** (the device-wide Logos node) and **WhisperBox** from the Loam
