@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.4.2 desktop core (2026-10-10) - usable from other apps
+## 0.4.2 desktop core / Android 0.4.1 (2026-10-10) - usable from other apps
 
 - **`formSummary(formId)`**: title, status, receipts and (for the creator or a co-owner)
   the answer count, new answers and the last answer time, for a card in another app.
 - **The protocol is a library**: `packages/` is now `vpavlin/whisperbox-sdk` (a submodule at
   the same path) with form templates (booking, crew, guest list, feedback) and a React
   Native adapter whose app id and transport the host app sets (ADR 0018). The Android app
-  uses the adapter; its behaviour is unchanged.
+  uses the adapter; its behaviour is unchanged (Android 0.4.1 is that refactor).
 
 ## Android 0.3.10 (2026-10-03) - no Google services
 
