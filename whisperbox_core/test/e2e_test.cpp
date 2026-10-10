@@ -291,6 +291,13 @@ int main(int argc, char** argv) {
 
     // ── import before sync (share link opened on a node that hasn't synced) ────
     std::printf("import-before-sync:\n");
+    {   // formSummary: the creator sees the answer count, others only title/status/receipts
+        json sa = A->call(A->core->formSummary(fid)), sd = D->call(D->core->formSummary(fid));
+        long long nA = (long long)A->call(A->core->getDecryptedResponses(fid))["responses"].size();
+        CHECK(sa.value("ok", false) && sa.value("canRead", false) && sa.value("responses", -1LL) == nA && nA > 0, "formSummary: the creator gets the answer count");
+        CHECK(sd.value("ok", false) && !sd.value("canRead", true) && !sd.contains("responses") && sd.value("title", "") == sa.value("title", "x"), "formSummary: another node gets the card but no count");
+        CHECK(!A->call(A->core->formSummary("form-nope")).value("ok", true), "formSummary: unknown form");
+    }
     std::string uri = A->call(A->core->shareUri(fid)).value("uri", "");
     CHECK(uri == "whisperbox://form?id=" + fid + "&by=" + addrA, "shareUri is the short id form, pinned to the creator");
     std::string ifid = A->call(A->core->createForm(json({{"title", "Fresh"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})}}).dump())).value("formId", "");

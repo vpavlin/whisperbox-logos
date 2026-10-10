@@ -57,6 +57,7 @@ static json callCore(WhisperboxCoreImpl* c, const std::string& m, const json& a)
     else if (m == "getDecryptedResponses") r = c->getDecryptedResponses(s(0));
     else if (m == "importForm") r = c->importForm(s(0));
     else if (m == "shareUri") r = c->shareUri(s(0));
+    else if (m == "formSummary") r = c->formSummary(s(0));
     else if (m == "exportCsv") r = c->exportCsv(s(0));
     else if (m == "resync") r = c->resync();
     else if (m == "reopenForm") r = c->reopenForm(s(0));

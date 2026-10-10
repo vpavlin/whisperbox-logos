@@ -18,7 +18,9 @@ mkdir -p "$WB_TMP"
 step() { printf '\n== %s ==\n' "$*"; }
 
 step "1/8 contract crypto (TS)"
+( cd "$ROOT/packages" && { [ -d node_modules ] || npm install --silent --ignore-scripts; } )   # the SDK root: deps for every package below
 ( cd "$ROOT/packages/contract" && { [ -d node_modules ] || npm install --silent; } && node --test test/crypto.test.mjs test/crypto-portable.test.mjs | grep -E "^# (pass|fail)" )
+( cd "$ROOT/packages/templates" && node --test test/templates.test.mjs | grep -E "^# (pass|fail)" | sed "s/^/[templates] /" )
 
 step "2/8 engine (TS)"
 ( cd "$ROOT/packages/engine" && npm test --silent )
@@ -46,7 +48,6 @@ export WB_OUT="$WB_TMP/render"
 "$ROOT/scripts/qml-harness/scenarios.sh" | tail -1
 
 step "7/8 interop: JS client vs C++ core"
-( cd "$ROOT/third_party/loam-sync" && { [ -d node_modules ] || npm install --silent --ignore-scripts; } )
 "$ROOT/whisperbox_core/test/run-bridge-build.sh" "$WB_TMP/wb-bridge" >/dev/null
 ( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
 

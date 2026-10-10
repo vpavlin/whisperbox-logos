@@ -1486,6 +1486,34 @@ std::string WhisperboxCoreImpl::setDeviceId(std::string deviceId) {
     return out.dump();
 }
 
+// One form at a glance, for a card in another app (Frequencies' night): title, status and
+// counts. Answer counts only for the creator or a co-owner: a sealed answer doesn't say which
+// form it's for, so nobody else can count them. Receipts are public (form.confirmations).
+std::string WhisperboxCoreImpl::formSummary(std::string formId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    formId = lc(formId);
+    publishState();
+    json snap;
+    try { snap = json::parse(m_snapshot); } catch (...) { return json({{"ok", false}, {"error", "no state"}}).dump(); }
+    if (!snap["state"]["forms"].contains(formId)) return json({{"ok", false}, {"error", "unknown form"}}).dump();
+    const json& f = snap["state"]["forms"][formId];
+    const bool mine = f.value("mine", false), coOwner = f.value("coOwner", false);
+    json out = {{"ok", true}, {"formId", formId}, {"title", f.value("title", "")}, {"status", f.value("status", "open")},
+                {"expiresAt", f.contains("expiresAt") ? f["expiresAt"] : json(nullptr)}, {"createdAt", f.value("createdAt", 0LL)},
+                {"mine", mine}, {"coOwner", coOwner}, {"canRead", mine || coOwner},
+                {"receipts", f.contains("confirmations") && f["confirmations"].is_array() ? (long long)f["confirmations"].size() : 0LL}};
+    if (mine || coOwner) {
+        json list = json::array();
+        if (snap["creatorView"].is_object() && snap["creatorView"]["responses"].contains(formId)) list = snap["creatorView"]["responses"][formId];
+        long long last = 0;
+        for (const auto& r : list) if (r.contains("submittedAt") && r["submittedAt"].is_number()) last = std::max(last, r["submittedAt"].get<long long>());
+        out["responses"] = (long long)list.size();
+        out["newResponses"] = f.value("newResponses", 0LL);
+        out["lastResponseAt"] = last ? json(last) : json(nullptr);
+    }
+    return out.dump();
+}
+
 std::string WhisperboxCoreImpl::shareUri(std::string formId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;

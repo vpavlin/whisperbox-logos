@@ -70,6 +70,7 @@ public:
     std::string importIdentity(std::string privHex);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
+    std::string formSummary(std::string formId);
     std::string shareQr(std::string formId);
     std::string importForm(std::string defJson);
     std::string exportCsv(std::string formId);

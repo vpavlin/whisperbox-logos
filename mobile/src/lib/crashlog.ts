@@ -2,7 +2,7 @@
 // to still leaves evidence: a rolling log of boot/network steps saved to disk (survives a
 // NATIVE crash too - whatever was written last is the last step reached), and fatal JS
 // errors are shown on screen (with "Copy details") instead of killing the app.
-import { fileStore } from "./store";
+import { fileStore } from "../../../packages/rn/store";
 
 const t0 = Date.now();
 const MAX = 120;
