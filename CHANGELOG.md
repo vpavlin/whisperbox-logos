@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2 desktop view (2026-10-10) - macOS
+
+- The view is rebuilt against core 0.4.2's interface and ships for darwin-arm64 (Apple
+  Silicon) as well as linux-amd64 and linux-arm64. No functional change.
+
 ## 0.4.2 desktop core / Android 0.4.1 (2026-10-10) - usable from other apps
 
 - **`formSummary(formId)`**: title, status, receipts and (for the creator or a co-owner)
