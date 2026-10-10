@@ -460,7 +460,7 @@ footer .sib { display: flex; flex-wrap: wrap; gap: 6px 14px; }
         <p class="note"><strong>Loam is recommended:</strong> it runs one shared network node for all your Logos apps and adds Bluetooth (experimental, Android only). Without Loam, WhisperBox runs its own node (Settings → Identity &amp; network). Scan a form's QR code or tap its link to answer; your key never leaves the phone.</p>
       </div>
       <div class="card">
-        <span class="label">Desktop · Logos Basecamp 0.2.x</span>
+        <span class="label">Desktop · Logos Basecamp 0.3</span>
         <h3>From the Basecamp package repository</h3>
         <ol>
           <li>Open Basecamp's package manager and add this package repository:</li>
@@ -473,7 +473,7 @@ footer .sib { display: flex; flex-wrap: wrap; gap: 6px 14px; }
           <li>Install <strong>WhisperBox</strong> (package <code>whisperbox</code>). It pulls in <code>whisperbox_core</code> and its dependencies (<code>delivery_module</code>) automatically.</li>
           <li>When updating, update <code>whisperbox</code> and <code>whisperbox_core</code> together.</li>
         </ol>
-        <p class="note">Supported: Basecamp 0.2.x. Basecamp 0.3 support is coming.</p>
+        <p class="note">Supported: Basecamp 0.3 on Linux x64 and Linux ARM64; macOS is coming.</p>
       </div>
     </div>
     <details class="hub">
@@ -492,14 +492,14 @@ whisperbox responses form-…</pre>
     <p class="statusline">Latest public builds: Android 0.3.10 · Basecamp whisperbox 0.3.8 + whisperbox_core 0.3.8</p>
     <ul class="status-list">
       <li><strong>Early software.</strong> The protocol is specified and tested across the Android and desktop implementations, but expect rough edges.</li>
-      <li><strong>Android is arm64 only.</strong> Basecamp support is 0.2.x; Basecamp 0.3 support is coming.</li>
+      <li><strong>Android is arm64 only.</strong> Desktop: Basecamp 0.3 on Linux (macOS coming).</li>
       <li><strong>Keycard support (experimental, Android).</strong> A form's key can come from a Status Keycard instead of the phone. It has been tested against the Keycard applet in a simulator; a real-card test is still pending.</li>
       <li><strong>Bluetooth via Loam</strong> is experimental and Android only.</li>
       <li><strong>Clocks matter.</strong> Close dates, answer limits and the edit window are judged by the sender's clock, so a respondent with a wrong clock can land just inside or outside a window.</li>
       <li><strong>Your device does the housekeeping.</strong> Automatic closing and scheduled publishing need your device (or your own hub) to be running; limits and dates are still enforced by every reader.</li>
       <li><strong>Re-ordering or deleting choice options</strong> after answers have come in re-labels those answers. Adding options is safe.</li>
       <li><strong>No co-owner revocation</strong> yet; it would need a new form key.</li>
-      <li><strong>Next:</strong> validator hubs that can check answers for one form without your identity key, and Basecamp 0.3.</li>
+      <li><strong>Next:</strong> validator hubs that can check answers for one form without your identity key.</li>
     </ul>
   </section>
 
