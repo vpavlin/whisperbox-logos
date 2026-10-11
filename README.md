@@ -53,10 +53,10 @@ official `delivery_module`).
 | Package | Platforms |
 |---|---|
 | `whisperbox_core` | Linux x64, Linux ARM64, macOS (Apple Silicon) |
-| `whisperbox` (the view) | Linux x64, Linux ARM64; macOS from 0.4.2 |
+| `whisperbox` (the view) | Linux x64, Linux ARM64, macOS (Apple Silicon) from 0.4.2 |
 
-Always update `whisperbox` and `whisperbox_core` together (same version line). Basecamp 0.2.x
-builds (0.3.x) are no longer maintained.
+Always update `whisperbox` and `whisperbox_core` together (same version line). WhisperBox 0.3.x,
+the version for Basecamp 0.2.x, is no longer maintained.
 
 ## Android
 Install **Loam** (the device-wide Logos node) and **WhisperBox** from the Loam
