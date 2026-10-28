@@ -21,7 +21,7 @@ FAIL=0
 # run <name> <fixture> <props-json> [invoke] ; then optional expectations via expect/deny
 run() {
     local name=$1 fx=$2 props=$3 inv=${4:-}
-    WB_PROPS="$props" WB_INVOKE="$inv" WB_CLICKS="${WB_CLICKS:-}" WB_DUMP="${WB_DUMP:-}" "$HDIR/harness" "$QML" "$FX/$fx.json" "$OUT/$name.png" > /dev/null 2> "$OUT/$name.log"
+    WB_PROPS="$props" WB_INVOKE="$inv" WB_CLICKS="${WB_CLICKS:-}" WB_DUMP="${WB_DUMP:-}" WB_NAMES="${WB_NAMES:-}" "$HDIR/harness" "$QML" "$FX/$fx.json" "$OUT/$name.png" > /dev/null 2> "$OUT/$name.log"
     local rc=$?
     local warn; warn=$(grep -cE '^\[(W|E)\]' "$OUT/$name.log")
     if [ $rc -ne 0 ] || [ "$warn" -ne 0 ]; then
@@ -48,6 +48,28 @@ expect "CALL whisperbox_core exportCsv argc=1 args=$LUNCH_A\$" "csv -> exportCsv
 run create-dialog    creator   "{}" "openCreate,addDraftQuestion"
 run create-publish   creator   '{"draftTitle":"Team offsite","draftDescription":"Where next?","draftRestrict":true,"draftAllowList":"0x1111111111111111111111111111111111111111\n0xBAD","draftQuestions":[{"type":"radioButtons","text":"Place","required":true,"optionsText":"Alps\nSea\n"},{"type":"textarea","text":"Why?","required":false,"optionsText":""}]}' "doCreate"
 expect 'CALL whisperbox_core createForm argc=1 args=\{"title":"Team offsite","description":"Where next\?","questions":\[\{"id":"q1","type":"radioButtons","text":"Place","required":true,"options":\["Alps","Sea"\]\},\{"id":"q2","type":"textarea","text":"Why\?","required":false\}\],"whitelist":\{"type":"addresses","value":"0x1111111111111111111111111111111111111111"\}\}$' "publish -> createForm(def) with options + filtered allow-list"
+deny 'CALL names' "an address-only list never asks Names"
+
+# ── LNS names in the allow-list (ADR 0019) ──
+NAMEQ='"draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]'
+NAMES='{"alice":{"texts":{"whisperbox.address":"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},"bob":{"texts":{"whisperbox.address":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},"carol":{"texts":{"avatar":"x"}}}'
+WB_NAMES="$NAMES" run names-publish creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice.lez\\n0x2222222222222222222222222222222222222222\\nBob, alice\",$NAMEQ}" "doCreate"
+expect 'CALL names resolve argc=1 args=alice$' "a trailing .lez is ignored (alice.lez is looked up as alice)"
+expect 'CALL names resolve argc=1 args=bob$' "names are lower-cased"
+expect '"whitelist":\{"type":"addresses","value":"0x2222222222222222222222222222222222222222,0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\}' "names become their linked addresses, de-duplicated"
+deny 'CALL whisperbox_core createForm.*(alice|bob)' "no name goes on the wire"
+WB_NAMES="$NAMES" run names-unlinked creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\ncarol\",$NAMEQ}" "doCreate"
+deny 'CALL whisperbox_core createForm' "a name with no linked address stops the publish"
+WB_NAMES="$NAMES" run names-unregistered creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\ndave\",$NAMEQ}" "doCreate"
+deny 'CALL whisperbox_core createForm' "an unregistered name stops the publish"
+run names-no-module creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\",$NAMEQ}" "doCreate"
+expect 'CALL names resolve' "Names is asked"
+deny 'CALL whisperbox_core createForm' "without Names, a list with names isn't published"
+WB_NAMES="$NAMES" run names-schedule creator "{\"draftTitle\":\"Later\",\"draftRestrict\":true,\"draftAllowList\":\"alice\",\"draftPublishAt\":\"2099-01-01 10:00\",$NAMEQ}" "doSchedule"
+expect 'CALL whisperbox_core saveDraft argc=1 args=.*"whitelist":\{"type":"addresses","value":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\}' "a scheduled form keeps the resolved address"
+WB_NAMES=silent WB_DUMP=inFlight run names-silent creator "{\"namesTimeoutMs\":500,\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\",$NAMEQ}" "doCreate"
+expect 'DUMP inFlight \{\}' "a Names call that never answers doesn't leave publishing stuck"
+deny 'CALL whisperbox_core createForm' "and nothing is published"
 run create-bad-choice creator  '{"draftTitle":"x","draftQuestions":[{"type":"checkbox","text":"Pick","required":true,"optionsText":"only one"}]}' "doCreate"
 deny "CALL whisperbox_core createForm" "choice question with <2 options is not published"
 # Real clicks on the builder's type/required chips (dialog at 1280x800: Q1 chips row

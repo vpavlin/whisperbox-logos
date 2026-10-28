@@ -64,6 +64,7 @@ public:
             fprintf(stderr, "CALL %s %s argc=%d args=%s\n", mod.toUtf8().constData(), method.toUtf8().constData(),
                     (int)args.size(), a.join(" | ").toUtf8().constData());
         }
+        if (mod == "names") return namesReply(method, args);
         if (mod != "whisperbox_core") return "{\"error\":\"unknown module\"}";
         if (method == "snapshot" || method == "status") return m_fixture;
         // Canned mutation responses so click-through paths don't error.
@@ -89,10 +90,29 @@ public:
     Q_INVOKABLE void callModuleAsync(const QString &mod, const QString &method, const QVariantList &args, const QJSValue &cb, int timeoutMs = 0) {
         Q_UNUSED(timeoutMs);
         const QString r = callModule(mod, method, args);
+        if (mod == "names" && qgetenv("WB_NAMES") == "silent") return;   // a host that never calls back
         QJSValue c = cb;
         QTimer::singleShot(0, this, [c, r]() mutable { if (c.isCallable()) c.call({QJSValue(r)}); });
     }
     Q_INVOKABLE void onModuleEvent(const QString &mod, const QString &ev) {}
+
+    // The optional `names` module. WB_NAMES = {"alice": {"texts": {...}}, "bob": null}:
+    // a listed name resolves to that value (null = not registered), any other name is
+    // not registered. Without WB_NAMES the module isn't installed; WB_NAMES=silent never
+    // answers an async call.
+    static QString namesReply(const QString &method, const QVariantList &args) {
+        const QByteArray env = qgetenv("WB_NAMES");
+        if (env.isEmpty()) return "{\"error\":\"unknown module\"}";
+        QJsonObject reply{{"success", true}, {"value", QJsonValue::Null}, {"error", QJsonValue::Null}};
+        if (method != "resolve" || args.isEmpty()) {
+            reply["success"] = false; reply["error"] = "the harness only answers resolve";
+        } else {
+            const QString n = args[0].toString();
+            const QJsonValue v = QJsonDocument::fromJson(env).object().value(n);
+            if (v.isObject()) { QJsonObject o = v.toObject(); o["name"] = n; reply["value"] = o; }
+        }
+        return QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact));
+    }
 
 signals:
     void moduleEventReceived(const QString &mod, const QString &ev, const QString &data);

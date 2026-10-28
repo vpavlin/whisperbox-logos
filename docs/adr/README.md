@@ -19,5 +19,7 @@
 | [0015](0015-shared-delivery-node.md) | Join the device's existing delivery node | 0.3.4 |
 | [0016](0016-release-and-distribution.md) | Releases: binaries on an artifacts branch, signing key on one host, no CI yet | 0.3.0 |
 | [0017](0017-no-google-services.md) | No Google services: local notifications, ZXing QR scanning | Android 0.3.10 |
+| [0018](0018-protocol-is-a-separate-package.md) | The protocol is a separate package (whisperbox-sdk) | 0.4.2 |
+| [0019](0019-names-in-allow-lists.md) | LNS names in members-only lists, resolved to addresses at publish | proposed |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.

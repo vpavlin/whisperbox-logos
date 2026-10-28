@@ -113,6 +113,83 @@ Item {
         }
         Qt.callLater(function () { var r = ""; try { r = logos.callModule("whisperbox_core", m, a || []); } catch (e) {} done(r); });
     }
+    // ── LNS names (optional `names` module, ADR 0019) ──
+    // A members-only list may name people by their LNS name as well as give addresses.
+    // Each person links once: their name's `whisperbox.address` entry holds their address.
+    // The creator's view resolves names when publishing; only addresses go into the form.
+    readonly property string nameAddressKey: "whisperbox.address"
+    property int namesTimeoutMs: 10000   // a call to a module that isn't loaded waits all of it
+    function callNames(m, a, cb) {
+        var done = function (r) { try { cb(r === undefined || r === null ? "" : String(r)); } catch (e) { console.warn("whisperbox names callback", m, e); } };
+        if (typeof logos === "undefined" || !logos) { Qt.callLater(function () { done(""); }); return; }
+        if (typeof logos.callModuleAsync === "function") {
+            try { logos.callModuleAsync("names", m, a || [], done, root.namesTimeoutMs); }
+            catch (e) { Qt.callLater(function () { done(""); }); }
+            return;
+        }
+        Qt.callLater(function () { var r = ""; try { r = logos.callModule("names", m, a || []); } catch (e) {} done(r); });
+    }
+    function isAddress(t) { return /^0x[0-9a-fA-F]{40}$/.test(String(t)); }
+    function allowEntries(text) { return String(text || "").split(/[\s,]+/).filter(function (t) { return t.length > 0; }); }
+    function nameOf(t) { var n = String(t).toLowerCase(); return n.slice(-4) === ".lez" ? n.slice(0, -4) : n; }
+    // cb({ ok, addrs }) or cb({ ok: false, error }). An entry starting with 0x is an address
+    // (kept if valid, as before); every other entry is a name, and a name that doesn't give
+    // an address fails the whole list rather than being dropped, or a typo would quietly
+    // shut that person out.
+    function resolveAllowList(text, cb) {
+        var addrs = [], names = [];
+        allowEntries(text).forEach(function (t) {
+            if (/^0x/i.test(t)) { if (isAddress(t)) addrs.push(t.toLowerCase()); }
+            else if (names.indexOf(nameOf(t)) < 0) names.push(nameOf(t));
+        });
+        var finish = function (problems) {
+            if (problems.length) { cb({ ok: false, error: problems.join("; ") }); return; }
+            cb({ ok: true, addrs: addrs.filter(function (a, i) { return addrs.indexOf(a) === i; }) });
+        };
+        if (names.length === 0) { finish([]); return; }
+        var left = names.length, problems = [], missing = false;
+        names.forEach(function (n) {
+            callNames("resolve", [n], function (raw) {
+                var r = root.parse(raw);
+                if (!r || r.success === undefined) missing = true;
+                else if (!r.success) problems.push(n + ": " + (r.error || "lookup failed"));
+                else if (!r.value || r.value.name !== n) problems.push(n + " isn't a registered LNS name");
+                else {
+                    var v = String((r.value.texts || {})[root.nameAddressKey] || "").trim();
+                    if (isAddress(v)) addrs.push(v.toLowerCase());
+                    else problems.push(n + " hasn't linked a WhisperBox address to its LNS name");
+                }
+                if (--left > 0) return;
+                if (missing) problems.unshift("Names didn't answer (is the Names app installed?), so names can't be looked up - use 0x addresses");
+                finish(problems);
+            });
+        });
+    }
+    // Resolves the members-only list first when there is one; go(addrs) gets the
+    // addresses, or undefined when there's nothing to resolve.
+    property int namesRun: 0
+    function endNamesRun() { var g = Object.assign({}, root.inFlight); delete g["resolveNames"]; root.inFlight = g; }
+    function withAllowList(go) {
+        if (!root.draftRestrict || root.draftAnonymous) { go(undefined); return; }
+        if (root.inFlight["resolveNames"]) return;
+        var f = Object.assign({}, root.inFlight); f["resolveNames"] = true; root.inFlight = f;
+        var run = ++root.namesRun;
+        namesGuard.restart();
+        resolveAllowList(root.draftAllowList, function (r) {
+            if (run !== root.namesRun) return;   // the guard already gave up on this one
+            namesGuard.stop(); endNamesRun();
+            if (!r.ok) { toast(r.error); return; }
+            go(r.addrs);
+        });
+    }
+    // Whatever the host does with the call's deadline, publishing is never left stuck.
+    Timer { id: namesGuard; interval: root.namesTimeoutMs + 1000
+            onTriggered: { root.namesRun++; root.endNamesRun(); root.toast("Names didn't answer (is the Names app installed?) - use 0x addresses"); } }
+    property string linkName: ""
+    readonly property string linkCommand: {
+        var n = nameOf(String(root.linkName || "").trim());
+        return n && root.myAddress ? "names set-text " + n + " " + root.nameAddressKey + " " + root.myAddress : "";
+    }
     // Host results may arrive JSON-string-wrapped (once or twice) - peel, then parse.
     function parse(raw) {
         var s = String(raw || "").trim();
@@ -535,15 +612,15 @@ Item {
         root.editingFormId = f.id;
         rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
     }
-    function doUpdate() {
-        var b = buildDef(true);
+    function doUpdate() { withAllowList(function (allow) {
+        var b = buildDef(true, allow);
         if (!b.ok) { toast(b.error); return; }
         var def = Object.assign({}, b.def); delete def._builder;
         var fid = root.editingFormId;
         act("updateForm", [fid, JSON.stringify(def)], "Form updated - everyone sees the new version", function () {
             root.draftDirty = false; root.showCreate = false; root.editingFormId = "";
         });
-    }
+    }); }
     // ── quiz: the right answer per question, kept on the draft question ──
     //   choice/dropdown: correct = index; checkbox: correctSet = [index]; boolean: correct = true|false;
     //   text types: accepted = "a, b"; scale/number: correctNum = "4"; points = "2"
@@ -672,7 +749,8 @@ Item {
         thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous, quiz: root.draftQuiz })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
-    function buildDef(strict) {
+    // allow: the members-only list already resolved to addresses (withAllowList), if any.
+    function buildDef(strict, allow) {
         var err = function (m) { return { ok: false, error: m }; };
         var title = root.draftTitle.trim();
         if (strict && !title) return err("Give the form a title");
@@ -710,8 +788,8 @@ Item {
         if (strict && qs.length === 0) return err("Add at least one question");
         var wl = { type: "none", value: "" };
         if (root.draftRestrict) {
-            var addrs = root.draftAllowList.split(/[\s,]+/).filter(function (a) { return /^0x[0-9a-fA-F]{40}$/.test(a); });
-            if (strict && addrs.length === 0) return err("Add at least one 0x address, or turn off the restriction");
+            var addrs = allow !== undefined ? allow : allowEntries(root.draftAllowList).filter(isAddress);
+            if (strict && addrs.length === 0) return err("Add at least one 0x address or name, or turn off the restriction");
             wl = { type: "addresses", value: addrs.join(",").toLowerCase() };
         }
         var def = { title: title, description: root.draftDescription.trim(), questions: qs, whitelist: wl, _builder: root.builderState };
@@ -735,8 +813,8 @@ Item {
         for (var i = 0; i < root.draftQuestions.length; i++) if (String(root.draftQuestions[i].text || "").trim()) return false;
         return true;
     }
-    function saveCurrentDraft(publishAt, cb) {
-        var b = buildDef(publishAt !== undefined && publishAt !== null);
+    function saveCurrentDraft(publishAt, cb, allow) {
+        var b = buildDef(publishAt !== undefined && publishAt !== null, allow);
         if (!b.ok) { toast(b.error); return; }
         var d = { def: b.def };
         if (root.draftId) d.id = root.draftId;
@@ -772,8 +850,8 @@ Item {
         if (root.draftId) act("deleteDraft", [root.draftId], "Draft deleted");
         root.draftDirty = false; root.showCreate = false;
     }
-    function doCreate() {
-        var b = buildDef(true);
+    function doCreate() { withAllowList(function (allow) {
+        var b = buildDef(true, allow);
         if (!b.ok) { toast(b.error); return; }
         var did = root.draftId;
         var def = Object.assign({}, b.def); delete def._builder;   // builder state is for drafts only
@@ -781,14 +859,17 @@ Item {
             if (did) callVia("deleteDraft", [did], function () {});
             root.draftDirty = false; root.showCreate = false; selectForm(String(r.formId || "").toLowerCase());
         });
-    }
+    }); }
     function doSchedule() {
         var t = parseLocal(root.draftPublishAt);
         if (isNaN(t)) { toast("Publish time: use yyyy-MM-dd HH:mm"); return; }
         if (t <= Date.now()) { toast("That time has passed - use Publish now"); return; }
-        saveCurrentDraft(t, function () {
-            root.showCreate = false;
-            toast("Scheduled for " + root.fmtTime(t) + " - publishes when WhisperBox is running then");
+        // names are resolved now, not at publish time (the core publishes the saved def)
+        withAllowList(function (allow) {
+            saveCurrentDraft(t, function () {
+                root.showCreate = false;
+                toast("Scheduled for " + root.fmtTime(t) + " - publishes when WhisperBox is running then");
+            }, allow);
         });
     }
 
@@ -2097,6 +2178,41 @@ Item {
                 color: root.wbTextTert
                 text: "Creators who restrict a form to specific addresses need this one. It is an Ethereum-style address of this device's key."
             }
+            SectionLabel { text: "LINK YOUR LNS NAME (OPTIONAL)" }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                InputBox {
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    TextField {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        color: root.wbText
+                        placeholderTextColor: root.wbTextTert
+                        font.pixelSize: 12
+                        background: null
+                        placeholderText: "your LNS name, e.g. alice"
+                        text: root.linkName
+                        onTextChanged: root.linkName = text
+                    }
+                }
+            }
+            RowLayout {
+                visible: root.linkCommand !== ""
+                Layout.fillWidth: true
+                spacing: 8
+                InputBox {
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: Text.AlignVCenter
+                        text: root.linkCommand; font.pixelSize: 12; font.family: "monospace"; color: root.wbText; elide: Text.ElideMiddle }
+                }
+                WbButton { label: "Copy"; onClicked: root.copyText(root.linkCommand, "Command") }
+            }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
+                text: "Then a creator can list your name instead of this address. Run the command with the names command line; it puts this address in your name's " + root.nameAddressKey + " entry. Anyone who knows your name can see the address." }
             SectionLabel { text: "YOUR CO-OWNER CODE" }
             RowLayout {
                 Layout.fillWidth: true
@@ -2512,7 +2628,7 @@ Item {
                                 font.family: "monospace"
                                 wrapMode: TextEdit.Wrap
                                 background: null
-                                placeholderText: "0x addresses, one per line (respondents find theirs under Identity)"
+                                placeholderText: "0x addresses or LNS names, one per line (respondents find theirs under Identity)"
                                 text: root.draftAllowList
                                 onTextChanged: root.draftAllowList = text
                             }
@@ -2617,8 +2733,8 @@ Item {
                 WbButton { label: "Preview"; onClicked: root.openPreview() }
                 WbButton { visible: !root.editingFormId; label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
                 WbButton { visible: !root.editingFormId; label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
-                WbButton { visible: !root.editingFormId; primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
-                WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm"); onClicked: root.doUpdate() }
+                WbButton { visible: !root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names..." : root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm") && !root.busy("resolveNames"); onClicked: root.doCreate() }
+                WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names..." : root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm") && !root.busy("resolveNames"); onClicked: root.doUpdate() }
             }
         }
     }

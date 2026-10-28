@@ -10,6 +10,9 @@
   "dependencies": [
     "whisperbox_core"
   ],
+  "optional_dependencies": [
+    "names"
+  ],
   "nix": {
     "packages": {
       "build": [],
