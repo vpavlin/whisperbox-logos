@@ -58,7 +58,8 @@ inline std::string jsonString(const std::string& s) {
 
 // Canonical JSON matching crypto.mjs cjson(): sorted object keys, compact, JS number
 // formatting. WhisperBox payloads are strings/ints/bools/nested objects/arrays.
-inline std::string cjson(const json& v) {
+inline std::string cjson(const json& v, int depth = 0) {
+    if (depth > 64) throw std::runtime_error("cjson: nested too deep");   // FR-1: never recurse unbounded
     if (v.is_null()) return "null";
     if (v.is_boolean()) return v.get<bool>() ? "true" : "false";
     if (v.is_string()) return jsonString(v.get<std::string>());
@@ -67,7 +68,7 @@ inline std::string cjson(const json& v) {
     if (v.is_number_float()) return json(v).dump(); // fallback; payloads avoid floats
     if (v.is_array()) {
         std::string o = "[";
-        for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += cjson(v[i]); }
+        for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += cjson(v[i], depth + 1); }
         return o + "]";
     }
     if (v.is_object()) {
@@ -75,7 +76,7 @@ inline std::string cjson(const json& v) {
         for (auto it = v.begin(); it != v.end(); ++it) keys.push_back(it.key());
         std::sort(keys.begin(), keys.end());
         std::string o = "{";
-        for (size_t i = 0; i < keys.size(); i++) { if (i) o += ","; o += jsonString(keys[i]) + ":" + cjson(v.at(keys[i])); }
+        for (size_t i = 0; i < keys.size(); i++) { if (i) o += ","; o += jsonString(keys[i]) + ":" + cjson(v.at(keys[i]), depth + 1); }
         return o + "}";
     }
     return "null";

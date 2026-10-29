@@ -149,6 +149,12 @@ private:
     std::map<std::string, long long> m_netTimes;
 
     int64_t m_lastSyncReserveMs = 0;      // SYNC_REQ-driven re-serve throttle (3s)
+    // Re-serving for others (RBSR, SYNC_REQ) is bounded (open-review FR-3): an event served in the
+    // last kServeCooldownMs isn't served again, and at most kServeBudget a minute.
+    std::map<std::string, int64_t> m_servedMs;   // event key -> last time we served it for a peer
+    double m_serveTokens = 0; int64_t m_serveRefillMs = 0;
+    long m_serveSkipped = 0;
+    bool serveEvent(const whisperbox::json& e);
     int64_t m_lastSeedMs = 0;             // periodic seed throttle (60s)
     int64_t m_lastSyncReqMs = 0;          // last outgoing SYNC_REQ
     int m_syncReqTries = 0;               // outgoing SYNC_REQ attempts (backoff schedule)

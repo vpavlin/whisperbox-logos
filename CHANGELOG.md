@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.1 desktop core + view, Android 0.5.1 (2026-10-29) - open-review fixes
+
+Fixes from the open-review report on 0.5.0 (https://or.vpavlin.xyz/whisperbox-logos-302a134f8dbe/),
+the same in the desktop core and the phone client:
+- **FR-1 (High):** a frame over 1 MiB or JSON nested more than 32 deep is refused before it is
+  parsed. One deeply nested frame used to crash the core before any signature was checked. The
+  canonical-JSON signer also stops at depth 64.
+- **FR-2 (High):** an HLC counter above 2^30 is refused and never adopted. A local counter at the
+  bound carries into the next millisecond instead of overflowing.
+- **FR-3 (High):** serving events for other peers (RBSR, legacy SYNC_REQ) is bounded: 100 events
+  per incoming frame, an event served in the last 2 s isn't served again, and at most 300 a
+  minute. A 40-byte frame used to trigger a full-log broadcast.
+- **FR-4 (Medium):** a form's publicKey and a co-owner code must be points on secp256k1, and ECDH
+  throws on an invalid point. An invalid key used to give an all-zero secret, so anyone could read
+  the answers.
+- **FR-5 (Medium):** the CSV export has `verified` and `timeVerified` columns. Unverified answers
+  get no automatic receipts and don't count towards the auto-close at the answer limit.
+- **FR-6 (Medium):** a whole event is at most 256 KiB.
+- **FR-7, FR-8, FR-9, FR-12 (Low):**
+  - signed event types are verified again when a log loads;
+  - JSON-taking methods return an error for mistyped fields instead of throwing;
+  - the README describes the 0.5.0 model;
+  - the e2e harness reports FAIL instead of aborting.
+- Not changed yet: FR-10 (pinning CI actions and the builder flake to commits) and FR-11 (mobile
+  lockfile advisories in build tooling).
+
 ## 0.5.0 desktop core + view (2026-10-29) - every answer is signed
 
 A protocol change: creators should update first. Answers from 0.4.x clients still arrive, marked

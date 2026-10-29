@@ -321,10 +321,19 @@ void WhisperboxCoreImpl::loadLog() {
     std::ifstream f(m_dataDir + "/events.json");
     if (!f) return;
     try {
-        json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
+        // the log is a JSON array of events: two levels more than a frame; no size cap on our own file
+        json a = whisperbox::parseLimited(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()),
+                                          whisperbox::kMaxJsonDepth + 2, std::numeric_limits<size_t>::max());
+        if (a.is_null()) throw std::runtime_error("events.json unreadable or nested too deep");
         json bad = json::array();
+        // Signed event types are checked again: the fold doesn't verify, admission did, and a log
+        // edited (or restored) on disk could carry an unsigned close, update or co-owner grant
+        // (open-review FR-7). The 0.1.x unsigned form.publish placeholders are repaired below.
+        auto signedType = [](const std::string& t) {
+            return t == RESPONSE_CONFIRM || t == FORM_CLOSE || t == whisperbox::FORM_REOPEN || t == whisperbox::FORM_UPDATE || t == whisperbox::FORM_COOWNER || t == whisperbox::RESPONSE_REPLY;
+        };
         if (a.is_array()) for (auto& e : a) {
-            if (whisperbox::wellFormedEvent(e)) m_log.push_back(e);
+            if (whisperbox::wellFormedEvent(e) && (!signedType(e.value("type", "")) || whisperbox::verifyEventJson(e))) m_log.push_back(e);
             else { bad.push_back(e); m_loadDropped++; }
         }
         // A log written before 0.4.3 may hold a peer's malformed event that crashed every start
@@ -548,7 +557,7 @@ void WhisperboxCoreImpl::joinTransport() {
 
 void WhisperboxCoreImpl::seedBroadcast() {
     if (!m_nodeReady || m_log.empty()) return;
-    for (const auto& e : m_log) broadcastEvent(e);
+    for (const auto& e : m_log) serveEvent(e);
     m_lastSeedMs = nowMs();
 }
 
@@ -616,11 +625,35 @@ void WhisperboxCoreImpl::broadcastEvent(const json& e) {
     if (deliverySend(TOPIC, whisperbox::b64encode(text))) m_txTotal++;
 }
 
+// Send an event on behalf of a peer that lacks it. Serving has a budget, and an event served a
+// moment ago (the same frame over two bearers, a burst of identical asks) isn't sent again: a 40-byte
+// "ids" frame used to make the node re-broadcast its whole log, every time it came (open-review
+// FR-3). The window is short on purpose: a second peer catching up a few seconds later must still be
+// served. A peer that misses out gets it on its next catch-up round.
+bool WhisperboxCoreImpl::serveEvent(const json& e) {
+    static constexpr int64_t kServeCooldownMs = 2000;
+    static constexpr double kServeBudget = 300;   // events a minute, a burst of the same
+    const int64_t now = nowMs();
+    const std::string key = whisperbox::eventKey(e);
+    auto it = m_servedMs.find(key);
+    if (it != m_servedMs.end() && now - it->second < kServeCooldownMs) { m_serveSkipped++; return false; }
+    if (m_serveRefillMs == 0) { m_serveRefillMs = now; m_serveTokens = kServeBudget; }
+    m_serveTokens = std::min(kServeBudget, m_serveTokens + double(now - m_serveRefillMs) * kServeBudget / 60000.0);
+    m_serveRefillMs = now;
+    if (m_serveTokens < 1) { m_serveSkipped++; return false; }
+    m_serveTokens -= 1;
+    m_servedMs[key] = now;
+    broadcastEvent(e);
+    return true;
+}
+
 // ── ingest (receive path) ────────────────────────────────────────────────────────
 void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath, long long netMs) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rxRaw++;
     if (channelPath) m_rxSeen++;
+    // a frame past the size cap is refused before any decoding (base64, maybe twice: 16/9 of the bytes)
+    if (text.size() > whisperbox::kMaxFrameBytes * 2) { m_rxBad++; return; }
     // The wire payload is base64 text; a peer may single- OR double-encode. Try the
     // double-peel first, then a single peel (qaku convention).
     auto tryText = [this, netMs](const std::string& t) -> bool {
@@ -637,7 +670,13 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             env.erase("type");
             auto step = logos_sync::catchup::respond(evs, env, m_deviceId);
             for (const auto& r : step.replies) sendControl(r);
-            for (const auto& sv : step.serve) { auto it = byId.find(sv.id); if (it != byId.end()) broadcastEvent(*it->second); }
+            // at most kServePerFrame events for one incoming frame; the rest on the peer's next round
+            static constexpr size_t kServePerFrame = 100;
+            size_t n = 0;
+            for (const auto& sv : step.serve) {
+                if (n >= kServePerFrame) { m_serveSkipped++; continue; }
+                auto it = byId.find(sv.id); if (it != byId.end() && serveEvent(*it->second)) n++;
+            }
             m_rbsrRx++;
             return true;
         }
@@ -712,6 +751,10 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
         // payload.creator (verifyEvent does both). Unsigned publishes are dropped —
         // forms are public, but authorship is not optional.
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
+        // the key answers are sealed to must be a real point: an invalid one meant an all-zero
+        // shared secret, so anyone could read the answers (open-review FR-4)
+        const std::string pk = e["payload"].value("publicKey", "");
+        if (!pk.empty() && !whisperbox::validPubPoint(whisperbox::fromHex(pk))) { m_admDropShape++; return false; }
         return true;
     }
     if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == whisperbox::FORM_REOPEN || type == whisperbox::FORM_UPDATE || type == whisperbox::FORM_COOWNER || type == whisperbox::RESPONSE_REPLY) {
@@ -855,7 +898,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
-        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs},
+        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
     });
     return snap;
@@ -1062,7 +1105,7 @@ std::string WhisperboxCoreImpl::addCoOwner(std::string formId, std::string coOwn
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(trim(formId)); coOwnerPubHex = lc(trim(coOwnerPubHex));
-    if (!isHex(coOwnerPubHex, 66) || (coOwnerPubHex.rfind("02", 0) != 0 && coOwnerPubHex.rfind("03", 0) != 0)) { out["ok"] = false; out["error"] = "that isn't a co-owner code (66 hex characters)"; return out.dump(); }
+    if (!isHex(coOwnerPubHex, 66) || !whisperbox::validPubPoint(whisperbox::fromHex(coOwnerPubHex))) { out["ok"] = false; out["error"] = "that isn't a co-owner code (66 hex characters)"; return out.dump(); }
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     const auto& f = state["forms"][formId];
@@ -1116,7 +1159,7 @@ static OrderedJson editableFromDef(const json& def, const std::string& sealPub =
 // Edit a published form (creator). The full new definition replaces the old one on every
 // device (latest update wins); id / creator / key / creation time never change. Keep the
 // ids of existing questions - answers are stored by question id.
-std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJson) {
+std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
@@ -1136,10 +1179,14 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     adoptLocal(e); broadcastEvent(e); publishState();
     out["ok"] = true; out["formId"] = formId;
     return out.dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 // ── create ───────────────────────────────────────────────────────────────────────
-std::string WhisperboxCoreImpl::createForm(std::string defJson) {
+std::string WhisperboxCoreImpl::createForm(std::string defJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
@@ -1167,6 +1214,10 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) {
     publishState();
     out["ok"] = true; out["formId"] = formId; out["event"] = e;
     return out.dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 std::string WhisperboxCoreImpl::closeForm(std::string formId) {
@@ -1223,7 +1274,7 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
 }
 
 // ── respond ──────────────────────────────────────────────────────────────────────
-std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string answersJson) {
+std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string answersJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
@@ -1335,6 +1386,10 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         out["ok"] = false; out["error"] = std::string("seal failed: ") + ex.what();
     }
     return out.dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
@@ -1416,7 +1471,10 @@ std::string WhisperboxCoreImpl::reopenForm(std::string formId) {
     if (f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>()) { out["ok"] = false; out["error"] = "its end date has passed - duplicate it as a new form"; return out.dump(); }
     if (f.contains("maxResponses") && f["maxResponses"].is_number()) {
         OrderedJson cv = decryptView(state);
-        if (cv["responses"].contains(formId) && (long long)cv["responses"][formId].size() >= f["maxResponses"].get<long long>()) {
+        long long counted = 0;   // verified answers only, as the cap itself
+        if (cv["responses"].contains(formId))
+            for (const auto& r : cv["responses"][formId]) if (!(r.contains("verified") && r["verified"].is_boolean() && !r["verified"].get<bool>())) counted++;
+        if (counted >= f["maxResponses"].get<long long>()) {
             out["ok"] = false; out["error"] = "it reached its answer limit - duplicate it as a new form"; return out.dump(); }
     }
     OrderedJson p = OrderedJson::object();
@@ -1442,6 +1500,8 @@ std::string WhisperboxCoreImpl::confirmAll(std::string formId) {
     std::vector<std::string> todo;
     if (cv["responses"].contains(formId))
         for (const auto& r : cv["responses"][formId]) {
+            // an unverified answer proves nothing: no receipt for it unless the creator sends one by hand
+            if (r.contains("verified") && r["verified"].is_boolean() && !r["verified"].get<bool>()) continue;
             std::string cid = confirmIdOf(json::parse(r.dump()), formId);
             if (!cid.empty() && !containsStr(confs, cid)) todo.push_back(cid);
         }
@@ -1471,7 +1531,7 @@ std::string WhisperboxCoreImpl::setAutoReceipts(std::string formId, std::string 
 
 // Form drafts: {id?, def, publishAt?(ms|null)}. Saved locally only; publishDraft (or the
 // scheduler, once publishAt has passed and the node is up) turns one into a real form.
-std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) {
+std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json d;
     try { d = json::parse(trim(draftJson)); } catch (...) { return json({{"ok", false}, {"error", "bad draftJson"}}).dump(); }
@@ -1484,6 +1544,10 @@ std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) {
     saveDrafts();
     publishState();
     return json({{"ok", true}, {"draftId", id}}).dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 std::string WhisperboxCoreImpl::deleteDraft(std::string draftId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -1504,7 +1568,7 @@ std::string WhisperboxCoreImpl::publishDraftLocked(const std::string& draftId) {
     return r.dump();
 }
 // Half-filled answers for a form, restored when it is opened again. "" / [] clears.
-std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string answersJson) {
+std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string answersJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     json a;
@@ -1512,6 +1576,10 @@ std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string 
     if (!a.is_array() || a.empty()) m_answerDrafts.erase(formId); else m_answerDrafts[formId] = a;
     saveDrafts();
     return json({{"ok", true}}).dump();   // no publishState: called while typing
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 // Every 5 s while online: publish due scheduled drafts, close my forms at their cap or end
@@ -1534,13 +1602,18 @@ void WhisperboxCoreImpl::housekeeping() {
             const std::string cfid = it.key();
             if (isCoOwner(f) && m_autoReceipts.count(cfid) && cv["responses"].contains(cfid)) {
                 const json confs = json::parse(f["confirmations"].dump());
-                for (const auto& r : cv["responses"][cfid]) if (!containsStr(confs, confirmIdOf(json::parse(r.dump()), cfid))) { confirmAll(cfid); break; }
+                for (const auto& r : cv["responses"][cfid])
+                    if (!(r.contains("verified") && r["verified"].is_boolean() && !r["verified"].get<bool>())
+                        && !containsStr(confs, confirmIdOf(json::parse(r.dump()), cfid))) { confirmAll(cfid); break; }
             }
             continue;
         }
         const std::string fid = it.key();
         if (f["status"].get<std::string>() == "open") {
-            size_t n = cv["responses"].contains(fid) ? cv["responses"][fid].size() : 0;
+            // the cap counts answers that prove who sent them: a flood of unsigned answers can't close the form
+            size_t n = 0;
+            if (cv["responses"].contains(fid))
+                for (const auto& r : cv["responses"][fid]) if (!(r.contains("verified") && r["verified"].is_boolean() && !r["verified"].get<bool>())) n++;
             bool full = f.contains("maxResponses") && f["maxResponses"].is_number() && (long long)n >= f["maxResponses"].get<long long>();
             bool ended = f.contains("expiresAt") && f["expiresAt"].is_number() && nowMs() > f["expiresAt"].get<long long>();
             if (full || ended) { closeForm(fid); fprintf(stderr, "WHISPERBOX auto-closed %s (%s)\n", fid.c_str(), full ? "answer cap" : "end date"); }
@@ -1562,7 +1635,7 @@ std::string WhisperboxCoreImpl::unhideForm(std::string formId) {
     return json({{"ok", true}, {"formId", formId}}).dump();
 }
 
-std::string WhisperboxCoreImpl::importIdentity(std::string privHex) {
+std::string WhisperboxCoreImpl::importIdentity(std::string privHex) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     if (!isHex(trim(privHex), 64)) { out["ok"] = false; out["error"] = "privHex must be 64 hex chars"; return out.dump(); }
@@ -1573,6 +1646,10 @@ std::string WhisperboxCoreImpl::importIdentity(std::string privHex) {
     publishState();
     out["ok"] = true; out["address"] = m_signId.address;
     return out.dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 std::string WhisperboxCoreImpl::setDeviceId(std::string deviceId) {
@@ -1661,7 +1738,7 @@ std::string WhisperboxCoreImpl::shareQr(std::string formId) {
     return out.dump();
 }
 
-std::string WhisperboxCoreImpl::importForm(std::string defJson) {
+std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
     json def;
@@ -1722,6 +1799,10 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
     publishState();
     out["ok"] = true; out["formId"] = formId; out["pending"] = !have;
     return out.dump();
+} catch (const std::exception& ex) {
+    // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
+    // of the module (open-review FR-8).
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
 std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
@@ -1770,7 +1851,9 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
     const auto& f = state["forms"][formId];
     const json confs = f["confirmations"];
     const json quiz = quizOf(f, formKeysFor(state));
-    std::vector<std::string> header = {"respondent", "submittedAt", "confirmed"};
+    // verified: signed by the respondent it names (an unsigned answer can claim anyone's address);
+    // timeVerified: its time is the network's, not the sender's clock (open-review FR-5)
+    std::vector<std::string> header = {"respondent", "verified", "submittedAt", "timeVerified", "confirmed"};
     if (quiz.is_object()) header.push_back("score");
     std::vector<json> qs;
     for (const auto& q : f["questions"]) { header.push_back(q.value("text", q.value("id", ""))); qs.push_back(json::parse(q.dump())); }
@@ -1783,8 +1866,10 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
             json r = json::parse(ro.dump());
             std::map<std::string, json> byQ;
             for (const auto& a : r["answers"]) if (a.is_object()) byQ[a.value("questionId", "")] = a.contains("value") ? a["value"] : json();
-            std::vector<std::string> row = {r.value("respondent", ""),
+            auto yesNo = [&r](const char* k) -> std::string { return r.contains(k) && r[k].is_boolean() ? (r[k].get<bool>() ? "yes" : "no") : ""; };
+            std::vector<std::string> row = {r.value("respondent", ""), yesNo("verified"),
                 isoUtc(r.contains("submittedAt") && r["submittedAt"].is_number() ? r["submittedAt"].get<long long>() : 0),
+                yesNo("timeVerified"),
                 containsStr(confs, confirmIdOf(r, formId)) ? "yes" : "no"};
             if (quiz.is_object()) {
                 json sc = whisperbox::scoreAnswers(json::parse(f["questions"].dump()), quiz, r.value("answers", json::array()));

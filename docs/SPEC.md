@@ -214,6 +214,26 @@ messages are checked the same way before they are answered. Loading a log applie
 an event that fails is skipped and kept in `events.bad.json`. Nothing a peer sends may stop the
 node: a frame that fails to process is counted (`rxBad`) and dropped.
 
+From 0.5.1 (open-review 2026-10-29):
+- **Frames:** a decoded frame over 1 MiB, or JSON nested more than 32 deep, is refused before it
+  is parsed (`rxBad`). One 100 KB frame nested 50,000 arrays deep used to overflow the stack in
+  the canonical-JSON signer, before any signature was checked (FR-1).
+- **Events:** a whole serialized event is at most 256 KiB (FR-6), and `hlc.ctr` is at most 2^30. A
+  peer's `LLONG_MAX` counter used to make the next local stamp overflow (FR-2); a local counter
+  at the bound carries into the next millisecond.
+- **Form keys:** a `form.publish` `publicKey` must be a point on secp256k1, and ECDH refuses an
+  invalid point. An invalid key gave an all-zero shared secret, so anyone could open the answers
+  (FR-4). The same check applies to co-owner codes.
+- **Loading:** signed event types are verified again when a log is loaded; the fold trusts the
+  log (FR-7).
+- **Serving for others** (RBSR `ids`/`need`, a legacy `SYNC_REQ`) is bounded:
+  - at most 100 events for one incoming frame;
+  - an event served in the last 2 s isn't served again;
+  - at most 300 a minute (`serveSkipped`).
+  A 40-byte `ids` frame used to make the node re-broadcast its whole log, every time (FR-3).
+- **Unverified answers** don't get automatic receipts and don't count towards the auto-close at
+  the cap. The CSV export has `verified` and `timeVerified` columns (FR-5).
+
 ## 7. Merge
 
 The log is a set of events kept in total HLC order.

@@ -76,16 +76,23 @@ Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release sig
   the answer).
 - Share links name the creator; a client never seals answers to a form whose
   creator differs from the link, or to a form id two people published.
-- "Only listed addresses" forms: respondents sign inside the sealed payload;
-  the creator drops unsigned or unlisted responses.
+- Every answer is signed inside the sealed payload by the respondent it names (0.5.0). "Only
+  listed addresses" and editable forms drop unsigned answers; on forms open to anyone an unsigned
+  answer (an older client, or someone claiming another address) is shown as **unverified**: it
+  doesn't count towards the answer limit, take a respondent's place, edit anything or get an
+  automatic receipt, and the CSV export marks it `verified=no`.
 - Delta vs. the original whisperbox: the network's store nodes keep the sealed messages
   (that's how late joiners catch up). Sealed bytes are useless without the form key; form
   metadata was public by design.
-- **Limits today (review 2026-10-22):** on forms open to anyone, a response isn't authenticated:
-  a member can send several, send one in another respondent's name, or stamp it earlier than it was
-  sent, which close dates, caps and receipts trust. "Only listed addresses" forms check a signature
-  inside the sealed answer. Co-owner access can't be revoked, and there's no forward secrecy.
-  Answer length and timing are visible.
+- **Limits today:**
+  - On forms open to anyone, a person can still answer once per identity they make (identities
+    are free; only a members list stops that).
+  - Close dates, the cap and the edit window go by the Logos Delivery timestamp of an answer
+    (0.5.0). Until the network turns RLN on, that timestamp is only as honest as the sender's
+    node. An answer that arrives without one (over BLE) is judged by its own clock and shown as
+    "time not verified".
+  - Co-owner access can't be revoked, and there's no forward secrecy. Answer length and timing
+    are visible.
 - **What sealing does not hide:** the network nodes that relay a response see which node sent
   it and when (there's no mixnet in this path). The creator can't tell who answered an
   anonymous form, but a well-placed network observer could still link a response to a

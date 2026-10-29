@@ -149,6 +149,10 @@ inline json droppedToJson(const Dropped& d) {
     return json({{"count", d.count}, {"reasons", r}});
 }
 
+// An HLC counter only counts events stamped in one millisecond; a peer's ctr of LLONG_MAX made the
+// next local stamp overflow (signed overflow, an invalid event; open-review FR-2).
+inline constexpr long long kMaxHlcCtr = 1LL << 30;
+
 // Local hybrid logical clock (mirror of hlc.mjs Clock). Prime from the log on
 // load (primeFrom), call send() to stamp local events, receive() for ingested.
 struct Clock {
@@ -157,7 +161,9 @@ struct Clock {
     Clock() = default;   // the generated glue default-constructs the impl
     explicit Clock(std::string d) : dev(std::move(d)) {}
     json send(long long nowMs) {
-        if (nowMs > wall) { wall = nowMs; ctr = 0; } else { ctr += 1; }
+        if (nowMs > wall) { wall = nowMs; ctr = 0; }
+        else if (ctr >= kMaxHlcCtr) { wall += 1; ctr = 0; }   // carry into the next millisecond
+        else { ctr += 1; }
         return json({{"wall", wall}, {"ctr", ctr}, {"dev", dev}});
     }
     // maxWall: a remote clock this far ahead is ignored, not adopted - one far-future event used to
@@ -166,7 +172,7 @@ struct Clock {
         if (!h.is_object() || !h.contains("wall") || !h["wall"].is_number_integer()) return;
         long long hw = h["wall"].get<long long>();
         long long hc = h.contains("ctr") && h["ctr"].is_number_integer() ? h["ctr"].get<long long>() : 0;
-        if (hw > maxWall) return;
+        if (hw > maxWall || hc < 0 || hc > kMaxHlcCtr) return;
         if (hw > wall) { wall = hw; ctr = hc; }
         else if (hw == wall) { ctr = std::max(ctr, hc); }
     }
@@ -886,20 +892,24 @@ inline bool wellFormedCatchup(const json& m) {
 }
 // How far ahead of our clock a peer's event may be (clock skew allowance).
 inline constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+// One event, serialized. The per-field limits alone allowed ~1 GiB per form.publish (open-review
+// FR-6); Logos Delivery carries ~150 KB, so nothing legitimate comes near this.
+inline constexpr size_t kMaxEventBytes = 256u * 1024;
 inline bool wellFormedEvent(const json& e) {
     if (!e.is_object() || !jStr(e, "id", 512) || !jStr(e, "type", 64)) return false;
+    try { if (e.dump().size() > kMaxEventBytes) return false; } catch (...) { return false; }
     if (e.contains("v") && !e["v"].is_number_integer()) return false;
     if (!jOptStr(e, "dev", 256) || !jOptStr(e, "pub", 256) || !jOptStr(e, "sig", 512)) return false;
     if (!e.contains("hlc") || !e["hlc"].is_object()) return false;
     const json& h = e["hlc"];
     if (!h.contains("wall") || !h["wall"].is_number_integer() || h["wall"].get<long long>() < 0) return false;
-    if (!h.contains("ctr") || !h["ctr"].is_number_integer() || h["ctr"].get<long long>() < 0) return false;
+    if (!h.contains("ctr") || !h["ctr"].is_number_integer() || h["ctr"].get<long long>() < 0 || h["ctr"].get<long long>() > kMaxHlcCtr) return false;
     if (!jOptStr(h, "dev", 256)) return false;
     if (!e.contains("payload") || !e["payload"].is_object()) return false;
     const json& p = e["payload"];
     const std::string& t = e["type"].get_ref<const std::string&>();
     if (t == RESPONSE_SUBMIT) {
-        if (!jStr(p, "encryptedPayload", 4 << 20)) return false;
+        if (!jStr(p, "encryptedPayload", kMaxEventBytes)) return false;
         return e["id"].get_ref<const std::string&>() == responseSubmitId(p["encryptedPayload"].get_ref<const std::string&>());   // WB-11
     }
     if (t == FORM_PUBLISH)

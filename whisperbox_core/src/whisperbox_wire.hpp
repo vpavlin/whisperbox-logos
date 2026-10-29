@@ -63,9 +63,24 @@ inline json envSyncReq(const std::string& from, bool rbsr = true) {
 
 // Parse an envelope from raw text. Returns a json with .type set, or null on
 // any failure. Never throws.
+// Untrusted JSON is parsed with a size and nesting limit: one 100 KB frame nested 50,000 arrays deep
+// overflowed the stack in the recursive canonical-JSON signer before any signature was checked
+// (open-review FR-1). WhisperBox's own events nest about 6 deep.
+inline constexpr size_t kMaxFrameBytes = 1u << 20;   // a decoded frame; Logos Delivery caps messages at ~150 KB
+inline constexpr int kMaxJsonDepth = 32;
+inline json parseLimited(const std::string& text, int maxDepth = kMaxJsonDepth, size_t maxBytes = kMaxFrameBytes) {
+    if (text.size() > maxBytes) return json();
+    try {
+        json::parser_callback_t cb = [maxDepth](int depth, json::parse_event_t, json&) -> bool {
+            if (depth > maxDepth) throw std::runtime_error("json nested too deep");
+            return true;
+        };
+        return json::parse(text, cb);
+    } catch (...) { return json(); }
+}
 inline json parseEnvelope(const std::string& text) {
     try {
-        json o = json::parse(text);
+        json o = parseLimited(text);
         if (!o.is_object()) return json();
         // loam-sync RBSR control frame: no "type", {v:2, t:fp|ids|need}.
         if (o.value("v", 0) == 2 && o.contains("t") && o["t"].is_string()) {

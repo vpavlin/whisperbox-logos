@@ -82,7 +82,12 @@ static bool waitUntil(std::function<bool()> pred, int ms) {
 static bool hasForm(Peer& p, const std::string& fid) {
     json s = p.snap(); return s["state"]["forms"].contains(fid) && !s["state"]["forms"][fid]["questions"].empty();
 }
-static json formOf(Peer& p, const std::string& fid) { return p.snap()["state"]["forms"][fid]; }
+// an empty object when the form isn't there (yet), so a timed-out wait reports FAIL instead of
+// aborting on a null (open-review FR-12)
+static json formOf(Peer& p, const std::string& fid) {
+    json forms = p.snap()["state"]["forms"];
+    return forms.is_object() && forms.contains(fid) && forms[fid].is_object() ? forms[fid] : json::object();
+}
 static json responsesOf(Peer& p, const std::string& fid) {
     json s = p.snap();
     if (s["creatorView"].is_null() || !s["creatorView"]["responses"].contains(fid)) return json::array();
@@ -837,6 +842,13 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { auto r = verifiedOf(true); return r.size() == 1 && r[0]["answers"][0].value("value", "") == "real"; }, 3000),
                   "A counts B's signed answer, not the earlier forged one");
             CHECK(verifiedOf(false).size() == 1 && verifiedOf(false)[0]["answers"][0].value("value", "") == "FAKE", "the forged answer is kept, marked unverified");
+            // open-review FR-5: the CSV says which rows are signed; confirmAll skips the unsigned one
+            json csv = A->call(A->core->exportCsv(fzid));
+            const std::string c = csv.value("csv", "");
+            CHECK(c.rfind("respondent,verified,submittedAt,timeVerified,confirmed", 0) == 0, "the CSV has verified and timeVerified columns");
+            CHECK(c.find(",no,") != std::string::npos && c.find("FAKE") != std::string::npos, "the forged row is marked verified=no");
+            A->call(A->core->confirmAll(fzid)); pump(300);
+            CHECK(!verifiedOf(false)[0].value("confirmed", true) && verifiedOf(true)[0].value("confirmed", false), "confirmAll confirms the signed answer, not the forged one");
         }
         // ADR 0019: the close is judged by the network's timestamp of an answer, not its own HLC
         {
@@ -866,6 +878,64 @@ int main(int argc, char** argv) {
             FakeBus::get().tsNs = 0;
             A->stop(); A->start(); pump(200);
             CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("receivedAt", 0LL) == t0 - 20000, "network times survive a restart");
+        }
+        // ── open-review 2026-10-29 (FR-1..4, 7, 8) ──
+        {
+            // A restarted just above: wait until it is back on the topic, or frames go nowhere
+            CHECK(waitUntil([&] { return A->snap().value("nodeReady", false); }, 5000), "A is back on the topic");
+            pump(500);
+            const long long now = (long long)QDateTime::currentMSecsSinceEpoch();
+            const long bad1 = diag(*A, "rxBad"), raw0 = diag(*A, "rxRaw");
+            // FR-1: one frame nested 50,000 arrays deep, with a pub and a zero signature
+            std::string deep(50000, '['); deep += std::string(50000, ']');
+            send(R"({"v":1,"type":"EVENT","event":{"v":1,"id":"close:x:n","type":"form.close","hlc":{"wall":)" + std::to_string(now) +
+                 R"(,"ctr":0,"dev":"x"},"dev":"x","pub":"03d70447545f1f3f30023b1c31695910f4fce6ee2b7cb89bfabeb50bda14346235","sig":")" + std::string(128, '0') +
+                 R"(","payload":{"formId":"x","author":"0xf2057a9199df91a4877a76ecdc88ceb9d9c2b2e3","x":)" + deep + "}}}");
+            pump(300);
+            CHECK(A->snap()["identity"]["address"] == addrA && diag(*A, "rxRaw") > raw0, "a 50,000-deep frame reaches the core and doesn't crash it (FR-1)");
+            (void)bad1;
+            // FR-2: a counter of LLONG_MAX is refused, and the next local stamp is still valid
+            const std::string sealed = "01" + std::string(140, 'a');
+            json big = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealed)}, {"type", "response.submit"},
+                        {"hlc", {{"wall", now + 60000}, {"ctr", std::numeric_limits<long long>::max()}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", sealed}}}};
+            const long shape1 = diag(*A, "admDropShape");
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", big}}).dump()); pump(200);
+            CHECK(diag(*A, "admDropShape") == shape1 + 1, "an HLC counter of LLONG_MAX is refused at admission (FR-2)");
+            json fc = A->call(A->core->createForm(json({{"title", "after ctr"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+            CHECK(fc.value("ok", false) && waitUntil([&] { return hasForm(*B, fc.value("formId", "")); }, 3000), "...and A's next event is valid and reaches B");
+            // FR-3: twenty 40-byte "ids" frames serve each event at most once
+            const long tx0 = diag(*A, "txTotal"); const size_t logN = A->snap()["state"]["forms"].size();
+            for (int i = 0; i < 20; i++) send(R"({"v":2,"t":"ids","from":"evil","ids":[]})");
+            pump(500);
+            const long served = diag(*A, "txTotal") - tx0;
+            CHECK(served > 0 && diag(*A, "serveSkipped") > 0, "a repeated empty ids frame is answered once, then skipped (FR-3)");
+            std::printf("    (served %ld events for 20 frames; %zu forms in the log)\n", served, logN);
+            // FR-4: a signed form whose publicKey isn't a curve point is refused
+            whisperbox::SignId x = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '4'}));
+            json fp = {{"id", "fr4-badkey"}, {"creator", x.address}, {"publicKey", "02" + std::string(64, '0')}, {"title", "bad key"},
+                       {"questions", json::array()}, {"whitelist", {{"type", "none"}, {"value", ""}}}, {"createdAt", now}};
+            json fe = {{"v", 1}, {"id", "form:fr4-badkey"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", fp}};
+            whisperbox::signEventJson(fe, x);
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", fe}}).dump()); pump(300);
+            CHECK(!A->snap()["state"]["forms"].contains("fr4-badkey"), "a form with an off-curve publicKey is refused (FR-4)");
+            CHECK(!A->call(A->core->addCoOwner(fc.value("formId", ""), "02" + std::string(64, '0'))).value("ok", true), "...and so is an off-curve co-owner code");
+            bool threw = false; try { whisperbox::ecdhX(x.priv, whisperbox::fromHex("02" + std::string(64, '0'))); } catch (...) { threw = true; }
+            CHECK(threw, "ECDH with an invalid point throws instead of an all-zero secret");
+            // FR-8: mistyped fields from a local caller come back as errors
+            CHECK(!A->call(A->core->createForm(R"({"title":123,"questions":"x","id":123})")).value("ok", true), "createForm with mistyped fields returns an error (FR-8)");
+            CHECK(!A->call(A->core->saveDraft(R"({"def":5,"id":7})")).value("ok", true), "saveDraft with mistyped fields returns an error");
+            CHECK(A->snap()["identity"]["address"] == addrA, "...and the core is still up");
+            // FR-7: an unsigned close written into events.json is dropped at load
+            const std::string ff = fc.value("formId", "");
+            A->stop();
+            {
+                std::ifstream in(A->dir + "/events.json"); json log = json::parse(in);
+                log.push_back({{"v", 1}, {"id", "close:" + ff + ":forged"}, {"type", "form.close"}, {"hlc", {{"wall", now + 1000}, {"ctr", 0}, {"dev", "x"}}},
+                               {"dev", "x"}, {"payload", {{"formId", ff}, {"author", addrA}}}});
+                std::ofstream(A->dir + "/events.json", std::ios::trunc) << log.dump();
+            }
+            A->start(); pump(200);
+            CHECK(formOf(*A, ff).value("status", "") == "open" && diag(*A, "loadDropped") >= 1, "an unsigned close in events.json is dropped at load, the form stays open (FR-7)");
         }
     }
 

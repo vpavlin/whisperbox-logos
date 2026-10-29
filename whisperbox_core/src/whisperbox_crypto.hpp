@@ -106,16 +106,30 @@ inline Bytes ecdhX(const Bytes& priv, const Bytes& pub) {
     EC_POINT* pubPt = EC_POINT_new(grp); // peer's point
     EC_POINT* S = EC_POINT_new(grp);     // shared point
     Bytes out(32, 0);
+    bool ok = false;
+    // An invalid point used to leave the shared secret all zeros, so a form whose publicKey isn't a
+    // point got answers anyone could open (open-review FR-4). Now it throws.
     if (EC_POINT_oct2point(grp, pubPt, pub.data(), 33, ctx) == 1 &&
-        EC_POINT_mul(grp, S, nullptr, pubPt, bn, ctx) == 1) {
+        EC_POINT_is_on_curve(grp, pubPt, ctx) == 1 && EC_POINT_is_at_infinity(grp, pubPt) == 0 &&
+        EC_POINT_mul(grp, S, nullptr, pubPt, bn, ctx) == 1 && EC_POINT_is_at_infinity(grp, S) == 0) {
         BIGNUM* X = BN_new(); BIGNUM* Y = BN_new();
-        if (EC_POINT_get_affine_coordinates(grp, S, X, Y, ctx) == 1) {
-            BN_bn2binpad(X, out.data(), 32);
-        }
+        if (EC_POINT_get_affine_coordinates(grp, S, X, Y, ctx) == 1) { BN_bn2binpad(X, out.data(), 32); ok = true; }
         BN_free(X); BN_free(Y);
     }
     EC_POINT_free(S); EC_POINT_free(pubPt); BN_free(bn); BN_CTX_free(ctx);
+    if (!ok) throw std::runtime_error("ecdh: not a valid secp256k1 point");
     return out;
+}
+
+// A compressed secp256k1 public key that decodes to a point on the curve.
+inline bool validPubPoint(const Bytes& pub) {
+    if (pub.size() != 33 || (pub[0] != 0x02 && pub[0] != 0x03)) return false;
+    const EC_GROUP* grp = secpGroup();
+    BN_CTX* ctx = BN_CTX_new();
+    EC_POINT* pt = EC_POINT_new(grp);
+    bool ok = EC_POINT_oct2point(grp, pt, pub.data(), 33, ctx) == 1 && EC_POINT_is_on_curve(grp, pt, ctx) == 1 && EC_POINT_is_at_infinity(grp, pt) == 0;
+    EC_POINT_free(pt); BN_CTX_free(ctx);
+    return ok;
 }
 
 // ── ChaCha20-Poly1305 AEAD (qaku pattern) ─────────────────────────────────────────
