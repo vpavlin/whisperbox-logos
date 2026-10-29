@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 desktop core + view (2026-10-29) - every answer is signed
+
+A protocol change: creators should update first. Answers from 0.4.x clients still arrive, marked
+"unverified".
+
+- **Every answer is signed** inside the sealed payload by the respondent it names, on every form
+  (ADR 0019). On forms open to anyone an unsigned answer (an older client, or someone claiming
+  another respondent's address) is kept and shown as unverified: it takes no respondent slot,
+  doesn't count towards the answer limit and can't edit anything. Before 0.5.0 an unsigned answer
+  in someone's name, stamped earlier, replaced theirs (review 2026-10-22, WB-2).
+- **Deadlines use the network's timestamp**: close, re-open, the close-at date, the answer limit
+  and the edit window go by the earliest Logos Delivery timestamp seen for an answer, not the
+  sender's clock. An answer without one (BLE) keeps its own time and is marked "time not
+  verified"; a sender's clock more than 5 minutes off is shown. Until RLN is on, the network time
+  is only as honest as the sender's node.
+- **Review 2026-10-22 fixes** (audited):
+  - a hostile peer's malformed frames, far-future clocks and poisoned logs can't crash, stall or
+    time-shift a node;
+  - answer tags are random, so answers can't be linked across forms;
+  - the data folder is private (0700/0600);
+  - CSV export neutralises formula cells;
+  - the status follows the transport after connect;
+  - links that can't be valid are refused.
+- Docs: SPEC (admission, answer time, what isn't protected), ADRs 0003/0008/0010/0011 updates,
+  ADR 0019.
+
 ## 0.4.2 desktop view (2026-10-10) - macOS
 
 - The view is rebuilt against core 0.4.2's interface and ships for darwin-arm64 (Apple
