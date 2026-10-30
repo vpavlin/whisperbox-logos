@@ -650,6 +650,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   ].filter(Boolean).join("  ·  ");
   const banner = (() => {
     if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it.` } as const;
+    if (f.needsLink) return { tone: "warn", text: "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it." } as const;
     if (f.contested && !f.mine && f.pinnedCreator !== f.creator) return { tone: "warn", text: "Two different people published a form with this id. Open it from the creator's own link to answer - your answers are only ever sealed to the creator that link names." } as const;
     if (f.mySubmitted) return { tone: "ok", text: (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed ? "Your answers were received - the creator sent you a receipt." : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.") } as const;
     if (f.status === "closed") return { tone: "info", text: "This form is closed and no longer accepts answers." } as const;

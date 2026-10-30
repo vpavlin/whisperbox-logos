@@ -36,6 +36,18 @@
 
 namespace whisperbox {
 
+// Numbers from peers (open-review 2026-10-30, FR-2).
+inline constexpr double kMaxTimeMs = 1e14;        // year 5138: any real timestamp
+inline constexpr double kMaxNumberBound = 1e15;   // a scale/number question's min/max
+// a double from a peer as a long long, saturated instead of undefined
+inline long long toLL(double d) {
+    if (!std::isfinite(d)) return 0;
+    if (d >= 9.2e18) return std::numeric_limits<long long>::max();
+    if (d <= -9.2e18) return std::numeric_limits<long long>::min();
+    return (long long)d;
+}
+
+
 using OrderedJson = nlohmann::ordered_json;
 
 inline std::string lc(std::string s) {
@@ -200,7 +212,7 @@ inline void applyEditableFields(OrderedJson& f, const json& p) {
         json mr = nullptr;
         if (p.contains("maxResponses") && p["maxResponses"].is_number()) {
             double d = p["maxResponses"].get<double>();
-            if (d > 0 && d == (double)(long long)d) mr = (long long)d;
+            if (d > 0 && d <= 1e6 && d == std::floor(d)) mr = toLL(d);
         }
         f["maxResponses"] = mr;
     }
@@ -531,8 +543,11 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
           if (!netTime) return;
           o["timeVerified"] = w.net;
           o["receivedAt"] = w.net ? json(w.wall) : json(nullptr);
-          if (w.net && o.contains("submittedAt") && o["submittedAt"].is_number()
-              && std::llabs(o["submittedAt"].get<long long>() - w.wall) > kMaxTimeSkewMs) o["timeSkew"] = true;
+          // submittedAt is the sender's (sealed, untrusted): only a plausible time is compared
+          if (w.net && o.contains("submittedAt") && o["submittedAt"].is_number()) {
+              const double sa = o["submittedAt"].get<double>();
+              if (std::isfinite(sa) && sa >= 0 && sa <= kMaxTimeMs && std::fabs(sa - double(w.wall)) > double(kMaxTimeSkewMs)) o["timeSkew"] = true;
+          }
       };
       // A respondent controls the decrypted JSON: a malformed field (e.g. "respondent": null)
       // must drop that one answer, never throw out of the whole creator view.
@@ -618,7 +633,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             // a later response from the same respondent = an EDIT (mirror engine.mjs)
             EditMeta& pm = prevIt->second;
             if (!allowEdits || pm.index < 0) { drop(dropped, "duplicate-respondent"); continue; }
-            const long long win = (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+            const long long win = std::min<long long>(f["editWindowMinutes"].is_number() ? toLL(f["editWindowMinutes"].get<double>()) : 15, 525600) * 60000LL;
             if (w.wall - pm.firstWall > win) { drop(dropped, "edit-too-late"); continue; }
             if (state.contains("receiptHlc") && state["receiptHlc"].contains(formId) && !pm.cid.empty()
                 && state["receiptHlc"][formId].contains(pm.cid) && atOrAfter(w, blob, state["receiptHlc"][formId][pm.cid])) { drop(dropped, "edit-after-receipt"); continue; }
@@ -695,7 +710,7 @@ inline std::string validateAnswer(const json& q, const json& v) {
     auto otherOk = [&](const json& x) { return allowOther && answerIsOther(x) && x["other"].is_string() && !emptyAnswerValue(x); };
     auto inRange = [&](const json& x) { if (!answerIsInt(x)) return false; double d = x.get<double>(); return d >= 0 && d < (double)n; };
     auto numOr = [&](const char* k, double d) { return q.contains(k) && q[k].is_number() ? q[k].get<double>() : d; };
-    auto fmtNum = [](double d) { std::string s = std::to_string(d); if (d == std::floor(d)) s = std::to_string((long long)d); else { s.erase(s.find_last_not_of('0') + 1); } return s; };
+    auto fmtNum = [](double d) { std::string s = std::to_string(d); if (d == std::floor(d) && std::fabs(d) < 9e18) s = std::to_string((long long)d); else { s.erase(s.find_last_not_of('0') + 1); } return s; };
     if (t == "text" || t == "textarea") return v.is_string() ? "" : "must be text";
     if (t == "email") { if (!v.is_string()) return "not an email address";
         static const std::regex re("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
@@ -848,10 +863,19 @@ inline bool jStr(const json& o, const char* k, size_t maxLen = 4096, bool requir
 inline bool jOptStr(const json& o, const char* k, size_t maxLen = 65536) { return !o.contains(k) || o[k].is_null() || (o[k].is_string() && o[k].get_ref<const std::string&>().size() <= maxLen); }
 inline bool jOptBool(const json& o, const char* k) { return !o.contains(k) || o[k].is_null() || o[k].is_boolean(); }
 inline bool jOptNum(const json& o, const char* k) { return !o.contains(k) || o[k].is_null() || o[k].is_number(); }
+// A number from a peer, in a range the fold can do arithmetic on: maxResponses 1e300 was cast to long
+// long, editWindowMinutes LLONG_MAX multiplied by 60000 (open-review 2026-10-30, FR-2).
+inline bool jOptNumIn(const json& o, const char* k, double lo, double hi) {
+    if (!o.contains(k) || o[k].is_null()) return true;
+    if (!o[k].is_number()) return false;
+    const double d = o[k].get<double>();
+    return std::isfinite(d) && d >= lo && d <= hi;
+}
 inline bool wellFormedQuestion(const json& q) {
     if (!q.is_object() || !jStr(q, "id", 128) || !jStr(q, "type", 64)) return false;
     if (!jOptStr(q, "text") || !jOptStr(q, "help") || !jOptStr(q, "minLabel", 512) || !jOptStr(q, "maxLabel", 512) || !jOptStr(q, "style", 32)) return false;
-    if (!jOptBool(q, "required") || !jOptBool(q, "allowOther") || !jOptBool(q, "shuffleOptions") || !jOptNum(q, "min") || !jOptNum(q, "max")) return false;
+    if (!jOptBool(q, "required") || !jOptBool(q, "allowOther") || !jOptBool(q, "shuffleOptions")
+        || !jOptNumIn(q, "min", -kMaxNumberBound, kMaxNumberBound) || !jOptNumIn(q, "max", -kMaxNumberBound, kMaxNumberBound)) return false;
     if (q.contains("options") && !q["options"].is_null()) {
         if (!q["options"].is_array() || q["options"].size() > 500) return false;
         for (const auto& o : q["options"]) if (!o.is_string() || o.get_ref<const std::string&>().size() > 4096) return false;
@@ -866,7 +890,8 @@ inline bool wellFormedFormFields(const json& f) {
         for (const auto& q : f["questions"]) if (!wellFormedQuestion(q)) return false;
     }
     if (!jOptStr(f, "title") || !jOptStr(f, "description") || !jOptStr(f, "thankYou") || !jOptStr(f, "quizKey", 4096)) return false;
-    if (!jOptNum(f, "expiresAt") || !jOptNum(f, "maxResponses") || !jOptNum(f, "editWindowMinutes") || !jOptNum(f, "createdAt")) return false;
+    if (!jOptNumIn(f, "expiresAt", 0, kMaxTimeMs) || !jOptNumIn(f, "maxResponses", 0, 1e6)
+        || !jOptNumIn(f, "editWindowMinutes", 0, 525600) || !jOptNumIn(f, "createdAt", 0, kMaxTimeMs)) return false;
     for (const char* b : {"showResponseCount", "shuffleQuestions", "anonymous", "allowEdits"}) if (!jOptBool(f, b)) return false;
     if (f.contains("whitelist") && !f["whitelist"].is_null()) {
         const json& w = f["whitelist"];
@@ -928,7 +953,7 @@ inline bool wellFormedEvent(const json& e) {
     if (t == FORM_UPDATE) return p.contains("form") && wellFormedFormFields(p["form"]);
     if (t == FORM_COOWNER) return jStr(p, "owner", 64) && jStr(p, "sealedKey", 4096);
     if (t == RESPONSE_REPLY) return jStr(p, "to", 128) && jStr(p, "sealed", 1 << 20);
-    if (t == FORM_CLOSE) return jOptNum(p, "expiresAt");
+    if (t == FORM_CLOSE) return jOptNumIn(p, "expiresAt", 0, kMaxTimeMs);
     return t == FORM_REOPEN;
 }
 

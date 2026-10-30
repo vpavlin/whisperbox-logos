@@ -48,6 +48,17 @@ static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"); if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\r\n"); return s.substr(a, b - a + 1);
 }
+// JSON that isn't ours (a decrypted answer, reply or quiz key, a link, a caller's argument): parsed
+// with the depth and size limit, throwing like json::parse. A response sealed to a form's PUBLIC key
+// with 50,000 nested arrays inside crashed the creator's core when it decrypted it (open-review
+// 2026-10-30, FR-1): the frame limit only covers the envelope, not what's sealed inside it.
+static json parseUntrusted(const std::string& text, size_t maxBytes = whisperbox::kMaxEventBytes) {
+    json j = whisperbox::parseLimited(text, whisperbox::kMaxJsonDepth, maxBytes);
+    if (j.is_null()) throw std::runtime_error("bad, oversized or too deeply nested JSON");
+    return j;
+}
+static constexpr size_t kMaxLocalJson = 4u << 20;   // a definition or answers from the view/hub
+
 static bool isHex(const std::string& s, size_t len) {
     if (s.size() != len) return false;
     for (char c : s) if (!std::isxdigit((unsigned char)c)) return false;
@@ -136,7 +147,7 @@ static bool verifyInnerResponse(const json& pseudo) {
     return ("0x" + whisperbox::toHex(h.data(), 32).substr(24, 40)) == lc(p.value("respondent", ""));
 }
 static std::string isoUtc(long long ms) {
-    if (ms <= 0) return "";
+    if (ms <= 0 || ms > 100000000000000LL) return "";   // gmtime fails past year ~5000 (a sealed, untrusted time)
     time_t t = (time_t)(ms / 1000); struct tm tmv; gmtime_r(&t, &tmv);
     char buf[32]; strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tmv);
     return buf;
@@ -330,7 +341,7 @@ void WhisperboxCoreImpl::loadLog() {
         // edited (or restored) on disk could carry an unsigned close, update or co-owner grant
         // (open-review FR-7). The 0.1.x unsigned form.publish placeholders are repaired below.
         auto signedType = [](const std::string& t) {
-            return t == RESPONSE_CONFIRM || t == FORM_CLOSE || t == whisperbox::FORM_REOPEN || t == whisperbox::FORM_UPDATE || t == whisperbox::FORM_COOWNER || t == whisperbox::RESPONSE_REPLY;
+            return t == FORM_PUBLISH || t == RESPONSE_CONFIRM || t == FORM_CLOSE || t == whisperbox::FORM_REOPEN || t == whisperbox::FORM_UPDATE || t == whisperbox::FORM_COOWNER || t == whisperbox::RESPONSE_REPLY;
         };
         if (a.is_array()) for (auto& e : a) {
             if (whisperbox::wellFormedEvent(e) && (!signedType(e.value("type", "")) || whisperbox::verifyEventJson(e))) m_log.push_back(e);
@@ -642,6 +653,8 @@ bool WhisperboxCoreImpl::serveEvent(const json& e) {
     m_serveRefillMs = now;
     if (m_serveTokens < 1) { m_serveSkipped++; return false; }
     m_serveTokens -= 1;
+    if (m_servedMs.size() > 4096)   // only the cooldown window matters: forget the rest
+        for (auto s = m_servedMs.begin(); s != m_servedMs.end();) s = now - s->second >= kServeCooldownMs ? m_servedMs.erase(s) : std::next(s);
     m_servedMs[key] = now;
     broadcastEvent(e);
     return true;
@@ -685,7 +698,11 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             // would be pure flood. Unflagged = a 0.1.x peer that only knows SYNC_REQ.
             if (env.contains("rbsr")) return true;
             if (!env.contains("from") || !env["from"].is_string()) { m_rxBad++; return true; }
-            if (env.value("from", "") != m_deviceId && nowMs() - m_lastSyncReserveMs >= 3000) {
+            // a device id, and the whole-log reseed at most once a minute: only 0.1.x peers need it,
+            // and a tiny request still pulls a stream of stored data (open-review 2026-10-30, FR-4)
+            static const std::regex devId("^[A-Za-z0-9_-]{1,64}$");
+            if (!std::regex_match(env["from"].get<std::string>(), devId)) { m_rxBad++; return true; }
+            if (env.value("from", "") != m_deviceId && nowMs() - m_lastSyncReserveMs >= 60000) {
                 m_lastSyncReserveMs = nowMs();
                 m_legacyReseeds++;
                 seedBroadcast();   // re-serve the whole log (idempotent — peers dedup)
@@ -712,7 +729,9 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
     if (tryText(once)) return;                           // single peel
     if (channelPath) fprintf(stderr, "WHISPERBOXRX ingest OPENFAIL plen=%zu\n", text.size());
 } catch (const std::exception& ex) {
-    // Nothing a peer sends may take the node down (review 2026-10-22, WB-1).
+    // A frame that throws while it's processed is counted and dropped (review 2026-10-22, WB-1). This
+    // catches exceptions, not stack exhaustion: that is prevented by the size and depth limits on the
+    // envelope (parseEnvelope) and on everything decrypted (parseUntrusted), open-review FR-1.
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rxBad++;
     fprintf(stderr, "WHISPERBOXRX dropped a frame that failed to process: %s\n", ex.what());
@@ -822,7 +841,11 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         const bool contested = f.contains("contested") && f["contested"].is_boolean() && f["contested"].get<bool>();
         const std::string pin = m_pinned.count(fid) ? m_pinned[fid] : std::string();
         const bool linkMismatch = !pin.empty() && pin != f["creator"].get<std::string>();
-        const bool trusted = !linkMismatch && (!contested || pin == f["creator"].get<std::string>());
+        // Answers go only to a creator a link or QR named: a bare id names nobody, and whoever published
+        // under it first got the answers (open-review 2026-10-30, FR-3)
+        const bool needsLink = pin.empty() && !mine;
+        const bool trusted = !linkMismatch && !needsLink && (!contested || pin == f["creator"].get<std::string>());
+        f["needsLink"] = needsLink;
         f["contested"] = contested;
         f["pinnedCreator"] = pin.empty() ? json(nullptr) : json(pin);
         f["linkMismatch"] = linkMismatch;
@@ -837,7 +860,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         }
         if (submitted && f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>() && m_myAnswers.count(fid)) {
             const long long first = m_myAnswers[fid].value("firstSubmittedAt", m_myAnswers[fid].value("submittedAt", 0LL));
-            const long long until = first + (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+            const long long until = first + std::min<long long>(f["editWindowMinutes"].is_number() ? whisperbox::toLL(f["editWindowMinutes"].get<double>()) : 15, 525600) * 60000LL;
             f["editUntil"] = until;
             f["canEdit"] = !confirmed && f["status"].get<std::string>() == "open" && nowMs() < until;
         }
@@ -861,7 +884,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
                 if (c == m_replyCache.end()) {
                     if (!rk.valid) rk = whisperbox::deriveReplyKey(m_signId, fid, cid);
                     json body;
-                    try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = json::parse(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
+                    try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
                     c = m_replyCache.emplace(sealed, body.is_object() ? body : json()).first;
                 }
                 if (c->second.is_object()) mine2.push_back(c->second);
@@ -958,7 +981,7 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
         for (const auto& kv : keys) {
             whisperbox::Bytes pt;
             try { pt = whisperbox::eciesOpen(kv.second->priv, blob); } catch (...) { continue; }
-            try { dec = json::parse(std::string(pt.begin(), pt.end())); } catch (...) { dec = json(); break; }
+            try { dec = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { dec = json(); break; }
             const std::string fid = dec.is_object() ? lc(dec.value("formId", "")) : "";
             if (fid.empty() || !state["forms"].contains(fid) || state["forms"][fid].value("publicKey", "") != kv.first) dec = json();
             break;
@@ -978,7 +1001,7 @@ json WhisperboxCoreImpl::quizOf(const OrderedJson& f, const std::map<std::string
     auto k = keys.find(f.value("publicKey", ""));
     if (k == keys.end()) return json();
     json key;
-    try { whisperbox::Bytes pt = whisperbox::eciesOpen(k->second->priv, whisperbox::fromHex(qk)); key = json::parse(std::string(pt.begin(), pt.end())); }
+    try { whisperbox::Bytes pt = whisperbox::eciesOpen(k->second->priv, whisperbox::fromHex(qk)); key = parseUntrusted(std::string(pt.begin(), pt.end())); }
     catch (...) { key = json(); }
     if (!key.is_object()) key = json();
     m_quizCache[qk] = key;
@@ -1165,7 +1188,7 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(trim(formId));
     json def;
-    try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
+    try { def = parseUntrusted(trim(defJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
     if (def.contains("questions") && !def["questions"].is_array()) { out["ok"] = false; out["error"] = "questions must be an array"; return out.dump(); }
     if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
@@ -1176,6 +1199,8 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     OrderedJson p = OrderedJson::object();
     p["formId"] = formId; p["author"] = m_signId.address; p["form"] = editableFromDef(def, state["forms"][formId].value("publicKey", ""));
     json e = buildEvent(whisperbox::FORM_UPDATE, whisperbox::formUpdateId(formId, randomHex(6)), p, /*sign=*/true);
+    // the same shape check peers apply, or they'd drop it and our state would differ from theirs (FR-5)
+    if (!whisperbox::wellFormedEvent(e)) { out["ok"] = false; out["error"] = "the form is too large or has a field peers would refuse"; return out.dump(); }
     adoptLocal(e); broadcastEvent(e); publishState();
     out["ok"] = true; out["formId"] = formId;
     return out.dump();
@@ -1191,7 +1216,7 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) try {
     json out;
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     json def;
-    try { def = json::parse(trim(defJson)); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
+    try { def = parseUntrusted(trim(defJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
     if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
         out["ok"] = false; out["error"] = "an anonymous form can't be members-only (that needs real addresses)"; return out.dump(); }
@@ -1209,6 +1234,7 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) try {
     for (auto it = ed.begin(); it != ed.end(); ++it) p[it.key()] = it.value();
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
+    if (!whisperbox::wellFormedEvent(e)) { out["ok"] = false; out["error"] = "the form is too large or has a field peers would refuse"; return out.dump(); }   // FR-5
     adoptLocal(e);
     broadcastEvent(e);
     publishState();
@@ -1280,7 +1306,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
     formId = lc(formId);
     json answers;
-    try { answers = json::parse(trim(answersJson)); } catch (...) { out["ok"] = false; out["error"] = "bad answersJson"; return out.dump(); }
+    try { answers = parseUntrusted(trim(answersJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "bad answersJson"; return out.dump(); }
     if (!answers.is_array()) { out["ok"] = false; out["error"] = "answers must be an array of {questionId,value}"; return out.dump(); }
 
     OrderedJson state = whisperbox::computeState(m_log, m_signId.address, nullptr, m_pinned);
@@ -1297,7 +1323,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     if (m_mySubmissions.count(formId)) {
         if (!allowEdits) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
         firstAt = m_myAnswers.count(formId) ? m_myAnswers[formId].value("firstSubmittedAt", m_myAnswers[formId].value("submittedAt", 0LL)) : 0;
-        const long long win = (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
+        const long long win = std::min<long long>(f["editWindowMinutes"].is_number() ? whisperbox::toLL(f["editWindowMinutes"].get<double>()) : 15, 525600) * 60000LL;
         const std::string cid0 = m_myConfirmIds.count(formId) ? m_myConfirmIds[formId] : std::string();
         if (!cid0.empty() && containsStr(f["confirmations"], cid0)) { out["ok"] = false; out["error"] = "the creator already sent you a receipt - your answer is final"; return out.dump(); }
         if (firstAt <= 0 || nowMs() - firstAt > win) { out["ok"] = false; out["error"] = "the time to edit your answer is over"; return out.dump(); }
@@ -1307,6 +1333,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         const std::string creator = f["creator"].get<std::string>();
         const std::string pin = m_pinned.count(formId) ? m_pinned[formId] : std::string();
         const bool contested = f.contains("contested") && f["contested"].is_boolean() && f["contested"].get<bool>();
+        if (pin.empty()) { out["ok"] = false; out["error"] = "open this form from its creator's link or QR code to answer: a bare form id doesn't say who made it, so anyone could publish a form under it"; return out.dump(); }
         if (!pin.empty() && pin != creator) { out["ok"] = false; out["error"] = "this form's creator doesn't match the link you opened - refusing to send answers"; return out.dump(); }
         if (contested && pin != creator) { out["ok"] = false; out["error"] = "two different people published a form with this id - open it from the creator's link to answer"; return out.dump(); }
     }
@@ -1534,7 +1561,7 @@ std::string WhisperboxCoreImpl::setAutoReceipts(std::string formId, std::string 
 std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json d;
-    try { d = json::parse(trim(draftJson)); } catch (...) { return json({{"ok", false}, {"error", "bad draftJson"}}).dump(); }
+    try { d = parseUntrusted(trim(draftJson), kMaxLocalJson); } catch (...) { return json({{"ok", false}, {"error", "bad draftJson"}}).dump(); }
     if (!d.is_object() || !d.contains("def") || !d["def"].is_object()) return json({{"ok", false}, {"error", "draft needs a def object"}}).dump();
     std::string id = d.value("id", "");
     if (id.empty()) id = "draft-" + randomHex(4);
@@ -1572,7 +1599,7 @@ std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string 
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     json a;
-    try { a = trim(answersJson).empty() ? json::array() : json::parse(trim(answersJson)); } catch (...) { return json({{"ok", false}, {"error", "bad answersJson"}}).dump(); }
+    try { a = trim(answersJson).empty() ? json::array() : parseUntrusted(trim(answersJson), kMaxLocalJson); } catch (...) { return json({{"ok", false}, {"error", "bad answersJson"}}).dump(); }
     if (!a.is_array() || a.empty()) m_answerDrafts.erase(formId); else m_answerDrafts[formId] = a;
     saveDrafts();
     return json({{"ok", true}}).dump();   // no publishState: called while typing
@@ -1683,7 +1710,7 @@ std::string WhisperboxCoreImpl::formSummary(std::string formId) {
         json list = json::array();
         if (snap["creatorView"].is_object() && snap["creatorView"]["responses"].contains(formId)) list = snap["creatorView"]["responses"][formId];
         long long last = 0;
-        for (const auto& r : list) if (r.contains("submittedAt") && r["submittedAt"].is_number()) last = std::max(last, r["submittedAt"].get<long long>());
+        for (const auto& r : list) if (r.contains("submittedAt") && r["submittedAt"].is_number()) last = std::max(last, whisperbox::toLL(r["submittedAt"].get<double>()));
         out["responses"] = (long long)list.size();
         out["newResponses"] = f.value("newResponses", 0LL);
         out["lastResponseAt"] = last ? json(last) : json(nullptr);
@@ -1766,11 +1793,11 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
                 pos = amp + 1;
             }
         } else {
-            try { def = json::parse(whisperbox::b64decode(query)); }
+            try { def = parseUntrusted(whisperbox::b64decode(query), kMaxLocalJson); }
             catch (...) { out["ok"] = false; out["error"] = "bad URI payload"; return out.dump(); }
         }
     } else {
-        try { def = json::parse(input); }
+        try { def = parseUntrusted(input, kMaxLocalJson); }
         catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     }
     if (!def.is_object() || !def.contains("id")) {
@@ -1868,7 +1895,7 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
             for (const auto& a : r["answers"]) if (a.is_object()) byQ[a.value("questionId", "")] = a.contains("value") ? a["value"] : json();
             auto yesNo = [&r](const char* k) -> std::string { return r.contains(k) && r[k].is_boolean() ? (r[k].get<bool>() ? "yes" : "no") : ""; };
             std::vector<std::string> row = {r.value("respondent", ""), yesNo("verified"),
-                isoUtc(r.contains("submittedAt") && r["submittedAt"].is_number() ? r["submittedAt"].get<long long>() : 0),
+                isoUtc(r.contains("submittedAt") && r["submittedAt"].is_number() ? whisperbox::toLL(r["submittedAt"].get<double>()) : 0),
                 yesNo("timeVerified"),
                 containsStr(confs, confirmIdOf(r, formId)) ? "yes" : "no"};
             if (quiz.is_object()) {

@@ -1,12 +1,38 @@
 # Changelog
 
+## 0.5.2 desktop core + view, Android 0.5.2 (2026-10-30) - open-review re-review fixes
+
+From the open-review report on 0.5.1 (https://or.vpavlin.xyz/whisperbox-logos-ea85ebafb8c1/), in
+the desktop core and the phone client alike:
+- **FR-1 (High):** what's decrypted (answers, replies, quiz keys), links and caller arguments are
+  parsed with a depth and size limit. An answer sealed to a form's public key with 50,000 nested
+  arrays inside crashed the creator's core.
+- **FR-2 (Medium):** numbers from peers are bounded at admission (`maxResponses`,
+  `editWindowMinutes`, `expiresAt`, `createdAt`, question `min`/`max`), and casts saturate. A
+  sealed `submittedAt` is only compared when it's plausible.
+- **FR-3 (Medium):** answers go only to a creator a link or QR code named. A form known only by
+  its id can be viewed but not answered ("open the creator's link"). Whoever published under the
+  id first used to receive the answers.
+- **FR-4 (Medium):** the legacy SYNC_REQ reseed is limited to once a minute, with a
+  device-id-shaped `from`, and the served-events map is bounded. Per-sender ingest limits and an
+  append-only log are still to do.
+- **FR-5, FR-6, FR-7, FR-8, FR-9 (Low):**
+  - local forms pass the shape check peers apply;
+  - `form.publish` is verified at load;
+  - CI actions and the builder flake are pinned to commits;
+  - the robustness claims in comments and the 0.5.1 notes are qualified;
+  - the SPEC says co-installed modules are trusted (the host gives no caller identity).
+- **Breaking for respondents:** a form opened by typing its bare id can't be answered any more.
+  Open it from the creator's link or QR code.
+
 ## 0.5.1 desktop core + view, Android 0.5.1 (2026-10-29) - open-review fixes
 
 Fixes from the open-review report on 0.5.0 (https://or.vpavlin.xyz/whisperbox-logos-302a134f8dbe/),
 the same in the desktop core and the phone client:
 - **FR-1 (High):** a frame over 1 MiB or JSON nested more than 32 deep is refused before it is
   parsed. One deeply nested frame used to crash the core before any signature was checked. The
-  canonical-JSON signer also stops at depth 64.
+  canonical-JSON signer also stops at depth 64. (This covers the network envelope only: the
+  decrypted content got the same limit in 0.5.2.)
 - **FR-2 (High):** an HLC counter above 2^30 is refused and never adopted. A local counter at the
   bound carries into the next millisecond instead of overflowing.
 - **FR-3 (High):** serving events for other peers (RBSR, legacy SYNC_REQ) is bounded: 100 events

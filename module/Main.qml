@@ -916,7 +916,7 @@ Item {
                             placeholderTextColor: root.wbTextTert
                             font.pixelSize: 12
                             background: null
-                            placeholderText: "whisperbox:// link or form id"
+                            placeholderText: "the creator's whisperbox:// link (a bare form id only shows the form)"
                             onAccepted: root.joinForm()
                         }
                     }
@@ -1623,6 +1623,7 @@ Item {
                                     var f = root.sel;
                                     if (!f) return "";
                                     if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it.";
+                                    if (f.needsLink) return "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it, and WhisperBox only sends answers to the creator a link names.";
                                     if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
                                     if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed
                                         ? "Your answers were received - the creator sent you a receipt."

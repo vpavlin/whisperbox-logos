@@ -4,7 +4,7 @@
   inputs = {
     # Basecamp 0.3 stack: builder 0.3.1 and loam_core (upstream delivery_module 0.3.x underneath),
     # the same pins as the other Loam apps (scala, swamp) so one transport serves them all.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/0.3.1";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/16e2f6bd3c06a5119f8c34448933de183205646c";   # tag 0.3.1, pinned to its commit
     loam_core.url = "github:vpavlin/loam-basecamp/5db9069d7b953b5876210576393b1dc9ffc19fdf?dir=core";
   };
 

