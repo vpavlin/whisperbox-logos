@@ -76,9 +76,10 @@ function summarize(q: any, rs: any[]) {
     return res;
   }
   if (t === "scale") {
+    // at most 101 steps drawn (open-review FR-7: peers refuse wider scales)
     const lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5;
     let sum = 0, cnt = 0;
-    const res = bar(Array.from({ length: Math.max(0, Math.min(101, hi - lo + 1)) }, (_, i) => String(lo + i)),   // FR-7: bounded (v, c) => { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
+    const res = bar(Array.from({ length: Math.max(0, Math.min(101, hi - lo + 1)) }, (_, i) => String(lo + i)), (v, c) => { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
     res.stat = cnt ? `average ${Math.round((10 * sum) / cnt) / 10}${q.style === "stars" ? " ★" : ""}  (${q.minLabel || lo} → ${q.maxLabel || hi})` : "";
     return res;
   }

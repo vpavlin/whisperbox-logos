@@ -62,4 +62,11 @@ else
   echo "SKIPPED (needs JDK 17 + mobile/node_modules)"
 fi
 
+echo "== mobile type check (App.tsx and src/: the release bundle fails on what this catches)"
+if [ -d "$ROOT/mobile/node_modules" ]; then
+  ( cd "$ROOT/mobile" && npx tsc --noEmit -p . ) && echo "TYPECHECK GREEN"
+else
+  echo "SKIPPED (needs mobile/node_modules)"
+fi
+
 printf '\nALL LAYERS GREEN\n'
