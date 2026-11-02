@@ -31,7 +31,10 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 git add -A && git commit -q -F "$MSG" && git push -q origin "$BRANCH" && git log --oneline -1 || { echo "commit/push failed"; exit 1; }
 
 [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ] && . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-nix build .#whisperbox_core .#whisperbox --out-link "$WB_OUT/relN" > "$WB_OUT/nix.log" 2>&1; echo "nix $?"
+# Each package from its own flake: the root flake's view output (an older lock) has no assets/
+# (icon, LIDL contract), and lgx merge then refuses the CI arm64/darwin builds (0.5.3).
+nix build ./whisperbox_core#lgx-portable --out-link "$WB_OUT/relN" > "$WB_OUT/nix.log" 2>&1; echo "nix core $?"
+nix build ./module#lgx-portable --out-link "$WB_OUT/relN-1" >> "$WB_OUT/nix.log" 2>&1; echo "nix view $?"
 
 cd mobile
 # --clean: android/ is generated; stale native config (e.g. a removed plugin's manifest
