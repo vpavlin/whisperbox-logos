@@ -60,6 +60,13 @@ struct Peer {
     json call(const std::string& r) { return json::parse(r); }
 };
 
+// the sealed answers a peer keeps on disk (the snapshot only counts them, FR-3)
+static json sealedPool(Peer& p) {
+    std::ifstream f(p.dir + "/events.json"); json a = json::parse(f, nullptr, false), out = json::array();
+    if (a.is_array()) for (const auto& e : a) if (e.value("type", "") == "response.submit") out.push_back(e);
+    return out;
+}
+
 // WB_DUMP_FIXTURES=<dir>: write real snapshots for the QML render harness.
 static void dumpFixture(Peer& p, const std::string& name) {
     const char* d = std::getenv("WB_DUMP_FIXTURES"); if (!d) return;
@@ -199,9 +206,9 @@ int main(int argc, char** argv) {
     // ── Scenario C (privacy) ───────────────────────────────────────────────────
     std::printf("scenario C (privacy):\n");
     json sC = C->snap();
-    CHECK(sC["state"]["responses"].size() >= 1, "C holds the sealed blob (synced)");
+    CHECK(sC["state"].value("responseCount", 0) >= 1 && !sC["state"].contains("responses"), "C holds the sealed blob (synced), counted, not in the snapshot");
     CHECK(sC["creatorView"].is_null(), "C has no creator view (decrypts nothing)");
-    std::string blobs = sC["state"]["responses"].dump();
+    std::string blobs = sealedPool(*C).dump();
     CHECK(blobs.find(addrB.substr(2)) == std::string::npos && blobs.find("Pizza") == std::string::npos, "wire blob leaks neither respondent nor answers");
     {   // the public confirmation id must not be computable from (formId, respondent)
         std::string guess = fid + "|" + addrB;
@@ -269,8 +276,9 @@ int main(int argc, char** argv) {
         { std::ofstream o(C->dir + "/my_submissions.json", std::ios::trunc); o << json::array({lfid}).dump(); }   // 0.1.x format
         C->start();
         CHECK(waitUntil([&] { return responsesOf(*A, lfid).size() == 1; }, 3000), "creator decrypts the legacy response");
-        CHECK(A->call(A->core->confirmResponse(lfid, addrC)).value("ok", false), "creator confirms the legacy response");
-        CHECK(waitUntil([&] { return formOf(*C, lfid).value("myConfirmed", false); }, 3000), "legacy respondent recognises its (hash) receipt");
+        // an unsigned answer can claim any address: no receipt by address (open-review 2026-11-01, FR-8)
+        json lc0 = A->call(A->core->confirmResponse(lfid, addrC));
+        CHECK(!lc0.value("ok", true) && lc0.value("error", "").find("isn't signed") != std::string::npos, "a legacy (unsigned) response gets no receipt by address");
     }
 
     dumpFixture(*A, "creator");     // 2 forms (one members-only), confirmed + unconfirmed responses
@@ -293,7 +301,7 @@ int main(int argc, char** argv) {
     bool caught = waitUntil([&] { return hasForm(*D, fid) && hasForm(*D, wfid); }, 15000);
     CHECK(caught, "late node D catches up on all forms");
     CHECK(t.elapsed() < 8000, "catch-up is driven by SYNC_REQ, not the 60s seed (" + std::to_string(t.elapsed()) + " ms)");
-    CHECK(waitUntil([&] { return D->snap()["state"]["responses"].size() == A->snap()["state"]["responses"].size(); }, 5000), "D has the full response pool");
+    CHECK(waitUntil([&] { return D->snap()["state"].value("responseCount", 0) == A->snap()["state"].value("responseCount", 0); }, 5000), "D has the full response pool");
     {
         long rb = D->snap()["diagnostics"].value("rbsrRx", 0L);
         long legacy = A->snap()["diagnostics"].value("legacyReseeds", 0L) + B->snap()["diagnostics"].value("legacyReseeds", 0L)
@@ -395,11 +403,11 @@ int main(int argc, char** argv) {
 
     // ── restart persistence ────────────────────────────────────────────────────
     std::printf("restart:\n");
-    size_t logBefore = A->snap()["state"]["responses"].size();
+    size_t logBefore = (size_t)A->snap()["state"].value("responseCount", 0);
     A->stop(); A->start();
     CHECK(A->snap()["identity"]["address"] == addrA, "identity survives restart");
     CHECK(A->snap()["deviceId"] == devA, "device id survives restart");
-    CHECK(A->snap()["state"]["responses"].size() == logBefore, "log survives restart");
+    CHECK((size_t)A->snap()["state"].value("responseCount", 0) == logBefore, "log survives restart");
     CHECK(responsesOf(*A, fid).size() == 1 && responsesOf(*A, fid)[0].value("confirmed", false), "decrypted + confirmed state survives restart");
     B->stop(); B->start();
     CHECK(formOf(*B, fid).value("myConfirmed", false), "respondent's confirmed state survives restart");
@@ -1018,6 +1026,108 @@ int main(int argc, char** argv) {
             }
             A->start(); pump(200);
             CHECK(!A->snap()["state"]["forms"].contains("fr6-forged"), "a form.publish with a forged signature in events.json is dropped at load (FR-6)");
+        }
+        // ── open-review 2026-11-01 (0.5.2 re-review: FR-1, 2, 3, 5-11, 14, 16) ──
+        {
+            CHECK(waitUntil([&] { return A->snap().value("nodeReady", false); }, 5000), "A is back on the topic (3)");
+            pump(500);
+            const long long now = (long long)QDateTime::currentMSecsSinceEpoch();
+            auto sealTo = [](const std::string& pub, const std::string& pt) { return whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end()))); };
+            auto respEv = [&](const std::string& hex) {
+                return json({{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}});
+            };
+            json h = A->call(A->core->createForm(json({{"title", "round 3"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+            const std::string hid = h.value("formId", "");
+            const std::string hpub = formOf(*A, hid).value("publicKey", "");
+            CHECK(waitUntil([&] { return hasForm(*B, hid); }, 3000), "round-3 form syncs");
+
+            // FR-1: a legacy form (its key IS the creator's identity key) can't get a co-owner
+            json idA; { std::ifstream in(A->dir + "/identity.json"); idA = json::parse(in); }
+            whisperbox::SignId sa = whisperbox::identityFromPriv(whisperbox::fromHex(idA.value("privHex", "")));
+            json lp = {{"id", "fr1-legacy"}, {"creator", addrA}, {"publicKey", sa.pubHex}, {"title", "legacy"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})},
+                       {"whitelist", {{"type", "none"}, {"value", ""}}}, {"createdAt", now}};
+            json le = {{"v", 1}, {"id", "form:fr1-legacy"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "a"}}}, {"dev", "a"}, {"payload", lp}};
+            whisperbox::signEventJson(le, sa);
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", le}}).dump());
+            CHECK(waitUntil([&] { return hasForm(*A, "fr1-legacy"); }, 3000), "a legacy form (identity key) is A's");
+            json co = A->call(A->core->addCoOwner("fr1-legacy", B->snap()["identity"].value("pubHex", "")));
+            CHECK(!co.value("ok", true) && co.value("error", "").find("before per-form keys") != std::string::npos, "adding a co-owner to a legacy form is refused: it would share the identity key (FR-1)");
+
+            // FR-2: malformed answer rows are dropped, the well-formed one stays, the CSV still exports
+            const std::string pt2 = R"({"formId":")" + hid + R"(","respondent":"0x)" + std::string(40, '6') + R"(","answers":[5,{"questionId":7},{"questionId":"q","value":{"a":{"b":1}}},{"questionId":"q","value":"kept"}],"signature":null})";
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(hpub, pt2))}}).dump());
+            CHECK(waitUntil([&] { return responsesOf(*A, hid).size() == 1; }, 3000), "an answer with malformed rows is listed (unverified)");
+            json r2 = responsesOf(*A, hid)[0]["answers"];
+            CHECK(r2.size() == 1 && r2[0].value("value", "") == "kept", "...with only its well-formed row (FR-2)");
+            json csv = A->call(A->core->exportCsv(hid));
+            CHECK(csv.value("ok", false) && csv.value("csv", "").find("kept") != std::string::npos, "...and the CSV exports it");
+
+            // FR-3: the snapshot carries no sealed answers, only their count
+            json sA = A->snap();
+            CHECK(!sA["state"].contains("responses") && sA["state"].value("responseCount", 0) >= 1, "the snapshot counts the sealed answers instead of carrying them (FR-3)");
+
+            // FR-5: a second link naming another creator doesn't replace B's pin
+            openLink(*B, hid);
+            json other = B->call(B->core->importForm("whisperbox://form?id=" + hid + "&by=0x" + std::string(40, '5')));
+            CHECK(!other.value("ok", true), "a second link naming another creator is refused (FR-5)");
+            CHECK(formOf(*B, hid).value("canRespond", false) && formOf(*B, hid).value("creator", "") == addrA, "...B's pin and form are unchanged");
+
+            // FR-6: a network time an hour old is not taken as verified
+            const std::string pt6 = R"({"formId":")" + hid + R"(","respondent":"0x)" + std::string(40, '4') + R"(","answers":[],"signature":null})";
+            FakeBus::get().tsNs = (now - 3600000LL) * 1000000LL;
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(hpub, pt6))}}).dump());
+            FakeBus::get().tsNs = 0;
+            CHECK(waitUntil([&] { return responsesOf(*A, hid).size() == 2; }, 3000), "an answer with an hour-old network time arrives");
+            bool tv = true; for (const auto& r : responsesOf(*A, hid)) if (r.value("respondent", "") == "0x" + std::string(40, '4')) tv = r.value("timeVerified", true);
+            CHECK(!tv, "...and its time is not verified (FR-6)");
+
+            // FR-7: a signed form with a 0..1,000,000 scale is refused
+            whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '7'}));
+            json zp = {{"id", "fr7-scale"}, {"creator", z.address}, {"publicKey", z.pubHex}, {"title", "scale"}, {"questions", json::array({{{"id", "s"}, {"type", "scale"}, {"min", 0}, {"max", 1000000}}})},
+                       {"whitelist", {{"type", "none"}, {"value", ""}}}, {"createdAt", now}};
+            json ze = {{"v", 1}, {"id", "form:fr7-scale"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "z"}}}, {"dev", "z"}, {"payload", zp}};
+            whisperbox::signEventJson(ze, z);
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", ze}}).dump()); pump(300);
+            CHECK(!A->snap()["state"]["forms"].contains("fr7-scale"), "a form with a 0..1,000,000 scale is refused (FR-7)");
+            CHECK(!A->call(A->core->createForm(json({{"title", "wide"}, {"questions", json::array({{{"id", "s"}, {"type", "scale"}, {"min", 5}, {"max", 1}}})}}).dump())).value("ok", true), "...and a local scale with min > max");
+
+            // FR-8: an unsigned answer claiming B's address gets no receipt by address
+            const std::string addrB3 = B->snap()["identity"].value("address", "");
+            const std::string pt8 = R"({"formId":")" + hid + R"(","respondent":")" + addrB3 + R"(","answers":[],"signature":null,"confirmationId":"fakecid"})";
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(hpub, pt8))}}).dump());
+            CHECK(waitUntil([&] { return responsesOf(*A, hid).size() == 3; }, 3000), "a forged unsigned answer claiming B arrives");
+            CHECK(!A->call(A->core->confirmResponse(hid, addrB3)).value("ok", true), "...and gets no receipt (FR-8)");
+            CHECK(formOf(*A, hid)["confirmations"].dump().find("fakecid") == std::string::npos, "...fakecid is not confirmed");
+
+            // FR-10: an upper-case copy of a sealed answer is refused
+            std::string up = sealTo(hpub, pt6); for (auto& c : up) c = (char)std::toupper((unsigned char)c);
+            long shapeB = diag(*A, "admDropShape");
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(up)}}).dump()); pump(300);
+            CHECK(diag(*A, "admDropShape") == shapeB + 1, "an upper-case hex answer is refused at admission (FR-10)");
+
+            // FR-11: a device id is bounded
+            CHECK(!A->call(A->core->setDeviceId(std::string(100, 'x'))).value("ok", true) && !A->call(A->core->setDeviceId("bad id!")).value("ok", true), "setDeviceId refuses long or odd ids (FR-11)");
+
+            // FR-16: base64 round-trips every byte value
+            whisperbox::Bytes all; for (int i = 0; i < 3000; i++) all.push_back((uint8_t)((i * 37) & 0xFF));
+            std::string enc = whisperbox::b64encode(all), dec = whisperbox::b64decode(enc);
+            CHECK(dec == std::string(all.begin(), all.end()), "base64 round-trips 3000 bytes (FR-16)");
+
+            // FR-3: answers from the network have a budget
+            // checked on B: it can't open these, so it takes them as fast as they come (the creator also
+            // decrypts each one, slower than the budget refills)
+            long bud0 = diag(*B, "admDropBudget");
+            for (int i = 0; i < 900; i++) {   // the budget is a burst of 600 plus 10 a second
+                const std::string pti = R"({"formId":")" + hid + R"(","n":)" + std::to_string(i) + "}";
+                const std::string env = json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(hpub, pti))}}).dump();
+                B->node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(env)), 0);   // to B only
+            }
+            CHECK(waitUntil([&] { return diag(*B, "admDropBudget") > bud0; }, 30000), "a flood of 900 answers runs out of the answer budget (FR-3)");
+
+            // FR-9: importing another identity drops the old one's answers and receipts
+            CHECK(!B->snap()["mySubmissions"].empty(), "B has answers of its own");
+            CHECK(B->call(B->core->importIdentity(whisperbox::toHex(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '9'})))).value("ok", false), "B imports another identity");
+            CHECK(B->snap()["mySubmissions"].empty() && std::filesystem::exists(B->dir + "/my_submissions.json.prev"), "...its previous answers are gone (kept in *.prev) (FR-9)");
         }
     }
 

@@ -78,7 +78,7 @@ function summarize(q: any, rs: any[]) {
   if (t === "scale") {
     const lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5;
     let sum = 0, cnt = 0;
-    const res = bar(Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)), (v, c) => { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
+    const res = bar(Array.from({ length: Math.max(0, Math.min(101, hi - lo + 1)) }, (_, i) => String(lo + i)),   // FR-7: bounded (v, c) => { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
     res.stat = cnt ? `average ${Math.round((10 * sum) / cnt) / 10}${q.style === "stars" ? " ★" : ""}  (${q.minLabel || lo} → ${q.maxLabel || hi})` : "";
     return res;
   }
@@ -519,7 +519,7 @@ function QuestionInput({ q, n, value, onChange, error, order }: { q: any; n: num
         return (
           <View>
             <View style={[st.chips, { gap: stars ? 2 : 6 }]}>
-              {Array.from({ length: hi - lo + 1 }, (_, i) => lo + i).map((v) => {
+              {Array.from({ length: Math.max(0, Math.min(101, hi - lo + 1)) }, (_, i) => lo + i).map((v) => {
                 const on = stars ? typeof value === "number" && v <= value : value === v;
                 return stars ? (
                   <Pressable key={v} onPress={() => onChange(v)} hitSlop={4} accessibilityLabel={`${v} stars`}><Text style={{ fontSize: 34, color: on ? C.accent : C.border }}>★</Text></Pressable>

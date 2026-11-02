@@ -214,4 +214,14 @@ private:
     void enrichResponses(const whisperbox::OrderedJson& state, const std::string& formId, nlohmann::json& responses,
                          const std::map<std::string, const whisperbox::SignId*>& keys);
     std::string sendReply(const std::string& formId, const std::string& cid, const std::string& replyPub, const nlohmann::json& body);
+    // open-review 2026-11-01, FR-3 (appended last: layout rule above): answers from the network have a
+    // budget, the log a size cap, and a burst of received events is saved and published once, not per event
+    long m_admDropBudget = 0, m_admDropFull = 0;
+    double m_respTokens = 0; int64_t m_respRefillMs = 0;
+    size_t m_logBytes = 0, m_logResponses = 0;
+    void recountLog();
+    QTimer* m_flushTimer = nullptr;
+    bool m_logDirty = false, m_publishDirty = false;
+    void scheduleFlush();
+    void flushNow();
 };

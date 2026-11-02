@@ -253,6 +253,27 @@ From 0.5.2 (open-review 2026-10-30, the 0.5.1 re-review):
 - **Legacy SYNC_REQ:** the whole-log reseed needs a device-id-shaped `from`, at most once a minute
   (FR-4).
 
+From 0.5.3 (open-review 2026-11-01, the 0.5.2 re-review):
+- **Answer rows:** decrypted `answers` keep only rows `{questionId: string of 1-128 bytes, value}`
+  with the value null, bool, number, string, `{other: string|null}` or a list of numbers, strings
+  and `{other}`; other rows are dropped (FR-2).
+- **Budget and caps:** a node takes at most 600 new `response.submit` from the network at once,
+  then 10 a second (`admDropBudget`). It takes no more answers once its log holds 50,000 of them
+  or 256 MiB; signed events have a 32 MiB reserve on top (`admDropFull`). A peer that missed out
+  gets the rest on a later catch-up round (FR-3).
+- **Snapshot:** the view gets `state.responseCount` instead of the sealed `state.responses` (FR-3).
+- **Pins:** the first link's creator stays pinned; a link naming another creator for the same id
+  is refused until the form is removed from the device (FR-5).
+- **Network time:** a timestamp more than 5 minutes from the receiver's clock, either way, is
+  treated as absent (FR-6). See § 9.
+- **Scales:** a scale question's `min` and `max` (default 1 and 5) are whole numbers,
+  `min <= max`, at most 100 apart (FR-7).
+- **Receipts:** `confirmResponse` matches only verified answers (FR-8).
+- **Co-owners:** a form whose `publicKey` is its creator's identity key (made before per-form keys)
+  can't get co-owners (FR-1).
+- **Sealed answers:** `encryptedPayload` is lower-case hex of whole bytes (FR-10).
+- **Device id:** 1-64 of `[A-Za-z0-9_-]` (FR-11).
+
 **Trust boundary.** The host (Basecamp, logosctl) gives a module no caller identity. Any module or
 view installed in the same Basecamp can call `whisperbox_core`: read decrypted answers
 (`getDecryptedResponses`, `snapshot`, `exportCsv`), import an identity, or act as the user. Install
@@ -338,8 +359,11 @@ view is the HLC-only fold (identical on every replica; the golden vectors). For 
 
 The network time is a time the network vouches the answer existed by: with RLN on, relays refuse
 a message stamped more than ~20 s from their clock and the timestamp is bound into the proof.
-Without RLN (our nodes today) it is only as honest as the sender's node. Answers without one are
-judged by their own HLC and shown as "time not verified" (ADR 0008, ADR 0019).
+Without RLN (our nodes today) it is only as honest as the sender's node. From 0.5.3 a timestamp
+more than 5 minutes from the receiver's clock is ignored, so a node can't backdate an answer by
+more than that, and a copy fetched from the store more than 5 minutes later carries no network
+time. Answers without one are judged by their own HLC and shown as "time not verified" (ADR 0008,
+ADR 0019).
 
 ## 10. Module layer (core and client, not the engine)
 

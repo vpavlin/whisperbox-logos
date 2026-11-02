@@ -106,7 +106,7 @@ inline SignId identityFromPriv(const Bytes& priv) {
 inline SignId generateIdentity() {
     Bytes priv(32);
     for (int tries = 0; tries < 8; tries++) {
-        RAND_bytes(priv.data(), 32);
+        if (RAND_bytes(priv.data(), 32) != 1) throw std::runtime_error("the random number generator failed");   // FR-14
         SignId id = identityFromPriv(priv); // rejects the (astronomically rare) invalid scalar
         if (id.valid) return id;
     }

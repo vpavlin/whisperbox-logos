@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.3 desktop core + view, Android 0.5.3 (2026-11-02) - open-review fixes, round 3
+
+From the open-review report on 0.5.2 (https://or.vpavlin.xyz/whisperbox-logos-42609fcc4878/). Each fix
+is in the desktop core and the phone client alike, with a regression test in the e2e "open-review
+2026-11-01" block and in `packages/client/test/round3.test.mjs`:
+- **FR-1 (High):** a form made before per-form keys (its key is the creator's identity key) can't
+  get a co-owner any more. Adding one sealed the identity key to the co-owner, who could then sign
+  as the creator. Duplicate such a form to share it.
+- **FR-2 (High):** decrypted answer rows are checked: `questionId` a string of 1-128 bytes, the value
+  null, bool, number, string, `{other}` or a list of those. Malformed rows are dropped. CSV export
+  returns an error instead of throwing on a mistyped field.
+- **FR-3 (High):**
+  - new answers from the network have a node-wide budget (600 at once, then 10 a second);
+  - the log stops taking answers at 50,000 or 256 MiB (signed events have 32 MiB more);
+  - the snapshot sent to the view carries a count of the sealed answers, not the answers (it
+    grew by every blob);
+  - the decrypt cache is bounded;
+  - a burst of received events is saved and published once every 250 ms, not once per event.
+- **FR-5 (Medium):** the first link's creator stays pinned. A second link naming another creator
+  for the same form id is refused. Removing the form from the device drops the pin.
+- **FR-6 (Medium):** a network timestamp counts only within 5 minutes of the receiver's clock,
+  in either direction. An older one (a sender's node stamping 2001, or a store copy fetched later)
+  is treated as absent: the answer's time shows as unverified.
+- **FR-7 (Medium):** a scale question needs whole-number `min` <= `max`, at most 100 apart. Peers
+  refuse wider ones; the views draw at most 101 steps either way.
+- **FR-8 (Medium):** `confirmResponse` gives receipts only to signed answers. An unsigned answer
+  claiming someone's address used to take their receipt. Unsigned (pre-0.5.0) answers get no
+  receipt by address.
+- **FR-9 (Low):** importing another identity clears the old one's own answers, receipts, private
+  replies, "seen" counts and key caches. The files are copied to `*.prev` first.
+- **FR-10 (Low):** a sealed answer must be lower-case hex of whole bytes: an upper-case copy was a
+  second event that opened to the same answer.
+- **FR-11 (Low):** every file the core reads back (identity, pins, drafts, answers) gets the depth
+  and size limit. The device id is 1-64 of `[A-Za-z0-9_-]`.
+- **FR-14, FR-16 (Low):** a failing random-number generator is an error, not zero bytes. Base64
+  uses an unsigned, masked accumulator.
+- **Not changed (documented):**
+  - FR-4: co-installed modules are still trusted (SPEC § trust boundary);
+  - FR-12: the four advisories are in Expo's build tooling, not in the app;
+  - FR-13: the identity and the saved answers are stored unencrypted, 0600 (README);
+  - FR-15: comments now say what changed; the tests above are the evidence.
+- **Breaking:**
+  - a legacy-key form can't get co-owners;
+  - an unsigned answer can't be confirmed;
+  - a second link with a different creator is refused.
+
 ## 0.5.2 desktop core + view, Android 0.5.2 (2026-10-30) - open-review re-review fixes
 
 From the open-review report on 0.5.1 (https://or.vpavlin.xyz/whisperbox-logos-ea85ebafb8c1/), in

@@ -39,6 +39,7 @@ namespace whisperbox {
 // Numbers from peers (open-review 2026-10-30, FR-2).
 inline constexpr double kMaxTimeMs = 1e14;        // year 5138: any real timestamp
 inline constexpr double kMaxNumberBound = 1e15;   // a scale/number question's min/max
+inline constexpr double kMaxScaleSpan = 100;      // a scale's max - min (FR-7)
 // a double from a peer as a long long, saturated instead of undefined
 inline long long toLL(double d) {
     if (!std::isfinite(d)) return 0;
@@ -483,6 +484,35 @@ inline bool isReplyPub(const json& dec) {
 // A signed submittedAt this far from the network time is flagged (timeSkew), ADR 0019.
 constexpr long long kMaxTimeSkewMs = 5LL * 60 * 1000;
 
+// Decrypted answers come from the respondent: keep only well-shaped rows (open-review 2026-11-01,
+// FR-2; mirror engine.mjs sanitizeAnswers). A row is {questionId: string 1..128, value}, the value
+// null / bool / number / string / {other: string|null} / an array of numbers, strings and {other}.
+inline bool answerScalarOk(const json& v) {
+    if (v.is_null() || v.is_boolean() || v.is_string()) return true;
+    if (v.is_number()) return !v.is_number_float() || std::isfinite(v.get<double>());
+    return false;
+}
+inline bool answerOtherOk(const json& v) { return v.is_object() && v.contains("other") && (v["other"].is_string() || v["other"].is_null()); }
+inline bool answerValueOk(const json& v) {
+    if (answerScalarOk(v) || answerOtherOk(v)) return true;
+    if (!v.is_array() || v.size() > 1000) return false;
+    for (const auto& x : v) if (!((x.is_number() && answerScalarOk(x)) || x.is_string() || answerOtherOk(x))) return false;
+    return true;
+}
+inline json sanitizeAnswers(const json& a) {
+    json out = json::array();
+    if (!a.is_array()) return out;
+    for (const auto& row : a) {
+        if (out.size() >= 1000) break;
+        if (!row.is_object() || !row.contains("questionId") || !row["questionId"].is_string()) continue;
+        const std::string& q = row["questionId"].get_ref<const std::string&>();
+        if (q.empty() || q.size() > 128) continue;
+        if (row.contains("value") && !answerValueOk(row["value"])) continue;
+        out.push_back(row);
+    }
+    return out;
+}
+
 inline OrderedJson creatorView(const OrderedJson& state, const std::string& identity,
                                std::function<json(const std::string&)> open,
                                std::function<bool(const json&)> verifyResponse = nullptr,
@@ -607,7 +637,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
                 OrderedJson u = OrderedJson::object();
                 u["respondent"] = dec.contains("respondent") && dec["respondent"].is_string() ? lc(dec["respondent"].get<std::string>()) : std::string();
                 u["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
-                u["answers"] = dec.contains("answers") && dec["answers"].is_array() ? dec["answers"] : json::array();
+                u["answers"] = sanitizeAnswers(dec.contains("answers") ? dec["answers"] : json());
                 u["signature"] = nullptr;
                 u["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
                 u["hlc"] = blob["hlc"];
@@ -639,7 +669,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
                 && state["receiptHlc"][formId].contains(pm.cid) && atOrAfter(w, blob, state["receiptHlc"][formId][pm.cid])) { drop(dropped, "edit-after-receipt"); continue; }
             auto& e = respObj[formId][(size_t)pm.index];
             e["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
-            e["answers"] = dec.value("answers", json::array());
+            e["answers"] = sanitizeAnswers(dec.contains("answers") ? dec["answers"] : json());
             e["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
             e["edits"] = e["edits"].get<int>() + 1;
             if (isReplyPub(dec)) e["replyPub"] = lc(dec["replyPub"].get<std::string>());
@@ -657,7 +687,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         OrderedJson r = OrderedJson::object();
         r["respondent"] = respondent;
         r["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : nullptr;
-        r["answers"] = dec.value("answers", json::array());
+        r["answers"] = sanitizeAnswers(dec.contains("answers") ? dec["answers"] : json());
         r["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
         // Respondent-chosen random receipt id (sealed, unlinkable); null pre-0.2.
         r["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
@@ -880,6 +910,13 @@ inline bool wellFormedQuestion(const json& q) {
         if (!q["options"].is_array() || q["options"].size() > 500) return false;
         for (const auto& o : q["options"]) if (!o.is_string() || o.get_ref<const std::string&>().size() > 4096) return false;
     }
+    // a scale is drawn as one button per step: whole numbers, min <= max, at most kMaxScaleSpan steps
+    // apart (open-review 2026-11-01, FR-7: a 0..1000000 scale froze the view; mirror client.mjs scaleOk)
+    if (q["type"].get<std::string>() == "scale") {
+        auto bound = [&q](const char* k, double d) { return q.contains(k) && !q[k].is_null() ? q[k].get<double>() : d; };
+        const double lo = bound("min", 1), hi = bound("max", 5);
+        if (lo != std::floor(lo) || hi != std::floor(hi) || lo > hi || hi - lo > kMaxScaleSpan) return false;
+    }
     return true;
 }
 // The editable fields of a form (form.publish payload / form.update payload.form).
@@ -935,6 +972,13 @@ inline bool wellFormedEvent(const json& e) {
     const std::string& t = e["type"].get_ref<const std::string&>();
     if (t == RESPONSE_SUBMIT) {
         if (!jStr(p, "encryptedPayload", kMaxEventBytes)) return false;
+        // canonical hex only: lower case, whole bytes. The id hashes the text, so an upper-case copy of
+        // one answer was a second event that opened to the same answer (open-review 2026-11-01, FR-10)
+        {
+            const std::string& h = p["encryptedPayload"].get_ref<const std::string&>();
+            if (h.size() % 2) return false;
+            for (char c : h) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
         return e["id"].get_ref<const std::string&>() == responseSubmitId(p["encryptedPayload"].get_ref<const std::string&>());   // WB-11
     }
     if (t == FORM_PUBLISH)

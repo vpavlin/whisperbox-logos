@@ -181,7 +181,7 @@ inline Bytes eciesSeal(const Bytes& creatorPub, const Bytes& plaintext,
     if (creatorPub.size() != 33) throw std::runtime_error("creator pub must be 33 bytes");
     Bytes eph = ephPriv ? *ephPriv : Bytes(32);
     if (eph.size() != 32) throw std::runtime_error("ephPriv must be 32 bytes");
-    if (!ephPriv) RAND_bytes(eph.data(), 32);
+    if (!ephPriv && RAND_bytes(eph.data(), 32) != 1) throw std::runtime_error("the random number generator failed");   // FR-14
     const Bytes ephPub = pubFromPriv(eph); // throws on invalid scalar
 
     const Bytes Sx = ecdhX(eph, creatorPub);
@@ -196,7 +196,7 @@ inline Bytes eciesSeal(const Bytes& creatorPub, const Bytes& plaintext,
         Bytes h = sha256(buf);
         nonce.assign(h.begin(), h.begin() + 12);
     } else {
-        nonce.resize(12); RAND_bytes(nonce.data(), 12);
+        nonce.resize(12); if (RAND_bytes(nonce.data(), 12) != 1) throw std::runtime_error("the random number generator failed");   // FR-14
     }
     Bytes aad = creatorPub; aad.insert(aad.end(), ephPub.begin(), ephPub.end());
 

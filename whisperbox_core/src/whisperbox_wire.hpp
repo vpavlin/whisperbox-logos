@@ -24,8 +24,10 @@ static const char kB64T[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 inline std::string b64encode(const Bytes& in) {
-    std::string o; int val = 0, bits = -6;
-    for (uint8_t c : in) { val = (val << 8) + c; bits += 8;
+    // unsigned, and only the bits still to emit kept: the int accumulator shifted past 32 bits (UB,
+    // open-review 2026-11-01, FR-16)
+    std::string o; uint32_t val = 0; int bits = -6;
+    for (uint8_t c : in) { val = ((val << 8) | c) & 0xFFFFFu; bits += 8;
         while (bits >= 0) { o += kB64T[(val >> bits) & 0x3F]; bits -= 6; } }
     if (bits > -6) o += kB64T[((val << 8) >> (bits + 8)) & 0x3F];
     while (o.size() % 4) o += '=';
@@ -38,11 +40,11 @@ inline std::string b64decode(const std::string& in) {
     std::vector<int> T(256, -1);
     for (int i = 0; i < 64; i++) T[(unsigned char)kB64T[i]] = i;
     T['-'] = 62; T['_'] = 63;   // the URL-safe alphabet too: delivery 0.3 emits it
-    std::string o; int val = 0, bits = -8;
+    std::string o; uint32_t val = 0; int bits = -8;   // unsigned and masked (FR-16)
     for (unsigned char c : in) {
         if (c == '=') break;
         if (T[c] == -1) continue;      // tolerate stray whitespace/line breaks
-        val = (val << 6) + T[c]; bits += 6;
+        val = ((val << 6) | uint32_t(T[c])) & 0xFFFFFu; bits += 6;
         if (bits >= 0) { o.push_back(char((val >> bits) & 0xFF)); bits -= 8; }
     }
     return o;

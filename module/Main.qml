@@ -236,6 +236,7 @@ Item {
         }
         if (t === "scale") {
             var lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5, ls = [], sum = 0, cnt = 0;
+            if (hi - lo > 100) hi = lo + 100;   // the core refuses wider scales (FR-7); never build a huge list
             for (var x = lo; x <= hi; x++) ls.push(String(x));
             var rsS = bars(ls, function (v, c) { if (typeof v === "number" && v >= lo && v <= hi) { c[v - lo]++; sum += v; cnt++; return true; } return false; });
             rsS.stat = cnt ? "average " + (Math.round(10 * sum / cnt) / 10) + (q.style === "stars" ? " ★" : "") + "  (" + (q.minLabel || lo) + " → " + (q.maxLabel || hi) + ")" : "";
@@ -1858,7 +1859,7 @@ Item {
                                     Flow {
                                         Layout.fillWidth: true; spacing: 6
                                         Repeater {
-                                            model: qBlock.qt === "scale" ? Math.max(0, parent.parent.hi - parent.parent.lo + 1) : 0
+                                            model: qBlock.qt === "scale" ? Math.max(0, Math.min(101, parent.parent.hi - parent.parent.lo + 1)) : 0   // at most 101 (FR-7)
                                             Rectangle {
                                                 property int v: parent.parent.lo + index
                                                 property bool stars: qBlock.q.style === "stars"
