@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.5.4 desktop core + view, Android 0.5.4 (2026-11-03) - open-review fixes, round 4
+
+From the open-review report on 0.5.3 (https://or.vpavlin.xyz/whisperbox-logos-5727d23c4fad-full/).
+Each fix has a regression test in the e2e "open-review 2026-11-02" block,
+`packages/client/test/round4.test.mjs` or `whisperbox_core/test/rbsr_parity_test.cpp`:
+- **FR-1 (Critical):** the published 0.5.3 linux-amd64 core did not reproduce from source. It was
+  built through the root flake, which forced an older builder (`afe4430`) onto the core. The root
+  flake now keeps each module's own pin (0.3.1, `16e2f6b`); releases build each package from its
+  own flake. A rebuild of 0.5.3 from `whisperbox_core/` matched the reviewer's rebuild exactly.
+  0.5.4's linux-amd64 build comes from the pinned builder like arm64 and macOS.
+- **FR-2, FR-5, FR-7 (High), a peer could freeze every desktop:**
+  - signatures are verified once, at admission and load; every snapshot re-verified the whole log;
+  - the fold and the creator view are cached until the log, pins or identity change;
+  - the fold indexes forms, deferred events, receipts and replies; it was quadratic: 50,000 forms
+    took 49 s, now 50,000 forms plus 50,000 answers take about 1 s;
+  - the sealed pool isn't copied into the fold any more;
+  - the snapshot carries only the forms the device shows;
+  - signed events from the network have a budget (600 at once, then 10 a second).
+- **FR-3 (High):** the creator view keeps a running count for the answer cap and indexes forms.
+  20,000 answers took 54 s; now 37 ms.
+- **FR-4 (High):** catch-up frames have a budget (120 a minute) and are answered from a sorted id
+  index with cached hashes. Ranges per frame are capped at 16 with increasing bounds; serving is
+  capped at 100 events and "need" lists at 500 ids. Messages on the wire are unchanged (checked
+  against the vendored loam-sync responder on 300 random exchanges).
+- **FR-6 (High):** a duplicate is recognised by its key without scanning the log, every copy of an
+  answer costs budget, and network times are saved once per burst.
+- **FR-8 (Medium):** loam_core callbacks reach the module only through a lifetime guard. A callback
+  after unload touched freed memory (ASan); the e2e test now runs clean under AddressSanitizer.
+- **FR-9 (Medium):** a receipt id over 128 bytes is treated as absent, and no local event peers
+  would refuse is stored or sent.
+- **FR-10 (Medium):** an answer over the event size cap is refused with an error instead of being
+  kept as "sent".
+- **FR-11 (Low):** form ids must fit the share link (`x&y` was published, but its link opened
+  form `x`).
+- **FR-12 (Low):** the inner signature text uses JavaScript's number format on the desktop too. A
+  phone answer holding `1e-7` failed to verify on the desktop.
+- **FR-13 (Low):** desktop and phone have "Remove" for forms you didn't make. It drops the creator
+  pin, so the right link can be opened after a wrong one.
+- **FR-14 (Low):** a failed transport start is retried (5 s, backing off to a minute); a failed join
+  is retried too.
+- **Not changed:** a copy received again can still move an answer's network time earlier, within
+  the 5-minute window.
+- **Behaviour changes:** the snapshot no longer lists forms the device never opened, and catch-up
+  frames with more than 16 ranges are ignored (WhisperBox sends 8).
+
 ## 0.5.3 desktop core + view, Android 0.5.3 (2026-11-02) - open-review fixes, round 3
 
 From the open-review report on 0.5.2 (https://or.vpavlin.xyz/whisperbox-logos-42609fcc4878/). Each fix

@@ -479,6 +479,13 @@ Item {
             if (hide && !root.showHidden) root.selectedId = "";
         });
     }
+    property string removeArmed: ""
+    function removeSelected() {
+        var f = root.sel; if (!f) return;
+        if (root.removeArmed !== f.id) { root.removeArmed = f.id; return; }
+        root.removeArmed = "";
+        act("deleteLocalForm", [f.id], "Removed from this device - open the creator's link to add it again", function () { root.selectedId = ""; });
+    }
     function reopenSelected() { act("reopenForm", [root.selectedId], "Form re-opened - answers sealed while it was closed still don't count"); }
     function confirmAllSelected() {
         act("confirmAll", [root.selectedId], "", function (r) { toast(r.confirmed ? "Receipts sent for " + root.plural(r.confirmed, "response", "responses") : "Everything already has a receipt"); });
@@ -1148,6 +1155,11 @@ Item {
                         WbButton { visible: !!(root.sel && root.sel.mine) && !root.previewDef; label: "Edit"; onClicked: root.openEditForm() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Duplicate"; onClicked: root.duplicateSelected() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Share"; onClicked: root.openShare() }
+                        // drops the form and its creator pin from this device, so the right link can be
+                        // opened (open-review 2026-11-02, FR-13); asks once more
+                        WbButton { visible: !!root.sel && !root.previewDef && !root.sel.mine && !root.sel.coOwner
+                                   label: root.removeArmed === (root.sel ? root.sel.id : "") ? "Really remove?" : "Remove"
+                                   enabled: !root.busy("deleteLocalForm"); onClicked: root.removeSelected() }
                     }
                     Flow {
                         Layout.fillWidth: true
@@ -1623,7 +1635,7 @@ Item {
                                 text: {
                                     var f = root.sel;
                                     if (!f) return "";
-                                    if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it.";
+                                    if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it. If that link was wrong, Remove the form, then open the right one.";
                                     if (f.needsLink) return "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it, and WhisperBox only sends answers to the creator a link names.";
                                     if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
                                     if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed

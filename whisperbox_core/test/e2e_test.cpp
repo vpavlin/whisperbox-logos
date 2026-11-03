@@ -9,7 +9,30 @@
 //   +  restart persistence, whitelist(addresses), close, import-before-sync,
 //      double-submit rejection.
 // Build/run: test/run-e2e.sh
+// The test reads a peer's fold (every form it knows from the topic): the snapshot only carries the
+// forms the device shows (open-review 2026-11-02, FR-5/FR-7). Test-only access, same class layout.
+#include <memory>
+#include <array>
+#include <unordered_set>
+#include <unordered_map>
+#include <string>
+#include <vector>
+#include <set>
+#include <map>
+#include <mutex>
+#include <functional>
+#include <QTimer>
+#include "logos_module_context.h"
+#include "whisperbox_engine.hpp"
+#include "whisperbox_crypto.hpp"
+#include "whisperbox_identity.hpp"
+#include "whisperbox_wire.hpp"
+#include "whisperbox_rbsr.hpp"
+#define private public
+#define protected public
 #include "whisperbox_core_impl.h"
+#undef private
+#undef protected
 #include "fake_bus.h"
 #include <QElapsedTimer>
 #include <execinfo.h>
@@ -86,14 +109,19 @@ static bool waitUntil(std::function<bool()> pred, int ms) {
     while (t.elapsed() < ms) { if (pred()) return true; QCoreApplication::processEvents(QEventLoop::AllEvents, 20); usleep(2000); }
     return pred();
 }
+// the peer's fold: every form it knows from the topic, shown or not
+static json foldOf(Peer& p) { std::lock_guard<std::recursive_mutex> lk(p.core->m_mtx); return json::parse(p.core->foldedState().dump()); }
 static bool hasForm(Peer& p, const std::string& fid) {
-    json s = p.snap(); return s["state"]["forms"].contains(fid) && !s["state"]["forms"][fid]["questions"].empty();
+    json f = foldOf(p)["forms"]; return f.contains(fid) && !f[fid]["questions"].empty();
 }
-// an empty object when the form isn't there (yet), so a timed-out wait reports FAIL instead of
-// aborting on a null (open-review FR-12)
+// the form as the view sees it (with this device's flags) if it's shown, else as the fold has it;
+// an empty object when it isn't there (yet), so a timed-out wait reports FAIL instead of aborting
+// on a null (open-review FR-12)
 static json formOf(Peer& p, const std::string& fid) {
     json forms = p.snap()["state"]["forms"];
-    return forms.is_object() && forms.contains(fid) && forms[fid].is_object() ? forms[fid] : json::object();
+    if (forms.is_object() && forms.contains(fid) && forms[fid].is_object()) return forms[fid];
+    json fo = foldOf(p)["forms"];
+    return fo.is_object() && fo.contains(fid) && fo[fid].is_object() ? fo[fid] : json::object();
 }
 // A respondent opens the creator's link before answering (open-review 2026-10-30, FR-3: answers go
 // only to a creator a link names): pin the creator this peer sees for the form.
@@ -140,8 +168,12 @@ int main(int argc, char** argv) {
     CHECK(cr.value("ok", false), "createForm ok");
     std::string fid = cr.value("formId", "");
     CHECK(waitUntil([&] { return hasForm(*B, fid) && hasForm(*C, fid); }, 3000), "form reaches B and C");
-    json feedB = B->snap()["state"]["feed"];
+    json feedB = foldOf(*B)["feed"];   // the fold's feed; the snapshot lists only the forms B shows (FR-7)
     CHECK(std::find(feedB.begin(), feedB.end(), fid) != feedB.end(), "form is in B's public feed");
+    {   // the snapshot carries only the forms this device shows: C never opened fid
+        json sc = C->snap()["state"];
+        CHECK(!sc["forms"].contains(fid) && std::find(sc["feed"].begin(), sc["feed"].end(), fid) == sc["feed"].end(), "a form C never opened isn't in C's snapshot (FR-7)");
+    }
 
     // Wire format of every client: choice answers are option INDICES.
     json answers = json::array({{{"questionId", "q1"}, {"value", 1}},
@@ -214,7 +246,7 @@ int main(int argc, char** argv) {
         std::string guess = fid + "|" + addrB;
         whisperbox::Bytes gb(guess.begin(), guess.end());
         std::string guessCid = whisperbox::toHex(whisperbox::sha256(gb).data(), 8);
-        json confs = C->snap()["state"]["forms"][fid]["confirmations"];
+        json confs = formOf(*C, fid)["confirmations"];
         CHECK(confs.size() == 1, "C sees one public confirmation");
         CHECK(std::find(confs.begin(), confs.end(), guessCid) == confs.end(), "public confirmation is NOT linkable to the respondent's address");
     }
@@ -425,7 +457,7 @@ int main(int argc, char** argv) {
         auto F = mkPeer("F"); F->node->online = false; F->stop();
         { std::ofstream o(F->dir + "/events.json", std::ios::trunc); o << bad.dump(); }
         F->start();
-        json st = F->snap()["state"];
+        json st = foldOf(*F);
         CHECK(!st["forms"].contains(wfid), "unsigned placeholder dropped on load");
         CHECK(st["forms"].contains(fid) && !st["forms"][fid]["questions"].empty(), "signed forms kept");
         json ev2 = json::parse(std::ifstream(F->dir + "/events.json"));
@@ -630,7 +662,7 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return formOf(*B, sf).value("myConfirmed", false); }, 3000), "B gets the co-owner's receipt");
             CHECK(!G->call(G->core->closeForm(sf)).value("ok", true), "co-owner can't close");
             CHECK(!G->call(G->core->updateForm(sf, json({{"title", "x"}}).dump())).value("ok", true), "co-owner can't edit");
-            CHECK(!formOf(*C, sf).value("coOwner", true) && responsesOf(*C, sf).empty(), "others still see nothing");
+            CHECK(!formOf(*C, sf).value("coOwner", false) && responsesOf(*C, sf).empty(), "others still see nothing");   // a co-owner would be shown, with the flag
         }
 
         // Quiz + private replies: the answer key is sealed; scores + replies reach only their respondent.
@@ -694,12 +726,12 @@ int main(int argc, char** argv) {
         CHECK(d1.value("ok", false) && d2.value("ok", false) && A->snap()["drafts"].size() == 2, "two drafts saved");
         dumpFixture(*A, "drafts");   // a plain draft + a scheduled one in the sidebar
         bool leaked = false;
-        { json gs = G->snap(); for (auto& kv : gs["state"]["forms"].items()) if (kv.value().value("title", "").rfind("Draft", 0) == 0) leaked = true; }
+        { json gs = foldOf(*G); for (auto& kv : gs["forms"].items()) if (kv.value().value("title", "").rfind("Draft", 0) == 0) leaked = true; }
         CHECK(!leaked, "drafts never leave the device");
         A->stop(); A->start();
         CHECK(A->snap()["drafts"].size() >= 1, "drafts survive a restart");
         // (keep the snapshot in a variable: iterating a temporary's sub-object is use-after-free)
-        auto titled = [&](Peer& p, const std::string& t) { json ps = p.snap(); for (auto& kv : ps["state"]["forms"].items()) if (kv.value().value("title", "") == t) return true; return false; };
+        auto titled = [&](Peer& p, const std::string& t) { json ps = foldOf(p); for (auto& kv : ps["forms"].items()) if (kv.value().value("title", "") == t) return true; return false; };
         CHECK(A->call(A->core->publishDraft(d1.value("draftId", ""))).value("ok", false), "publish a draft now");
         CHECK(waitUntil([&] { return titled(*G, "Draft now"); }, 3000), "published draft reaches peers");
         CHECK(waitUntil([&] { return titled(*G, "Draft scheduled"); }, 9000), "scheduled draft publishes itself when due");
@@ -831,7 +863,7 @@ int main(int argc, char** argv) {
             P->start();
             CHECK(P->snap()["diagnostics"].value("loadDropped", 0L) == 1, "a poisoned events.json starts: the bad event is skipped");
             CHECK(std::filesystem::exists(P->dir + "/events.bad.json"), "...and kept aside in events.bad.json");
-            CHECK(!P->snap()["state"]["forms"].empty(), "...the good events load");
+            CHECK(!foldOf(*P)["forms"].empty(), "...the good events load");
         }
         // answer tags are random, not derived from the public device id (WB-5)
         json logA = json::parse(std::ifstream(A->dir + "/events.json"));
@@ -1128,6 +1160,166 @@ int main(int argc, char** argv) {
             CHECK(!B->snap()["mySubmissions"].empty(), "B has answers of its own");
             CHECK(B->call(B->core->importIdentity(whisperbox::toHex(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '9'})))).value("ok", false), "B imports another identity");
             CHECK(B->snap()["mySubmissions"].empty() && std::filesystem::exists(B->dir + "/my_submissions.json.prev"), "...its previous answers are gone (kept in *.prev) (FR-9)");
+        }
+        // ── open-review 2026-11-02 (0.5.3 re-review, 0.5.4: FR-2..14) ──
+        {
+            CHECK(waitUntil([&] { return A->snap().value("nodeReady", false); }, 5000), "A is on the topic (4)");
+            const long long now = (long long)QDateTime::currentMSecsSinceEpoch();
+            auto ms = [](std::function<void()> f) { auto t0 = std::chrono::steady_clock::now(); f(); return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
+            auto sealTo = [](const std::string& pub, const std::string& pt) { return whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end()))); };
+            auto respEv = [&](const std::string& hex) {
+                return json({{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}});
+            };
+            whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'r', '4'}));
+
+            // FR-2: 800 signed closes for forms nobody published: a snapshot stays cheap (they are
+            // verified once, at admission; the fold is cached)
+            for (int i = 0; i < 800; i++) {
+                json ce = {{"v", 1}, {"id", "close:ghost" + std::to_string(i) + ":n"}, {"type", "form.close"}, {"hlc", {{"wall", now}, {"ctr", i}, {"dev", "z"}}}, {"dev", "z"},
+                           {"payload", {{"formId", "ghost" + std::to_string(i)}, {"author", z.address}}}};
+                whisperbox::signEventJson(ce, z);
+                send(json({{"v", 1}, {"type", "EVENT"}, {"event", ce}}).dump());
+            }
+            pump(1500);
+            long long t1 = ms([&] { A->snap(); }), t2 = ms([&] { A->snap(); });
+            CHECK(t1 < 1500 && t2 < 300, "800 signed ghost closes: two snapshots take " + std::to_string(t1) + " ms, " + std::to_string(t2) + " ms (were seconds, FR-2)");
+            CHECK(diag(*A, "admDropBudget") > 0, "...and signed events have a budget (" + std::to_string(diag(*A, "admDropBudget")) + " dropped)");
+
+            // FR-3: the creator view is linear: 20,000 answers (engine, no crypto)
+            {
+                whisperbox::OrderedJson st = whisperbox::OrderedJson::object();
+                whisperbox::OrderedJson f = whisperbox::OrderedJson::object();
+                f["id"] = "big"; f["creator"] = "0x" + std::string(40, 'a'); f["publicKey"] = "k"; f["status"] = "open"; f["confirmations"] = json::array();
+                f["whitelist"] = {{"type", "none"}, {"value", ""}}; f["allowEdits"] = false; f["maxResponses"] = nullptr; f["expiresAt"] = nullptr;
+                st["forms"] = whisperbox::OrderedJson::object(); st["forms"]["big"] = f;
+                std::vector<json> pool; pool.reserve(20000);
+                for (int i = 0; i < 20000; i++) pool.push_back({{"id", "r" + std::to_string(i)}, {"hlc", {{"wall", i}, {"ctr", 0}, {"dev", "d"}}}, {"payload", {{"encryptedPayload", "00"}}}});
+                std::vector<const json*> ptrs; for (auto& b : pool) ptrs.push_back(&b);
+                long long t = ms([&] {
+                    auto v = whisperbox::creatorViewPool<json>(st, ptrs, "0x" + std::string(40, 'a'),
+                        [](const std::string& id, const std::string&) { return json({{"formId", "big"}, {"respondent", "0x" + std::string(38, '0') + id.substr(id.size() >= 2 ? id.size() - 2 : 0)}, {"answers", json::array()}}); });
+                    (void)v;
+                });
+                CHECK(t < 8000, "creator view over 20,000 answers: " + std::to_string(t) + " ms (was 54 s, FR-3)");
+            }
+
+            // FR-7 / FR-5: the fold over 50,000 forms and 50,000 answers is linear
+            {
+                std::vector<json> log; log.reserve(100000);
+                for (int i = 0; i < 50000; i++)
+                    log.push_back({{"v", 1}, {"id", "form:f" + std::to_string(i)}, {"type", "form.publish"}, {"hlc", {{"wall", 1000 + i}, {"ctr", 0}, {"dev", "d"}}}, {"dev", "d"},
+                                   {"payload", {{"id", "f" + std::to_string(i)}, {"creator", z.address}, {"publicKey", z.pubHex}, {"title", "t"}, {"questions", json::array()}}}});
+                for (int i = 0; i < 50000; i++)
+                    log.push_back({{"v", 1}, {"id", "resp:" + std::to_string(i)}, {"type", "response.submit"}, {"hlc", {{"wall", 60000 + i}, {"ctr", 0}, {"dev", "d"}}}, {"dev", "d"}, {"payload", {{"encryptedPayload", "00"}}}});
+                whisperbox::OrderedJson st;
+                long long t = ms([&] { st = whisperbox::computeState(log, "", nullptr, {}, /*withPool=*/false); });
+                CHECK(st["forms"].size() == 50000 && !st.contains("responses") && t < 15000, "fold of 50,000 forms + 50,000 answers: " + std::to_string(t) + " ms (was 49 s for the forms alone, FR-7/FR-5)");
+            }
+
+            // FR-4: catch-up frames have a budget
+            {
+                long c0 = diag(*A, "ctlDropBudget");
+                const std::string fp = R"({"v":2,"t":"fp","from":"flood","bounds":[],"fps":["00000000000000000000000000000000"]})";
+                for (int i = 0; i < 300; i++) send(fp);
+                pump(1500);
+                CHECK(diag(*A, "ctlDropBudget") > c0, "300 catch-up frames run out of the frame budget (FR-4)");
+            }
+
+            // FR-6: one answer replayed 1,000 times costs budget, not a rewrite per copy
+            {
+                json h = A->call(A->core->createForm(json({{"title", "replay"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+                const std::string hid = h.value("formId", "");
+                const std::string ev = json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(formOf(*A, hid).value("publicKey", ""), R"({"formId":")" + hid + R"("})"))}}).dump();
+                long d0 = diag(*B, "rxDup"), b0 = diag(*B, "admDropBudget");
+                for (int i = 0; i < 1000; i++) B->node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(ev)), (now - i) * 1000000LL);
+                pump(1500);
+                CHECK(diag(*B, "rxDup") > d0 && diag(*B, "admDropBudget") > b0, "a replayed answer counts against the budget (FR-6)");
+            }
+
+            // FR-9: a signed answer with a 100,000-byte confirmationId gets no ill-formed receipt
+            {
+                json h = A->call(A->core->createForm(json({{"title", "cid"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+                const std::string hid = h.value("formId", "");
+                whisperbox::SignId r = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'c', 'i', 'd'}));
+                whisperbox::OrderedJson m = whisperbox::OrderedJson::object();
+                m["formId"] = hid; m["respondent"] = r.address; m["submittedAt"] = now; m["answers"] = json::array({{{"questionId", "q"}, {"value", "x"}}});
+                const std::string msg = "whisperbox-inner-v1|" + whisperbox::esJson(m);
+                json dec = {{"formId", hid}, {"respondent", r.address}, {"submittedAt", now}, {"answers", m["answers"]}, {"pub", r.pubHex},
+                            {"signature", whisperbox::toHex(whisperbox::ecdsaSignLowS(r.priv, whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()))))},
+                            {"confirmationId", std::string(100000, 'c')}};
+                send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(formOf(*A, hid).value("publicKey", ""), dec.dump()))}}).dump());
+                CHECK(waitUntil([&] { return responsesOf(*A, hid).size() == 1; }, 3000), "a signed answer with a huge receipt id is listed");
+                CHECK(responsesOf(*A, hid)[0]["confirmationId"].is_null(), "...without its receipt id (FR-9)");
+                A->call(A->core->setAutoReceipts(hid, "true"));
+                A->call(A->core->confirmAll(hid));
+                pump(300);
+                bool allOk = true; size_t biggest = 0;
+                { std::lock_guard<std::recursive_mutex> lk(A->core->m_mtx); for (const auto& e : A->core->m_log) { if (!whisperbox::wellFormedEvent(e)) allOk = false; biggest = std::max(biggest, e.dump().size()); } }
+                CHECK(allOk && biggest < 300000, "...and every event in the creator's log is one peers accept (FR-9)");
+            }
+
+            // FR-10: an answer over the event size cap is refused, not kept
+            {
+                json h = A->call(A->core->createForm(json({{"title", "long"}, {"questions", json::array({{{"id", "q"}, {"type", "textarea"}, {"text", "x"}}})}}).dump()));
+                const std::string hid = h.value("formId", "");
+                CHECK(waitUntil([&] { return hasForm(*B, hid); }, 3000), "long-answer form syncs");
+                openLink(*B, hid);
+                json r = B->call(B->core->submitResponse(hid, json::array({{{"questionId", "q"}, {"value", std::string(200000, 'y')}}}).dump()));
+                CHECK(!r.value("ok", true) && r.value("error", "").find("too long") != std::string::npos && !formOf(*B, hid).value("mySubmitted", true), "a 200 KB answer is refused, not kept (FR-10)");
+            }
+
+            // FR-11: a form id the link grammar can't carry
+            CHECK(!A->call(A->core->createForm(json({{"id", "x&y"}, {"title", "amp"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump())).value("ok", true), "createForm refuses the id x&y (FR-11)");
+
+            // FR-12: numbers as JavaScript prints them
+            CHECK(whisperbox::esNumber(1e-7) == "1e-7" && whisperbox::esNumber(1e20) == "100000000000000000000" && whisperbox::esNumber(1e21) == "1e+21"
+                  && whisperbox::esNumber(-0.0) == "0" && whisperbox::esNumber(0.1) == "0.1" && whisperbox::esNumber(123.456) == "123.456"
+                  && whisperbox::esNumber(1.5e-300) == "1.5e-300" && whisperbox::esNumber(-2.5e-7) == "-2.5e-7" && whisperbox::esNumber(1234567.0) == "1234567",
+                  "esNumber == Number.prototype.toString (FR-12)");
+            {
+                whisperbox::OrderedJson m = whisperbox::OrderedJson::object();
+                m["formId"] = "f"; m["respondent"] = "0xab"; m["submittedAt"] = 1; m["answers"] = json::array({{{"questionId", "q"}, {"value", 1e-7}}, {{"questionId", "r"}, {"value", 1e20}}});
+                CHECK(whisperbox::esJson(m) == R"({"formId":"f","respondent":"0xab","submittedAt":1,"answers":[{"questionId":"q","value":1e-7},{"questionId":"r","value":100000000000000000000}]})",
+                      "the inner message is JSON.stringify's text (FR-12; same literal in round4.test.mjs)");
+            }
+
+            // FR-13: removing a form drops its pin; the right link then opens it
+            {
+                json h = A->call(A->core->createForm(json({{"title", "pin"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+                const std::string hid = h.value("formId", "");
+                CHECK(waitUntil([&] { return hasForm(*B, hid); }, 3000), "pin form syncs");
+                B->call(B->core->importForm("whisperbox://form?id=" + hid + "&by=0x" + std::string(40, '7')));   // a wrong link
+                CHECK(formOf(*B, hid).value("linkMismatch", false), "a wrong link: mismatch");
+                CHECK(B->call(B->core->deleteLocalForm(hid)).value("ok", false), "remove from this device");
+                openLink(*B, hid);
+                CHECK(!formOf(*B, hid).value("linkMismatch", true) && formOf(*B, hid).value("canRespond", false), "...then the right link opens it (FR-13)");
+            }
+
+            // FR-8: a transport callback kept after the module is gone is harmless
+            {
+                auto Q = mkPeer("Q");
+                CHECK(waitUntil([&] { return Q->snap().value("nodeReady", false); }, 5000), "Q is up");
+                auto rx = Q->node->onRx; auto stc = Q->node->onStatus;
+                Q->core.reset();   // the module unloads; the shared node keeps its callbacks
+                if (rx) rx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(R"({"v":1,"type":"SYNC_REQ","from":"x"})")), 0);
+                if (stc) stc("Connected");
+                pump(200);
+                CHECK(true, "a retained onReceived / onStatusChanged after unload doesn't touch the freed module (FR-8; ASan run in BUILD.md)");
+                Q->stop();
+            }
+
+            // FR-14: a failed transport start is retried
+            {
+                auto R = std::make_unique<Peer>(); R->name = "R"; R->dir = g_base + "/R";
+                setenv("WHISPERBOX_CORE_DATA", R->dir.c_str(), 1);
+                R->node = std::make_unique<FakeNode>(); R->node->name = "R"; R->node->failStarts = 1;
+                R->core = std::make_unique<WhisperboxCoreImpl>();
+                R->core->modules().loam_core.node = R->node.get();
+                FakeBus::get().nodes.push_back(R->node.get());
+                R->core->fakeStart();
+                CHECK(waitUntil([&] { return R->snap().value("nodeReady", false); }, 15000), "a failed start is retried and connects (FR-14)");
+                CHECK(R->snap()["diagnostics"].value("startFailures", -1L) == 0, "...and the failure count resets");
+            }
         }
     }
 

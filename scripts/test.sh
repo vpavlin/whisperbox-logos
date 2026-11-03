@@ -34,6 +34,9 @@ step "4/8 engine parity (C++)"
 g++ -std=c++17 -O1 -Wno-deprecated-declarations -I"$ROOT/whisperbox_core" -I"$ROOT/whisperbox_core/src" \
     "$ROOT/whisperbox_core/test/engine_golden_test.cpp" -lcrypto -o "$WB_TMP/engine_golden_test"
 "$WB_TMP/engine_golden_test" "$ROOT"
+g++ -std=c++17 -O2 -Wno-deprecated-declarations -I"$ROOT/whisperbox_core" -I"$ROOT/whisperbox_core/src" \
+    "$ROOT/whisperbox_core/test/rbsr_parity_test.cpp" -lcrypto -o "$WB_TMP/rbsr_parity_test"
+"$WB_TMP/rbsr_parity_test" | tail -1
 
 step "5/8 core end-to-end (fake loam_core bus)"
 WB_TEST_OUT="$WB_TMP" "$ROOT/whisperbox_core/test/run-e2e.sh" 2>"$WB_TMP/e2e.stderr" | grep -vE '^  ok' 
@@ -49,7 +52,7 @@ export WB_OUT="$WB_TMP/render"
 
 step "7/8 interop: JS client vs C++ core"
 "$ROOT/whisperbox_core/test/run-bridge-build.sh" "$WB_TMP/wb-bridge" >/dev/null
-( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs test/hostile.test.mjs test/nettime.test.mjs test/round3.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
+( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs test/hostile.test.mjs test/nettime.test.mjs test/round3.test.mjs test/round4.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
 
 step "8/8 Keycard: real applets (3.1.2 + 4.0) in jCardSim, Hermes-like globals"
 if [ -x "${JAVA_HOME:-$HOME/jdk/17}/bin/java" ] && [ -d "$ROOT/mobile/node_modules/keycard-sdk" ]; then

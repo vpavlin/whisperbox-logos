@@ -20,6 +20,7 @@ logos_module(
         src/whisperbox_identity.hpp
         src/whisperbox_engine.hpp
         src/whisperbox_wire.hpp
+        src/whisperbox_rbsr.hpp
         src/qrcodegen.hpp
         src/qrcodegen.cpp
         src/logos_sync/catchup.hpp

@@ -1,4 +1,7 @@
 #pragma once
+#include <memory>
+#include <array>
+#include <unordered_set>
 // WhisperboxCoreImpl - WhisperBox (privacy-first forms) as a Logos CORE module
 // (universal authoring). One shared event log over ONE topic
 // (/whisperbox/1/all/proto), folded through the std-only engine
@@ -30,6 +33,7 @@
 #include "whisperbox_crypto.hpp"
 #include "whisperbox_identity.hpp"
 #include "whisperbox_wire.hpp"
+#include "whisperbox_rbsr.hpp"
 
 class QTimer;
 
@@ -224,4 +228,37 @@ private:
     bool m_logDirty = false, m_publishDirty = false;
     void scheduleFlush();
     void flushNow();
+    // open-review 2026-11-02 (0.5.4; appended last: layout rule above).
+    // FR-2/5/7: the fold and the creator view are cached until the log, the pins or the identity
+    // change (every snapshot re-folded and re-verified the whole log), and signatures are checked
+    // once, at admission and load.
+    uint64_t m_logGen = 1, m_pinsGen = 1, m_netGen = 1;
+    bool m_foldValid = false; uint64_t m_foldLogGen = 0, m_foldPinsGen = 0; std::string m_foldIdent;
+    whisperbox::OrderedJson m_foldCache;
+    std::unordered_set<std::string> m_foldIds;
+    const whisperbox::OrderedJson& foldedState();
+    bool m_cvValid = false; uint64_t m_cvLogGen = 0, m_cvPinsGen = 0, m_cvNetGen = 0; std::string m_cvIdent;
+    whisperbox::OrderedJson m_cvCache;
+    // FR-6: the held copy's HLC per event key: a duplicate is known without scanning the log
+    std::unordered_map<std::string, whisperbox::json> m_heldHlc;
+    bool m_netDirty = false;
+    // FR-2/4: budgets for signed events and catch-up control frames from the network
+    double m_sigTokens = 0; int64_t m_sigRefillMs = 0;
+    double m_ctlTokens = 0; int64_t m_ctlRefillMs = 0;
+    long m_ctlDropBudget = 0;
+    bool takeToken(double& tokens, int64_t& refillMs, double budgetPerMin);
+    // FR-4: a sorted id index for catch-up, rebuilt when the log changes
+    uint64_t m_rbsrGen = 0;
+    whisperbox::rbsr::Index m_rbsr;
+    std::unordered_map<std::string, size_t> m_rbsrPos;   // event key -> index into m_log
+    void rbsrIndex();
+    void rbsrRespond(const whisperbox::json& msg);
+    // FR-8: transport callbacks outlive the module; they reach it only through this
+    struct Life { std::mutex mu; WhisperboxCoreImpl* self = nullptr; };
+    std::shared_ptr<Life> m_life;
+    static void withSelf(const std::shared_ptr<Life>& life, std::function<void(WhisperboxCoreImpl*)> fn);
+    // FR-14: a failed transport start is retried
+    int64_t m_lastStartMs = 0;
+    long m_startFailures = 0;
+    bool adoptChecked(const whisperbox::json& e);   // FR-9/10: only events peers accept
 };

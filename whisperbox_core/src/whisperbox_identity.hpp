@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 // whisperbox_core — per-user identity + event signing (C++/OpenSSL secp256k1).
 // BYTE-PARITY with packages/contract/src/crypto.mjs:
 //   pub       = secp256k1 compressed point (33B) from the 32B scalar
@@ -56,6 +57,67 @@ inline std::string jsonString(const std::string& s) {
     return o + "\"";
 }
 
+// A number as JavaScript prints it (Number.prototype.toString / JSON.stringify): "1e-7", not
+// nlohmann's "1e-07"; "100000000000000000000", not "1e+20"; "-0" is "0". Signed texts are built
+// with JSON.stringify on the phones, so a phone answer holding such a number failed to verify on
+// the desktop (open-review 2026-11-02, FR-12).
+inline std::string esNumber(double d) {
+    if (!std::isfinite(d)) return "null";
+    if (d == 0) return "0";
+    // the shortest round-trip digits (nlohmann prints them), then the ES layout
+    std::string r = json(d).dump();
+    std::string sign;
+    if (r[0] == '-') { sign = "-"; r = r.substr(1); }
+    int exp10 = 0;
+    auto e = r.find_first_of("eE");
+    if (e != std::string::npos) { exp10 = std::stoi(r.substr(e + 1)); r = r.substr(0, e); }
+    std::string digits; int pointPos = -1;
+    for (char c : r) { if (c == '.') pointPos = (int)digits.size(); else digits.push_back(c); }
+    if (pointPos < 0) pointPos = (int)digits.size();
+    // value = 0.digits * 10^n
+    int n = pointPos + exp10;
+    size_t lead = digits.find_first_not_of('0');
+    if (lead == std::string::npos) return "0";
+    n -= (int)lead; digits = digits.substr(lead);
+    while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
+    const int k = (int)digits.size();
+    std::string out;
+    if (k <= n && n <= 21) out = digits + std::string(n - k, '0');
+    else if (0 < n && n <= 21) out = digits.substr(0, n) + "." + digits.substr(n);
+    else if (-6 < n && n <= 0) out = "0." + std::string(-n, '0') + digits;
+    else {
+        const int ex = n - 1;
+        out = digits.substr(0, 1) + (k > 1 ? "." + digits.substr(1) : std::string()) + "e" + (ex >= 0 ? "+" : "-") + std::to_string(std::abs(ex));
+    }
+    return sign + out;
+}
+inline std::string esInteger(long long v) {
+    if (v > 9007199254740991LL || v < -9007199254740991LL) return esNumber((double)v);   // past 2^53 JS has a double
+    return std::to_string(v);
+}
+// JSON.stringify of a parsed value, keys in the order the value holds them.
+template <class J>
+inline std::string esJson(const J& v, int depth = 0) {
+    if (depth > 64) throw std::runtime_error("esJson: nested too deep");
+    if (v.is_null()) return "null";
+    if (v.is_boolean()) return v.template get<bool>() ? "true" : "false";
+    if (v.is_string()) return jsonString(v.template get<std::string>());
+    if (v.is_number_unsigned()) { auto u = v.template get<unsigned long long>(); return u > 9007199254740991ULL ? esNumber((double)u) : std::to_string(u); }
+    if (v.is_number_integer()) return esInteger(v.template get<long long>());
+    if (v.is_number_float()) return esNumber(v.template get<double>());
+    if (v.is_array()) {
+        std::string o = "[";
+        for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += esJson(v[i], depth + 1); }
+        return o + "]";
+    }
+    if (v.is_object()) {
+        std::string o = "{"; bool first = true;
+        for (auto it = v.begin(); it != v.end(); ++it) { if (!first) o += ","; first = false; o += jsonString(it.key()) + ":" + esJson(it.value(), depth + 1); }
+        return o + "}";
+    }
+    return "null";
+}
+
 // Canonical JSON matching crypto.mjs cjson(): sorted object keys, compact, JS number
 // formatting. WhisperBox payloads are strings/ints/bools/nested objects/arrays.
 inline std::string cjson(const json& v, int depth = 0) {
@@ -63,9 +125,9 @@ inline std::string cjson(const json& v, int depth = 0) {
     if (v.is_null()) return "null";
     if (v.is_boolean()) return v.get<bool>() ? "true" : "false";
     if (v.is_string()) return jsonString(v.get<std::string>());
-    if (v.is_number_integer()) return std::to_string(v.get<long long>());
-    if (v.is_number_unsigned()) return std::to_string(v.get<unsigned long long>());
-    if (v.is_number_float()) return json(v).dump(); // fallback; payloads avoid floats
+    if (v.is_number_unsigned()) { auto u = v.get<unsigned long long>(); return u > 9007199254740991ULL ? esNumber((double)u) : std::to_string(u); }
+    if (v.is_number_integer()) return esInteger(v.get<long long>());
+    if (v.is_number_float()) return esNumber(v.get<double>());   // as JSON.stringify (FR-12)
     if (v.is_array()) {
         std::string o = "[";
         for (size_t i = 0; i < v.size(); i++) { if (i) o += ","; o += cjson(v[i], depth + 1); }

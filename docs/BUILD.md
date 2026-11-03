@@ -101,6 +101,19 @@ WB_DS=... WB_OUT=/tmp/r bash scripts/qml-harness/scenarios.sh                   
 python3 ~/logos-skills/logos-basecamp-module/qml-plaintext.py --check module/Main.qml  # every Text is PlainText
 ```
 
+The end-to-end test also runs under AddressSanitizer (no system libasan needed; clang ships it):
+
+```sh
+H=whisperbox_core/test
+clang++ -std=c++20 -O1 -g -fPIC -fsanitize=address -fno-omit-frame-pointer -Wno-deprecated-declarations \
+  -I$H/fakesdk -I$H/../src $(pkg-config --cflags Qt6Core) $H/e2e_test.cpp $H/../src/whisperbox_core_impl.cpp \
+  $H/../src/qrcodegen.cpp $(pkg-config --libs Qt6Core) -lcrypto -o /tmp/e2e_asan
+ASAN_OPTIONS=detect_leaks=0 /tmp/e2e_asan
+```
+
+It caught a use-after-free when the module was unloaded while loam_core still held its callbacks
+(open-review 2026-11-02, FR-8). Run it after touching callbacks, timers or teardown.
+
 QML scenarios (`scenarios.sh`) load a fixture, set view properties, call a view function and
 assert on the `CALL whisperbox_core <method> ...` lines the mock backend logs (`expect` /
 `deny`). Use them for anything the view sends to the core.
@@ -114,9 +127,15 @@ nix build .#whisperbox_core .#whisperbox --out-link out
 # out-1/ -> logos-whisperbox-module.lgx            (view)
 ```
 
-- `flake.nix` pins `logos-module-builder` (afe4430) and `delivery_module` (0fb3a74); the
-  default outputs are the **portable** (`linux-amd64`) variants, which is what Basecamp
-  0.2.x installs. `.#whisperbox_core_dev` / `.#whisperbox_dev` are the `-dev` variants.
+- Each module pins its own builder: `whisperbox_core/flake.nix` and `module/flake.nix` both use
+  `logos-module-builder` 0.3.1 (`16e2f6b`), with their `flake.lock` committed. The root flake only
+  aggregates them; it must not override their inputs with `follows`. Until 0.5.4 it forced an
+  older builder (`afe4430`), and the 0.5.3 linux-amd64 core built through it did not match a
+  build of `whisperbox_core/` (open-review 2026-11-02, FR-1). A release builds each package from
+  its own flake: `nix build ./whisperbox_core#lgx-portable` and `nix build ./module#lgx-portable`
+  (`scripts/release/release.sh` does). Check a build reproduces: the `variants/linux-amd64`
+  hash in the package's `manifest.json` must match a rebuild from the tagged commit.
+- The default outputs are the **portable** (`linux-amd64`) variants.
 - Versions come from `whisperbox_core/metadata.json` and `module/metadata.json`; always bump
   both together (Basecamp users must update core and view as a pair).
 - The core is a universal module: its public methods are found by **parsing**

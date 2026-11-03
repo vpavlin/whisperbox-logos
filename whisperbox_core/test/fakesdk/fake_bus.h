@@ -16,6 +16,7 @@ struct FakeNode {
     std::string name;
     bool created = false, up = false, online = true, subscribed = false, channel = false;
     int starts = 0;   // start() calls (a second start on a shared node is a bug)
+    int failStarts = 0;   // the next N start() calls fail (a transient loam_core error, FR-14)
     std::string senderId;
     std::set<std::string> joined;
     FakeLoamCore::RxFn onRx;
@@ -73,6 +74,7 @@ inline void FakeLoamCore::startAsync(const std::string&, StrCb cb) {
     // this one restarted) is fine - it just reports Connected.
     long sid = node->serial;
     FakeBus::later([sid, cb] { if (FakeNode* n = FakeBus::get().alive(sid)) {
+        if (n->failStarts > 0) { n->failStarts--; cb("{\"ok\":false,\"error\":\"injected start failure\"}"); return; }
         if (!n->up) { n->up = true; n->starts++; }
         cb("{\"ok\":true}");
         if (n->onStatus) { auto fn = n->onStatus; fn("Connected"); } } });

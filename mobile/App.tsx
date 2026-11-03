@@ -570,6 +570,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   useEffect(() => { const t = setInterval(() => setTick(Date.now()), 20000); return () => clearInterval(t); }, []);
   const [qIdx, setQIdx] = useState(0);
   const [showCo, setShowCo] = useState(false);
+  const [armRemove, setArmRemove] = useState(false);   // "Remove" asks once more
   const [replyText, setReplyText] = useState("");
   const [coCode, setCoCode] = useState("");
   const [idx, setIdx] = useState(0);
@@ -650,7 +651,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
     f.anonymous && !f.mine ? "anonymous: you answer under a one-off identity for this form - the creator can't link it to your address" : null,
   ].filter(Boolean).join("  ·  ");
   const banner = (() => {
-    if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it.` } as const;
+    if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it. If that link was wrong, Remove the form, then open the right one.` } as const;
     if (f.needsLink) return { tone: "warn", text: "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it." } as const;
     if (f.contested && !f.mine && f.pinnedCreator !== f.creator) return { tone: "warn", text: "Two different people published a form with this id. Open it from the creator's own link to answer - your answers are only ever sealed to the creator that link names." } as const;
     if (f.mySubmitted) return { tone: "ok", text: (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed ? "Your answers were received - the creator sent you a receipt." : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.") } as const;
@@ -667,6 +668,12 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
             if (f.hidden) { client.unhideForm(id); toast("Back in your lists"); }
             else { client.hideForm(id); toast("Hidden - find it under Hidden on the home screen"); pop(); }
           }} />
+          {!f.mine && !f.coOwner ? <Btn label={armRemove ? "Really remove?" : "Remove"} onPress={() => {
+            // drops the form and its creator pin from this device, so the right link can be opened
+            // (open-review 2026-11-02, FR-13: a wrong link's pin couldn't be undone in the app)
+            if (!armRemove) { setArmRemove(true); return; }
+            client.forgetForm(id); toast("Removed from this device - open the creator's link to add it again"); pop();
+          }} /> : null}
           <Btn label="Share" onPress={() => push({ k: "share", id })} />
         </View>
       } />

@@ -274,6 +274,31 @@ From 0.5.3 (open-review 2026-11-01, the 0.5.2 re-review):
 - **Sealed answers:** `encryptedPayload` is lower-case hex of whole bytes (FR-10).
 - **Device id:** 1-64 of `[A-Za-z0-9_-]` (FR-11).
 
+From 0.5.4 (open-review 2026-11-02, the 0.5.3 re-review):
+- **Budgets:** besides answers, a node takes at most 600 signed events from the network at once,
+  then 10 a second (`admDropBudget`), and at most 120 catch-up frames a minute (`ctlDropBudget`).
+  Every copy of an event costs, a replayed one too (FR-2, FR-4, FR-6).
+- **Catch-up frames:** an `fp` frame has at most 16 ranges, its bounds strictly increasing inside
+  `(lo, hi]`, or it is ignored (`rxBad`). A reply serves at most 100 events and asks for at most
+  500 ids; the rest follows on the next round. Messages are unchanged on the wire
+  (`whisperbox_rbsr.hpp`, checked against `logos_sync/catchup.hpp`) (FR-4).
+- **Signatures** are verified once, at admission and when the log is loaded; the fold doesn't
+  verify again (FR-2).
+- **Snapshot:** `state.forms`, `feed`, `closeHlc`, `closedSpans` and `receiptHlc` hold only the
+  forms the device shows: its own, co-owned, answered, opened from a link, hidden, pinned, or
+  with a saved answer draft. Other forms on the topic stay in the fold; `formSummary` still
+  answers for them (FR-5, FR-7).
+- **Receipt ids:** a `confirmationId` over 128 bytes is treated as absent (FR-9).
+- **Local events** pass `wellFormedEvent` or are neither stored nor sent: an answer over the
+  256 KiB event cap is refused with an error (FR-9, FR-10).
+- **Form ids** match `^[a-z0-9][a-z0-9._:-]{0,127}$` on creation, as in links (FR-11).
+- **Inner signature text:** `whisperbox-inner-v1|` + `JSON.stringify` of
+  `{formId, respondent, submittedAt, answers}`, numbers as JavaScript prints them (`1e-7`,
+  `100000000000000000000`); the desktop used nlohmann's format (FR-12). Signed-event `cjson` uses
+  the same number format.
+- **Network time:** a copy received again may still move an answer's time earlier, within the
+  5-minute window (FR-6, accepted).
+
 **Trust boundary.** The host (Basecamp, logosctl) gives a module no caller identity. Any module or
 view installed in the same Basecamp can call `whisperbox_core`: read decrypted answers
 (`getDecryptedResponses`, `snapshot`, `exportCsv`), import an identity, or act as the user. Install
