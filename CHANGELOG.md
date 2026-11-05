@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.5 desktop core + view, Android 0.5.5 (2026-11-05) - open-review fixes, round 5
+
+From the open-review report on 0.5.4 (https://or.vpavlin.xyz/whisperbox-logos-3915b2592feb-full/),
+which confirmed the published linux-amd64 package now matches a rebuild. Tests: the e2e
+"open-review 2026-11-03" block, `packages/client/test/round5.test.mjs` and the QML scenarios
+`detail-*`, `locked`, `import-ask`:
+- **FR-1 (High):** a signed event replaced by an earlier copy is charged for its size against the
+  log cap (a small event replaced by a large one used to grow the log past the cap); a held answer
+  is never replaced.
+- **FR-2 (High):** the snapshot, which is also the `stateChanged` event any Basecamp module can
+  receive, no longer carries decrypted content. The view gets answers, my answers, my replies, quiz
+  keys and answer drafts from the new `formDetail(formId)` for the form it shows. A module calling
+  the methods directly still gets what the user would (Basecamp gives no caller identity).
+- **FR-5 (High):** the log is no longer rewritten on every flush: events are appended to
+  `events.journal`, folded into `events.json` when the journal outgrows the base.
+- **FR-13 (High):** an optional passphrase (Identity) seals the key and the saved answers
+  (`my_answers.json`, `drafts.json`) on disk; WhisperBox then starts locked and asks for it. Off by
+  default.
+- **FR-3 (Medium):** an answer with no network time that this device first saw while the form was
+  closed doesn't count, whatever time it claims. Close-at dates still use the answer's own time
+  when there is no network time (see SPEC).
+- **FR-4 (Medium):** importing an identity keeps the previous key as `identity.json.prev` and asks
+  once more, naming the address it replaces.
+- **FR-11 (Medium):** pending events for unknown forms are counted in the snapshot, not listed.
+- **FR-12 (Medium):** quiz scores are computed for the form being viewed only, with questions
+  parsed once and each answer's score cached.
+- **FR-6 (Low):** the event budget is taken before a signature is verified, and a duplicate isn't
+  verified again.
+- **FR-7 (Low):** automatic receipts only on your own forms; "Remove" keeps your own answers; a
+  deleted draft goes to a trash (the last 20).
+- **FR-8 (Low):** documented: `formSummary` answers for any form on the topic (public data).
+- **FR-9 (Low):** "Delete draft" asks once more; opening the same template again reuses its draft;
+  the Import warning no longer mentions a missing export.
+- **FR-10 (Low):** this entry and the code comments describe what changed; the tests above check it.
+- **FR-14 (Low):** drafts (200, 16 MiB), answer drafts (1000), opened and hidden forms (10,000) are
+  bounded, and answer drafts are saved once per flush, not per keystroke.
+
 ## 0.5.4 desktop core + view, Android 0.5.4 (2026-11-03) - open-review fixes, round 4
 
 From the open-review report on 0.5.3 (https://or.vpavlin.xyz/whisperbox-logos-5727d23c4fad-full/).

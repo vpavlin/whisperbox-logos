@@ -120,7 +120,7 @@ Item {
         if (s.charAt(0) !== "{") return null;
         try { return JSON.parse(s); } catch (e) { return null; }
     }
-    function applySnapshot(o) { if (o && o.state) { root.st = o; Qt.callLater(root.checkSeen); } }
+    function applySnapshot(o) { if (o && o.state) { root.st = o; Qt.callLater(root.checkSeen); Qt.callLater(root.loadDetail); } }
     // Looking at your own form = its answers are seen (clears the "N new" pill).
     property bool seenBusy: false
     function selectCappedForSeen() {   // (harness) open the first own form that has new answers
@@ -144,7 +144,7 @@ Item {
         root.refreshBusy = true; root.refreshSince = Date.now();
         callVia("snapshot", [], function (raw) {
             var o = parse(raw);
-            if (o && o.state) { root.st = o; root.refreshMisses = 0; } else root.refreshMisses++;
+            if (o && o.state) { root.st = o; root.refreshMisses = 0; Qt.callLater(root.loadDetail); } else root.refreshMisses++;
             root.refreshBusy = false;
             if (root.refreshAgain) { root.refreshAgain = false; refresh(); }
         });
@@ -183,7 +183,31 @@ Item {
     readonly property bool nodeReady: !!st.nodeReady
     // Preview: the builder's form shown as respondents see it (never sent).
     property var previewDef: null
-    readonly property var sel: previewDef ? previewDef : (forms[selectedId] || null)
+    readonly property var sel: previewDef ? previewDef : withDetail(forms[selectedId] || null)
+    // The selected form's private parts (answers, my answers, my replies, quiz key, answer draft) come
+    // from formDetail, not the snapshot: the snapshot is also the stateChanged event any module can
+    // receive (open-review 2026-11-03, FR-2).
+    property var detail: ({})
+    function withDetail(f) {
+        if (!f || root.detail.formId !== f.id) return f;
+        var o = Object.assign({}, f), ks = ["myAnswers", "myReplies", "quiz", "answerDraft"];
+        for (var i = 0; i < ks.length; i++) if (root.detail[ks[i]] !== undefined) o[ks[i]] = root.detail[ks[i]];
+        return o;
+    }
+    property bool detailBusy: false
+    function loadDetail() {
+        var id = root.selectedId;
+        if (!id || root.previewDef || root.detailBusy) return;
+        root.detailBusy = true;
+        callVia("formDetail", [id], function (raw) {
+            root.detailBusy = false;
+            var r = parse(raw);
+            if (!r || !r.ok || r.formId !== root.selectedId) return;
+            var first = root.detail.formId !== r.formId;
+            root.detail = r;
+            if (first) restoreAnswerDraft();
+        });
+    }
     readonly property bool selPending: !sel && selectedId !== "" && pendingForms.indexOf(selectedId) >= 0
     readonly property var selResponses: responsesFor(selectedId)
     readonly property int selConfirmed: { var n = 0; for (var i = 0; i < selResponses.length; i++) if (selResponses[i].confirmed) n++; return n; }
@@ -258,7 +282,8 @@ Item {
         return out;
     }
     function responsesFor(fid) {
-        if (!creatorView || !creatorView.responses || !creatorView.responses[fid]) return [];
+        if (root.detail.formId === fid && root.detail.responses) return root.detail.responses;   // with answers (formDetail)
+        if (!creatorView || !creatorView.responses || !creatorView.responses[fid]) return [];   // counts and receipt state only
         return creatorView.responses[fid];
     }
     // Arrays from the host/model can be sequence wrappers (Array.isArray false).
@@ -338,14 +363,18 @@ Item {
     // ── actions ──
     function selectForm(id) {
         if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); }   // flush the form we're leaving
+        if (root.selectedId !== id) { root.detail = ({}); root.answers = ({}); }
         root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = ""; root.editing = false;
         Qt.callLater(root.checkSeen);
         restoreAnswerDraft();
+        Qt.callLater(root.loadDetail);
     }
     // Half-filled answers saved while typing come back (crash, restart, switching forms).
     function restoreAnswerDraft() {
-        var f = root.forms[root.selectedId], a = {};
+        var f = root.sel, a = {};
         if (f && f.answerDraft && !f.mySubmitted) for (var i = 0; i < f.answerDraft.length; i++) a[f.answerDraft[i].questionId] = f.answerDraft[i].value;
+        // the draft arrives with formDetail, after the form is selected: keep anything typed meanwhile
+        for (var k in root.answers) if (root.answers.hasOwnProperty(k) && root.answers[k] !== undefined) return;
         root.answers = a;
     }
     function joinForm() {
@@ -516,9 +545,26 @@ Item {
         });
     }
     function resync() { act("resync", [], "Asked peers for missing forms"); }
+    // asks once more, naming the address it replaces; the old key is kept as identity.json.prev
+    // (open-review 2026-11-03, FR-4)
+    property bool confirmImport: false
+    Timer { id: importTimer; interval: 6000; onTriggered: root.confirmImport = false }
     function importKey() {
         var k = String(keyField.text || "").trim().replace(/^0x/, "");
-        act("importIdentity", [k], "Identity imported", function () { keyField.text = ""; });
+        if (!root.confirmImport) { root.confirmImport = true; importTimer.restart(); toast("This replaces " + root.shortAddr(root.myAddress) + " on this device - click Import again to go ahead"); return; }
+        root.confirmImport = false;
+        act("importIdentity", [k], "Identity imported - the previous key is kept as identity.json.prev in the data folder", function () { keyField.text = ""; });
+    }
+    // passphrase over the key and the saved answers (open-review 2026-11-03, FR-13)
+    readonly property bool idProtected: !!(st.identity && st.identity.protected)
+    readonly property var lockedId: st.locked || null
+    function unlockWith(p, done) {
+        act("unlock", [String(p || "")], "Unlocked", function () { if (done) done(); });
+    }
+    function unlockFromField() { unlockWith(unlockField.text, function () { unlockField.text = ""; }); }
+    function setPass(cur, next, again, done) {
+        if (String(next || "") !== String(again || "")) { toast("The new passphrases don't match"); return; }
+        act("setPassphrase", [String(cur || ""), String(next || "")], next ? "Passphrase set - you'll enter it when WhisperBox starts" : "Passphrase removed", function () { if (done) done(); });
     }
 
     // ── create-form builder (drafts autosave; publish now / schedule) ──
@@ -754,6 +800,10 @@ Item {
         if (!b.ok) { toast(b.error); return; }
         var d = { def: b.def };
         if (root.draftId) d.id = root.draftId;
+        else {   // the same form opened again (a template, untouched): reuse its draft, don't add another (FR-9)
+            var same = JSON.stringify(b.def);
+            for (var i = 0; i < root.drafts.length; i++) if (JSON.stringify(root.drafts[i].def) === same) { d.id = root.drafts[i].id; break; }
+        }
         if (publishAt) d.publishAt = publishAt;
         callVia("saveDraft", [JSON.stringify(d)], function (raw) {
             // callVia hands back the RAW string: parse it (reading .ok on the string made every
@@ -782,7 +832,12 @@ Item {
         toast("Deleted " + root.plural(ids.length, "draft", "drafts"));
     }
     Timer { id: clearDraftsTimer; interval: 4000; onTriggered: root.confirmClearDrafts = false }
+    // asks once more (open-review 2026-11-03, FR-9); a deleted draft is kept in the core's trash
+    property bool confirmDiscard: false
+    Timer { id: discardTimer; interval: 4000; onTriggered: root.confirmDiscard = false }
     function discardDraft() {
+        if (!root.confirmDiscard) { root.confirmDiscard = true; discardTimer.restart(); toast("Click Delete draft again to delete it"); return; }
+        root.confirmDiscard = false;
         if (root.draftId) act("deleteDraft", [root.draftId], "Draft deleted");
         root.draftDirty = false; root.showCreate = false;
     }
@@ -2133,6 +2188,42 @@ Item {
             }
             Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
                 text: "Give this to a form's creator to become a co-owner: you'll be able to read that form's answers." }
+            SectionLabel { text: "PASSPHRASE" }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
+                text: root.idProtected
+                      ? "Your key and saved answers are sealed with a passphrase. WhisperBox asks for it when it starts."
+                      : "Optional: seal your key and saved answers with a passphrase, so other apps running as you can't read them. WhisperBox then asks for it when it starts. A forgotten passphrase can't be recovered." }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                InputBox {
+                    Layout.fillWidth: true
+                    visible: root.idProtected
+                    implicitHeight: 38
+                    TextField { id: passCur; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 12; echoMode: TextInput.Password; background: null; placeholderText: "current passphrase" }
+                }
+                InputBox {
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    TextField { id: passNew; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 12; echoMode: TextInput.Password; background: null; placeholderText: "new passphrase (8+ characters)" }
+                }
+                InputBox {
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    TextField { id: passAgain; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 12; echoMode: TextInput.Password; background: null; placeholderText: "again" }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                WbButton { visible: root.idProtected; label: "Remove passphrase"; enabled: !root.busy("setPassphrase")
+                           onClicked: root.setPass(passCur.text, "", "", function () { passCur.text = ""; }) }
+                WbButton { label: root.idProtected ? "Change passphrase" : "Set passphrase"; enabled: !root.busy("setPassphrase") && String(passNew.text || "").length >= 8
+                           onClicked: root.setPass(passCur.text, passNew.text, passAgain.text, function () { passCur.text = ""; passNew.text = ""; passAgain.text = ""; }) }
+            }
             SectionLabel { text: "NETWORK" }
             GridLayout {
                 columns: 4
@@ -2179,20 +2270,47 @@ Item {
                         placeholderText: "64-hex private key"
                     }
                 }
-                WbButton { label: "Import"; active: String(keyField.text || "").length >= 64; onClicked: root.importKey() }
+                WbButton { label: root.confirmImport ? "Really import?" : "Import"; active: String(keyField.text || "").length >= 64; onClicked: root.importKey() }
             }
             Text { textFormat: Text.PlainText;
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 color: root.wbWarning
-                text: "Importing replaces this device's key. Forms you created with the current key can only be decrypted with it - export it first if you need it."
+                text: "Importing replaces this device's key. Forms you created with the current key can only be decrypted with it: the current key is kept as identity.json.prev in the data folder."
             }
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Done"; onClicked: root.showIdentity = false }
             }
+        }
+    }
+
+    // ── Locked: a passphrase-protected identity (open-review 2026-11-03, FR-13) ──
+    Rectangle {
+        visible: !!root.lockedId
+        z: 30
+        anchors.fill: parent
+        color: root.wbBg
+        MouseArea { anchors.fill: parent }
+        ColumnLayout {
+            anchors.centerIn: parent
+            width: Math.min(420, parent.width - 48)
+            spacing: 12
+            LockIcon { Layout.alignment: Qt.AlignHCenter }
+            Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignHCenter; text: "WhisperBox is locked"; font.pixelSize: 20; font.weight: Font.Bold; color: root.wbText }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                text: "Your key (" + root.shortAddr(root.lockedId ? root.lockedId.address : "") + ") is sealed with a passphrase. Until you unlock, WhisperBox doesn't send, receive or open answers." }
+            InputBox {
+                Layout.fillWidth: true
+                implicitHeight: 40
+                TextField { id: unlockField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
+                            font.pixelSize: 13; echoMode: TextInput.Password; background: null; placeholderText: "passphrase"
+                            onAccepted: root.unlockFromField() }
+            }
+            WbButton { Layout.alignment: Qt.AlignHCenter; label: "Unlock"; enabled: !root.busy("unlock") && String(unlockField.text || "").length > 0
+                       onClicked: root.unlockFromField() }
         }
     }
 
@@ -2633,7 +2751,7 @@ Item {
 
             RowLayout {
                 Layout.fillWidth: true
-                WbButton { visible: !!root.draftId && !root.editingFormId; label: "Delete draft"; danger: true; onClicked: root.discardDraft() }
+                WbButton { visible: !!root.draftId && !root.editingFormId; label: root.confirmDiscard ? "Really delete?" : "Delete draft"; danger: true; onClicked: root.discardDraft() }
                 Item { Layout.fillWidth: true }
                 WbButton { label: "Close"; onClicked: root.closeBuilder() }
                 WbButton { label: "Preview"; onClicked: root.openPreview() }

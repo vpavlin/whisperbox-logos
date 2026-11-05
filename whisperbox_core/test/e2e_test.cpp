@@ -28,6 +28,7 @@
 #include "whisperbox_identity.hpp"
 #include "whisperbox_wire.hpp"
 #include "whisperbox_rbsr.hpp"
+#include "whisperbox_vault.hpp"
 #define private public
 #define protected public
 #include "whisperbox_core_impl.h"
@@ -83,9 +84,22 @@ struct Peer {
     json call(const std::string& r) { return json::parse(r); }
 };
 
+// The log on disk: events.json (base) + events.journal (appended lines, 0.5.5 FR-5), merged.
+static json readLog(const std::string& dir) {
+    std::vector<json> all;
+    { std::ifstream f(dir + "/events.json"); json a = json::parse(f, nullptr, false); if (a.is_array()) for (auto& e : a) all.push_back(e); }
+    { std::ifstream j(dir + "/events.journal"); std::string line; while (std::getline(j, line)) { json e = json::parse(line, nullptr, false); if (e.is_object()) all.push_back(e); } }
+    std::vector<std::vector<json>> logs{all};
+    return json(whisperbox::mergeWhisperbox(logs));
+}
+// replace a stopped peer's log: the base only, no journal
+static void writeLog(const std::string& dir, const json& log) {
+    std::ofstream(dir + "/events.json", std::ios::trunc) << log.dump();
+    std::error_code ec; std::filesystem::remove(dir + "/events.journal", ec);
+}
 // the sealed answers a peer keeps on disk (the snapshot only counts them, FR-3)
 static json sealedPool(Peer& p) {
-    std::ifstream f(p.dir + "/events.json"); json a = json::parse(f, nullptr, false), out = json::array();
+    json a = readLog(p.dir), out = json::array();
     if (a.is_array()) for (const auto& e : a) if (e.value("type", "") == "response.submit") out.push_back(e);
     return out;
 }
@@ -119,7 +133,12 @@ static bool hasForm(Peer& p, const std::string& fid) {
 // on a null (open-review FR-12)
 static json formOf(Peer& p, const std::string& fid) {
     json forms = p.snap()["state"]["forms"];
-    if (forms.is_object() && forms.contains(fid) && forms[fid].is_object()) return forms[fid];
+    if (forms.is_object() && forms.contains(fid) && forms[fid].is_object()) {
+        // with its private parts, as the view gets them from formDetail (0.5.5, FR-2)
+        json f = forms[fid], d = json::parse(p.core->formDetail(fid));
+        for (const char* k : {"myAnswers", "myReplies", "quiz", "answerDraft"}) if (d.contains(k)) f[k] = d[k];
+        return f;
+    }
     json fo = foldOf(p)["forms"];
     return fo.is_object() && fo.contains(fid) && fo[fid].is_object() ? fo[fid] : json::object();
 }
@@ -129,10 +148,10 @@ static void openLink(Peer& p, const std::string& fid) {
     const std::string c = formOf(p, fid).value("creator", "");
     if (!c.empty()) p.call(p.core->importForm("whisperbox://form?id=" + fid + "&by=" + c));
 }
+// the creator's / co-owner's answers to a form, as the view gets them (formDetail, 0.5.5 FR-2)
 static json responsesOf(Peer& p, const std::string& fid) {
-    json s = p.snap();
-    if (s["creatorView"].is_null() || !s["creatorView"]["responses"].contains(fid)) return json::array();
-    return s["creatorView"]["responses"][fid];
+    json d = json::parse(p.core->formDetail(fid));
+    return d.value("ok", false) && d.contains("responses") ? d["responses"] : json::array();
 }
 
 int main(int argc, char** argv) {
@@ -358,7 +377,7 @@ int main(int argc, char** argv) {
         FakeBus::get().nodes.push_back(&old);
         json req = {{"v", 1}, {"type", "SYNC_REQ"}, {"from", "legacy"}};
         FakeBus::get().relay(&old, whisperbox::TOPIC, whisperbox::b64encode(req.dump()));
-        size_t want = 0; { json a = json::parse(std::ifstream(A->dir + "/events.json")); want = a.size(); }
+        size_t want = 0; { json a = readLog(A->dir); want = a.size(); }
         CHECK(waitUntil([&] { return got.size() >= want; }, 5000), "legacy peer receives the whole log (" + std::to_string(got.size()) + "/" + std::to_string(want) + ")");
         auto& v = FakeBus::get().nodes; v.erase(std::remove(v.begin(), v.end(), &old), v.end());
     }
@@ -447,7 +466,7 @@ int main(int argc, char** argv) {
     // on-disk repair of a <= 0.1.x log: unsigned import placeholder + bad order
     std::printf("log repair:\n");
     {
-        json events = json::parse(std::ifstream(A->dir + "/events.json"));
+        json events = readLog(A->dir);
         json signedForm;
         for (auto& e : events) if (e.value("id", "") == "form:" + fid) signedForm = e;
         json placeholder = {{"v", 1}, {"id", "form:" + wfid}, {"type", "form.publish"}, {"hlc", {{"wall", 1}, {"ctr", 0}, {"dev", "x"}}},
@@ -455,12 +474,12 @@ int main(int argc, char** argv) {
         json bad = json::array(); bad.push_back(placeholder);
         for (auto it = events.rbegin(); it != events.rend(); ++it) if (it->value("id", "") != "form:" + wfid) bad.push_back(*it);   // reversed
         auto F = mkPeer("F"); F->node->online = false; F->stop();
-        { std::ofstream o(F->dir + "/events.json", std::ios::trunc); o << bad.dump(); }
+        writeLog(F->dir, bad);
         F->start();
         json st = foldOf(*F);
         CHECK(!st["forms"].contains(wfid), "unsigned placeholder dropped on load");
         CHECK(st["forms"].contains(fid) && !st["forms"][fid]["questions"].empty(), "signed forms kept");
-        json ev2 = json::parse(std::ifstream(F->dir + "/events.json"));
+        json ev2 = readLog(F->dir);
         bool sorted = true;
         for (size_t k = 1; k < ev2.size(); ++k) if (whisperbox::totalOrder(ev2[k - 1], ev2[k]) > 0) sorted = false;
         CHECK(sorted, "repaired log is HLC-sorted on disk");
@@ -640,7 +659,7 @@ int main(int argc, char** argv) {
             openLink(*B, an);
             CHECK(!B->call(B->core->submitResponse(an, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", true), "still one answer per person");
             CHECK(A->call(A->core->confirmResponse(an, who)).value("ok", false) && waitUntil([&] { return formOf(*B, an).value("myConfirmed", false); }, 3000), "receipts still reach B");
-            std::ifstream evf(B->dir + "/events.json"); json evs = json::parse(evf);
+            json evs = readLog(B->dir);
             std::string devB = B->snap()["deviceId"]; bool leaked = false;
             for (auto& ev : evs) if (ev.value("type", "") == "response.submit" && (ev.value("dev", "") == devB || ev["hlc"].value("dev", "") == devB)) leaked = true;
             CHECK(!leaked, "no answer event carries the respondent's real device id");
@@ -759,8 +778,8 @@ int main(int argc, char** argv) {
         K->stop();
         std::string fakeHome = g_base + "/home-h";
         std::filesystem::create_directories(fakeHome + "/.whisperbox-core");
-        for (const char* fn : {"identity.json", "device_id.txt", "events.json"})
-            std::filesystem::copy_file(dirH + "/" + fn, fakeHome + "/.whisperbox-core/" + fn, std::filesystem::copy_options::overwrite_existing);
+        for (const char* fn : {"identity.json", "device_id.txt", "events.json", "events.journal"})
+            if (std::filesystem::exists(dirH + "/" + fn)) std::filesystem::copy_file(dirH + "/" + fn, fakeHome + "/.whisperbox-core/" + fn, std::filesystem::copy_options::overwrite_existing);
         std::string savedData = std::getenv("WHISPERBOX_CORE_DATA") ? std::getenv("WHISPERBOX_CORE_DATA") : "";
         std::string savedHome = std::getenv("HOME") ? std::getenv("HOME") : "";
         std::string pwHome = g_base + "/pw-home";                 // the user-database home (empty)
@@ -838,7 +857,7 @@ int main(int argc, char** argv) {
         CHECK(true, "A and B survive every malformed frame");   // an abort would have ended the run
         CHECK(diag(*A, "admDropShape") > shape0, "malformed events are dropped at admission (" + std::to_string(diag(*A, "admDropShape") - shape0) + ")");
         CHECK(diag(*A, "rxBad") > bad0, "malformed catch-up / SYNC_REQ frames are counted, not processed");
-        std::string onDisk; { std::ifstream f(A->dir + "/events.json"); onDisk.assign(std::istreambuf_iterator<char>(f), {}); }
+        std::string onDisk; for (const char* fn : {"/events.json", "/events.journal"}) { std::ifstream f(A->dir + fn); onDisk.append(std::istreambuf_iterator<char>(f), {}); }
         CHECK(onDisk.find("resp:bad") == std::string::npos && onDisk.find("form:bad") == std::string::npos && onDisk.find("resp:shadow") == std::string::npos,
               "nothing malformed reaches events.json (no poisoned restart)");
         // a far-future clock is refused and never adopted (WB-3)
@@ -857,16 +876,16 @@ int main(int argc, char** argv) {
         // a log poisoned by an older version heals on start (WB-1, persisted)
         {
             auto P = mkPeer("P"); P->node->online = false; P->stop();
-            json log = json::parse(std::ifstream(A->dir + "/events.json"));
+            json log = readLog(A->dir);
             log.push_back(json::parse(R"({"v":1,"id":"resp:bad","type":"response.submit","hlc":{"wall":1,"ctr":0,"dev":"x"},"dev":"x","payload":{"encryptedPayload":123}})"));
-            { std::ofstream o(P->dir + "/events.json", std::ios::trunc); o << log.dump(); }
+            writeLog(P->dir, log);
             P->start();
             CHECK(P->snap()["diagnostics"].value("loadDropped", 0L) == 1, "a poisoned events.json starts: the bad event is skipped");
             CHECK(std::filesystem::exists(P->dir + "/events.bad.json"), "...and kept aside in events.bad.json");
             CHECK(!foldOf(*P)["forms"].empty(), "...the good events load");
         }
         // answer tags are random, not derived from the public device id (WB-5)
-        json logA = json::parse(std::ifstream(A->dir + "/events.json"));
+        json logA = readLog(A->dir);
         bool derived = false; int resp = 0;
         for (const auto& e : logA) if (e.value("type", "") == "response.submit") { resp++; if (e.value("dev", "") == whisperbox::responseDevTag(devB, fid)) derived = true; }
         CHECK(resp > 0 && !derived, "B's answer tag isn't sha256(deviceId|formId)");
@@ -997,10 +1016,10 @@ int main(int argc, char** argv) {
             const std::string ff = fc.value("formId", "");
             A->stop();
             {
-                std::ifstream in(A->dir + "/events.json"); json log = json::parse(in);
+                json log = readLog(A->dir);
                 log.push_back({{"v", 1}, {"id", "close:" + ff + ":forged"}, {"type", "form.close"}, {"hlc", {{"wall", now + 1000}, {"ctr", 0}, {"dev", "x"}}},
                                {"dev", "x"}, {"payload", {{"formId", ff}, {"author", addrA}}}});
-                std::ofstream(A->dir + "/events.json", std::ios::trunc) << log.dump();
+                writeLog(A->dir, log);
             }
             A->start(); pump(200);
             CHECK(formOf(*A, ff).value("status", "") == "open" && diag(*A, "loadDropped") >= 1, "an unsigned close in events.json is dropped at load, the form stays open (FR-7)");
@@ -1050,11 +1069,11 @@ int main(int argc, char** argv) {
             // FR-6: a form.publish with a forged signature in events.json is dropped at load
             A->stop();
             {
-                std::ifstream in(A->dir + "/events.json"); json log = json::parse(in);
+                json log = readLog(A->dir);
                 json forged = yp; forged["id"] = "fr6-forged"; forged["maxResponses"] = 5; forged["editWindowMinutes"] = 15; forged["creator"] = addrA;
                 log.push_back({{"v", 1}, {"id", "form:fr6-forged"}, {"type", "form.publish"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "y"}}}, {"dev", "y"},
                                {"payload", forged}, {"pub", y.pubHex}, {"sig", std::string(128, '1')}});
-                std::ofstream(A->dir + "/events.json", std::ios::trunc) << log.dump();
+                writeLog(A->dir, log);
             }
             A->start(); pump(200);
             CHECK(!A->snap()["state"]["forms"].contains("fr6-forged"), "a form.publish with a forged signature in events.json is dropped at load (FR-6)");
@@ -1319,6 +1338,136 @@ int main(int argc, char** argv) {
                 R->core->fakeStart();
                 CHECK(waitUntil([&] { return R->snap().value("nodeReady", false); }, 15000), "a failed start is retried and connects (FR-14)");
                 CHECK(R->snap()["diagnostics"].value("startFailures", -1L) == 0, "...and the failure count resets");
+            }
+        }
+        // ── open-review 2026-11-03 (0.5.4 re-review, 0.5.5: FR-1..14) ──
+        {
+            CHECK(waitUntil([&] { return A->snap().value("nodeReady", false); }, 5000), "A is on the topic (5)");
+            const long long now = (long long)QDateTime::currentMSecsSinceEpoch();
+            auto sealTo = [](const std::string& pub, const std::string& pt) { return whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end()))); };
+            auto respEvAt = [&](const std::string& hex, long long wall) {
+                return json({{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", wall}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}});
+            };
+            auto toPeer = [&](Peer& p, const json& ev, long long tsNs = 0) { p.node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())), tsNs); };
+            whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'r', '5'}));
+            auto mkForm = [&](const std::string& title) {
+                return A->call(A->core->createForm(json({{"title", title}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump())).value("formId", "");
+            };
+
+            // FR-1: a signed event replaced by a larger, earlier copy is charged for what it adds
+            {
+                json small = {{"v", 1}, {"id", "update:ghost5:n"}, {"type", "form.update"}, {"hlc", {{"wall", now}, {"ctr", 9}, {"dev", "z"}}}, {"dev", "z"},
+                              {"payload", {{"formId", "ghost5"}, {"author", z.address}, {"form", {{"title", "s"}}}}}};
+                whisperbox::signEventJson(small, z);
+                json big = small; big.erase("sig"); big.erase("pub");
+                big["hlc"]["ctr"] = 1; big["payload"]["form"]["title"] = std::string(100000, 'L');
+                whisperbox::signEventJson(big, z);
+                toPeer(*B, small); pump(100); toPeer(*B, big); pump(400);
+                size_t sum = 0; bool hasBig = false;
+                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); for (const auto& e : B->core->m_log) { sum += e.dump().size(); if (e.dump().size() > 100000) hasBig = true; } }
+                CHECK(hasBig && B->core->m_logBytes == sum, "a small signed event replaced by a large earlier copy is charged its full size (FR-1)");
+            }
+
+            // FR-5: received events go to the journal, not a rewrite of events.json
+            {
+                std::error_code ec;
+                auto base0 = std::filesystem::last_write_time(B->dir + "/events.json", ec);
+                const std::string fid5 = mkForm("journal");
+                CHECK(waitUntil([&] { return hasForm(*B, fid5); }, 3000), "a form reaches B");
+                pump(400);
+                std::string jr; { std::ifstream j(B->dir + "/events.journal"); jr.assign(std::istreambuf_iterator<char>(j), {}); }
+                auto base1 = std::filesystem::last_write_time(B->dir + "/events.json", ec);
+                CHECK(jr.find("form:" + fid5) != std::string::npos && base0 == base1, "it is appended to events.journal; events.json is not rewritten (FR-5)");
+                B->stop(); B->start();
+                CHECK(hasForm(*B, fid5), "...and loads back from base + journal after a restart");
+                CHECK(waitUntil([&] { return B->snap().value("nodeReady", false); }, 5000), "B is back");
+            }
+
+            // FR-2: the snapshot (and so stateChanged) carries no decrypted content
+            {
+                const std::string fid5 = mkForm("private");
+                CHECK(waitUntil([&] { return hasForm(*B, fid5); }, 3000), "private form syncs");
+                openLink(*B, fid5);
+                CHECK(B->call(B->core->submitResponse(fid5, json::array({{{"questionId", "q"}, {"value", "SECRET-5"}}}).dump())).value("ok", false), "B answers");
+                // B just restarted and serves A the earlier flood answers: A's answer budget may delay this one to a later catch-up round
+                CHECK(waitUntil([&] { return responsesOf(*A, fid5).size() == 1; }, 40000), "A opens it");
+                const std::string sa = A->core->snapshot(), sb = B->core->snapshot();
+                CHECK(sa.find("SECRET-5") == std::string::npos && sb.find("SECRET-5") == std::string::npos, "neither snapshot carries the answer text (FR-2)");
+                CHECK(responsesOf(*A, fid5)[0]["answers"].dump().find("SECRET-5") != std::string::npos && formOf(*B, fid5)["myAnswers"].dump().find("SECRET-5") != std::string::npos,
+                      "...formDetail does, for the creator and for the respondent's own copy");
+            }
+
+            // FR-3: an answer with no network time first seen after the close doesn't count, whatever its HLC
+            {
+                const std::string fid5 = mkForm("late");
+                const std::string pub = formOf(*A, fid5).value("publicKey", "");
+                CHECK(A->call(A->core->closeForm(fid5)).value("ok", false), "closed");
+                const std::string pt = R"({"formId":")" + fid5 + R"(","respondent":"0x)" + std::string(40, '3') + R"(","answers":[],"signature":null})";
+                toPeer(*A, respEvAt(sealTo(pub, pt), now - 3600000), 0);   // claims an hour ago, no network time
+                pump(400);
+                CHECK(responsesOf(*A, fid5).empty() && A->snap()["creatorView"]["dropped"]["reasons"].value("form-closed", 0) >= 1, "a backdated answer first seen after the close is dropped (FR-3)");
+            }
+
+            // FR-4: importing an identity keeps the previous key
+            {
+                auto X = mkPeer("X5");
+                const std::string old = X->snap()["identity"].value("address", "");
+                json r = X->call(X->core->importIdentity(whisperbox::toHex(whisperbox::sha256(whisperbox::Bytes{'x', '5'}))));
+                json prev = json::parse(std::ifstream(X->dir + "/identity.json.prev"), nullptr, false);
+                CHECK(r.value("ok", false) && r.value("previousAddress", "") == old && prev.value("address", "") == old, "import keeps the previous key as identity.json.prev (FR-4)");
+
+                // FR-13: a passphrase seals the key and the saved answers
+                CHECK(!X->call(X->core->setPassphrase("", "short")).value("ok", true), "a passphrase has 8+ characters");
+                CHECK(X->call(X->core->setPassphrase("", "correct horse")).value("ok", false), "set a passphrase");
+                X->call(X->core->saveAnswerDraft("some-form", json::array({{{"questionId", "q"}, {"value", "DRAFT-SECRET"}}}).dump()));
+                X->stop(); X->start();
+                std::string idf, drf; { std::ifstream f(X->dir + "/identity.json"); idf.assign(std::istreambuf_iterator<char>(f), {}); } { std::ifstream f(X->dir + "/drafts.json"); drf.assign(std::istreambuf_iterator<char>(f), {}); }
+                const std::string addr = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'x', '5'})).address;
+                CHECK(idf.find("privHex") == std::string::npos && idf.find(whisperbox::toHex(whisperbox::sha256(whisperbox::Bytes{'x', '5'}))) == std::string::npos
+                      && drf.rfind("WBENC1:", 0) == 0 && drf.find("DRAFT-SECRET") == std::string::npos, "identity.json and drafts.json are sealed (FR-13)");
+                json sx = X->snap();
+                CHECK(sx["identity"].is_null() && sx["locked"].value("address", "") == addr, "after a restart it is locked: no identity until unlock");
+                CHECK(!X->call(X->core->unlock("wrong horse")).value("ok", true), "a wrong passphrase is refused");
+                CHECK(X->core->m_answerDrafts.empty(), "...and the sealed answer draft isn't readable before");
+                CHECK(X->call(X->core->unlock("correct horse")).value("address", "") == addr, "the right one unlocks the same identity");
+                CHECK(X->core->m_answerDrafts.count("some-form") && X->core->m_answerDrafts["some-form"].dump().find("DRAFT-SECRET") != std::string::npos, "...and the saved answer draft comes back");
+                CHECK(X->call(X->core->setPassphrase("correct horse", "")).value("ok", false), "remove the passphrase");
+                { std::ifstream f(X->dir + "/identity.json"); idf.assign(std::istreambuf_iterator<char>(f), {}); }
+                CHECK(idf.find("privHex") != std::string::npos, "...back to a plain key file");
+                X->stop();
+            }
+
+            // FR-6: forged signatures cost budget before they are verified
+            {
+                long sig0 = diag(*A, "admDropSig"), bud0 = diag(*A, "admDropBudget");
+                for (int i = 0; i < 800; i++) {
+                    json fe = {{"v", 1}, {"id", "close:forged" + std::to_string(i) + ":n"}, {"type", "form.close"}, {"hlc", {{"wall", now}, {"ctr", i}, {"dev", "z"}}}, {"dev", "z"},
+                               {"payload", {{"formId", "forged" + std::to_string(i)}, {"author", z.address}}}, {"pub", z.pubHex}, {"sig", std::string(128, '1')}};
+                    toPeer(*A, fe);
+                }
+                pump(1500);
+                CHECK(diag(*A, "admDropBudget") > bud0 && diag(*A, "admDropSig") - sig0 < 800, "800 forged signatures: some stopped by the budget before verifying (FR-6)");
+            }
+
+            // FR-7: local mutators
+            CHECK(!A->call(A->core->setAutoReceipts("ghost-form", "1")).value("ok", true), "automatic receipts only on my own form (FR-7)");
+            {
+                json d = A->call(A->core->saveDraft(json({{"def", {{"title", "trash me"}}}}).dump()));
+                CHECK(A->call(A->core->deleteDraft(d.value("draftId", ""))).value("ok", false) && !A->core->m_draftTrash.empty() && A->core->m_draftTrash.back()["def"].value("title", "") == "trash me",
+                      "a deleted draft is kept in the trash (FR-7)");
+            }
+
+            // FR-11: pending events are counted, not listed
+            {
+                json p = A->snap()["state"]["pending"];
+                CHECK(p.value("count", 0) > 0 && p["events"].empty(), "pending ghost events: a count in the snapshot, no list (FR-11)");
+            }
+
+            // FR-14: local lists are bounded
+            {
+                int ok = 0;
+                for (int i = 0; i < 210; i++) if (A->call(A->core->saveDraft(json({{"def", {{"title", "d" + std::to_string(i)}}}}).dump())).value("ok", false)) ok++;
+                CHECK(ok < 210 && A->core->m_drafts.size() <= 200, "drafts stop at 200 (FR-14)");
             }
         }
     }

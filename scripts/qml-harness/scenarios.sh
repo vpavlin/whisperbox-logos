@@ -57,6 +57,23 @@ WB_DUMP=draftQuestions WB_CLICKS="548,449;648,481" run create-chips creator "{}"
 expect 'DUMP draftQuestions \[\{"optionsText":"","required":false,"text":"","type":"radioButtons"\}\]' "chip clicks edit Q1 in place (single choice, now optional) - no phantom question"
 run respondent-done  respondent "{\"selectedId\":\"$LUNCH_B\"}"
 run respondent-form  respondent "{\"selectedId\":\"$LEGACY_B\"}"
+# Since 0.5.5 the snapshot has no answers, my answers, replies, quiz keys or drafts (open-review
+# 2026-11-03, FR-2): the view gets them from formDetail for the selected form.
+export WB_STRIP_PRIVATE=1
+WB_DUMP=selResponses run detail-creator creator "{\"selectedId\":\"$LUNCH_A\"}" "loadDetail"
+expect "CALL whisperbox_core formDetail argc=1 args=$LUNCH_A\$" "the view asks formDetail for the selected form"
+expect 'DUMP selResponses .*"answers"' "the creator's answers come from formDetail, not the snapshot"
+WB_DUMP=sel run detail-respondent respondent "{\"selectedId\":\"$LUNCH_B\"}" "loadDetail"
+expect 'DUMP sel .*"myAnswers"' "my own answers come from formDetail"
+unset WB_STRIP_PRIVATE
+# A passphrase-protected identity: the view asks for it and calls unlock (0.5.5, FR-13)
+export WB_LOCKED=1
+run locked creator "{}" "unlockFromField"
+expect "CALL whisperbox_core unlock argc=1" "locked: Unlock -> unlock(passphrase)"
+unset WB_LOCKED
+# Delete draft and Import identity ask once more (0.5.5, FR-9 / FR-4)
+run import-ask creator "{}" "importKey"
+deny "CALL whisperbox_core importIdentity" "the first Import only asks"
 # Remove from this device (open-review 2026-11-02, FR-13): the first click only asks
 run remove-ask       respondent "{\"selectedId\":\"$LUNCH_B\"}" "removeSelected"
 deny "CALL whisperbox_core deleteLocalForm" "the first Remove only asks"

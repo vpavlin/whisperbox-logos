@@ -565,7 +565,8 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
                                    std::function<json(const std::string&, const std::string&)> open,
                                    std::function<bool(const json&)> verifyResponse = nullptr,
                                    const std::set<std::string>& alsoForms = {},     // forms I co-own
-                                   std::function<long long(const std::string&)> netTime = nullptr) {
+                                   std::function<long long(const std::string&)> netTime = nullptr,
+                                   std::function<long long(const std::string&)> localTime = nullptr) {
     // ADR 0019 (mirror engine.mjs): netTime(eventId) = the earliest Logos Delivery timestamp (ms)
     // seen for that answer, <= 0 = none. With it, close/expiry/cap/edit rules use the network's
     // time; an answer with none keeps its HLC and is marked timeVerified:false.
@@ -649,11 +650,19 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
         auto& answers = respArrs[formId];
         auto si = spansIdx.find(formId);
         const OrderedJson* spans = si == spansIdx.end() ? nullptr : si->second;
+        // An answer with no network time is judged by the HLC its sender chose, so it could be
+        // backdated past a close. localTime(id) = when THIS device first saw it (> 0 if known): one
+        // first seen while the form was closed doesn't count, whatever it claims (open-review
+        // 2026-11-03, FR-3; mirror engine.mjs). The close times are the creator's signed HLCs.
+        const long long seenAt = (!w.net && localTime && blob.contains("id") && blob["id"].is_string()) ? localTime(blob["id"].template get<std::string>()) : 0;
+        auto wallOf = [](const OrderedJson& h) -> long long { return h.is_object() && h.contains("wall") && h["wall"].is_number() ? h["wall"].template get<long long>() : 0LL; };
         if (spans && !spans->empty()) {
             // sealed while the form was closed - any closed period, even if re-opened since
             bool inClosed = false;
-            for (const auto& s : *spans)
+            for (const auto& s : *spans) {
                 if (atOrAfter(w, blob, s["from"]) && (s["to"].is_null() || !atOrAfter(w, blob, s["to"]))) { inClosed = true; break; }
+                if (seenAt > 0 && seenAt >= wallOf(s["from"]) && (s["to"].is_null() || seenAt < wallOf(s["to"]))) { inClosed = true; break; }
+            }
             if (inClosed) { drop(dropped, "form-closed"); continue; }
         } else if (f["status"].get<std::string>() == "closed") {
             // Closed-form drop: blob's HLC after the close event's HLC. Cross-device
@@ -661,7 +670,7 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
             bool afterClose = true;
             auto ci = closeIdx.find(formId);
             if (ci != closeIdx.end())
-                afterClose = atOrAfter(w, blob, *ci->second);
+                afterClose = atOrAfter(w, blob, *ci->second) || (seenAt > 0 && seenAt >= wallOf(*ci->second));
             else afterClose = true;   // no close hlc recorded → treat as closed
             if (afterClose) { drop(dropped, "form-closed"); continue; }
         }

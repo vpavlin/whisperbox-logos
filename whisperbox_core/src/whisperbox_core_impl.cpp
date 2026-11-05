@@ -67,6 +67,9 @@ static constexpr size_t kMaxLocalJson = 4u << 20;   // a definition or answers f
 static constexpr size_t kMaxLogResponses = 50000;
 static constexpr size_t kMaxLogBytes = size_t(256) << 20;
 static constexpr size_t kLogReserveBytes = size_t(32) << 20;
+// Local lists any module can add to: bounded (open-review 2026-11-03, FR-14)
+static constexpr size_t kMaxDrafts = 200, kMaxAnswerDrafts = 1000, kMaxWatched = 10000, kMaxHidden = 10000, kMaxDraftTrash = 20;
+static constexpr size_t kMaxDraftsBytes = size_t(16) << 20;
 // Our own persisted files get the same depth limit as the network (a corrupt or planted 50k-deep
 // drafts.json used to overflow the parser on every start): a generous size, throws when unreadable
 // (open-review 2026-11-01, FR-11).
@@ -179,8 +182,10 @@ WhisperboxCoreImpl::~WhisperboxCoreImpl() {
     // Parentless QTimer (LogosModuleContext is NOT a QObject in this builder rev)
     // — stop + delete explicitly.
     if (m_flushTimer) { m_flushTimer->stop(); delete m_flushTimer; m_flushTimer = nullptr; }
-    if (m_logDirty) saveLog();   // received events not saved yet
+    if (m_logDirty || !m_journalPending.empty()) flushLog();   // received events not saved yet
     if (m_netDirty) saveNetTimes();
+    if (m_firstDirty) saveFirstSeen();
+    if (m_draftsDirty) saveDrafts();
     if (m_hubTimer) { m_hubTimer->stop(); delete m_hubTimer; m_hubTimer = nullptr; }
 }
 
@@ -197,8 +202,10 @@ void WhisperboxCoreImpl::scheduleFlush() {
     if (!m_flushTimer->isActive()) m_flushTimer->start();
 }
 void WhisperboxCoreImpl::flushNow() {
-    if (m_logDirty) { m_logDirty = false; saveLog(); }
+    if (m_logDirty) flushLog();
     if (m_netDirty) { m_netDirty = false; saveNetTimes(); }
+    if (m_firstDirty) { m_firstDirty = false; saveFirstSeen(); }
+    if (m_draftsDirty) saveDrafts();
     if (m_publishDirty) { m_publishDirty = false; publishState(); }
 }
 
@@ -358,6 +365,13 @@ void WhisperboxCoreImpl::loadIdentity() {
     if (f) {
         try {
             json o = parseFile(f);
+            if (whisperbox::vault::isSealedIdentity(o)) {
+                // protected by a passphrase: no identity until unlock() (FR-13)
+                m_protected = true; m_locked = true;
+                m_lockedIdentity = o;
+                m_lockedAddress = o.value("address", "");
+                return;
+            }
             m_signId = whisperbox::identityFromPriv(whisperbox::fromHex(o.value("privHex", "")));
             if (m_signId.valid) return;
         } catch (...) { /* unreadable */ }
@@ -375,39 +389,58 @@ void WhisperboxCoreImpl::loadIdentity() {
     fprintf(stderr, "WHISPERBOX new identity %s\n", m_signId.address.c_str());
 }
 void WhisperboxCoreImpl::saveIdentity() {
+    if (m_protected && m_vaultKey.size() == 32) {   // sealed under the passphrase (FR-13)
+        writeAtomic(m_dataDir + "/identity.json", whisperbox::vault::sealIdentity(m_signId.priv, m_signId.address, m_signId.pubHex, m_vaultKey, m_vaultSalt).dump());
+        return;
+    }
     json o = {{"privHex", whisperbox::toHex(m_signId.priv)}, {"pubHex", m_signId.pubHex}, {"address", m_signId.address}};
     writeAtomic(m_dataDir + "/identity.json", o.dump());
 }
 void WhisperboxCoreImpl::loadLog() {
-    std::ifstream f(m_dataDir + "/events.json");
-    if (!f) return;
-    try {
-        // the log is a JSON array of events: two levels more than a frame; no size cap on our own file
-        json a = whisperbox::parseLimited(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()),
-                                          whisperbox::kMaxJsonDepth + 2, std::numeric_limits<size_t>::max());
-        if (a.is_null()) throw std::runtime_error("events.json unreadable or nested too deep");
-        json bad = json::array();
-        // Signed event types are checked again: the fold doesn't verify, admission did, and a log
-        // edited (or restored) on disk could carry an unsigned close, update or co-owner grant
-        // (open-review FR-7). The 0.1.x unsigned form.publish placeholders are repaired below.
-        auto signedType = [](const std::string& t) {
-            return t == FORM_PUBLISH || t == RESPONSE_CONFIRM || t == FORM_CLOSE || t == whisperbox::FORM_REOPEN || t == whisperbox::FORM_UPDATE || t == whisperbox::FORM_COOWNER || t == whisperbox::RESPONSE_REPLY;
-        };
-        if (a.is_array()) for (auto& e : a) {
-            if (whisperbox::wellFormedEvent(e) && (!signedType(e.value("type", "")) || whisperbox::verifyEventJson(e))) m_log.push_back(e);
-            else { bad.push_back(e); m_loadDropped++; }
+    // Signed event types are checked again: the fold doesn't verify, admission did, and a log
+    // edited (or restored) on disk could carry an unsigned close, update or co-owner grant
+    // (open-review FR-7). The 0.1.x unsigned form.publish placeholders are repaired below.
+    auto signedType = [](const std::string& t) {
+        return t == FORM_PUBLISH || t == RESPONSE_CONFIRM || t == FORM_CLOSE || t == whisperbox::FORM_REOPEN || t == whisperbox::FORM_UPDATE || t == whisperbox::FORM_COOWNER || t == whisperbox::RESPONSE_REPLY;
+    };
+    json bad = json::array();
+    auto take = [&](const json& e) {
+        if (whisperbox::wellFormedEvent(e) && (!signedType(e.value("type", "")) || whisperbox::verifyEventJson(e))) m_log.push_back(e);
+        else { bad.push_back(e); m_loadDropped++; }
+    };
+    bool journal = false;
+    {
+        std::ifstream f(m_dataDir + "/events.json");
+        if (f) try {
+            // the log is a JSON array of events: two levels more than a frame; no size cap on our own file
+            json a = whisperbox::parseLimited(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()),
+                                              whisperbox::kMaxJsonDepth + 2, std::numeric_limits<size_t>::max());
+            if (a.is_null()) throw std::runtime_error("events.json unreadable or nested too deep");
+            if (a.is_array()) for (auto& e : a) take(e);
+        } catch (...) {
+            // Never let the next save overwrite it: keep the unreadable file for recovery.
+            f.close();
+            quarantine(m_dataDir + "/events.json");
+            m_log.clear();
         }
-        // A log written before 0.4.3 may hold a peer's malformed event that crashed every start
-        // (WB-1): skip it, and keep it aside rather than losing it.
-        if (!bad.empty()) {
-            fprintf(stderr, "WHISPERBOX skipped %zu malformed events in events.json (kept in events.bad.json)\n", bad.size());
-            writeAtomic(m_dataDir + "/events.bad.json", bad.dump());
+    }
+    {   // the journal: one event per line, appended since the last compaction (FR-5); a torn last
+        // line (a crash mid-write) is skipped
+        std::ifstream j(m_dataDir + "/events.journal");
+        std::string line;
+        while (j && std::getline(j, line)) {
+            journal = true;
+            if (line.empty()) continue;
+            json e = whisperbox::parseLimited(line, whisperbox::kMaxJsonDepth, whisperbox::kMaxEventBytes * 2);
+            if (e.is_null()) { m_loadDropped++; continue; }
+            take(e);
         }
-    } catch (...) {
-        // Never let the next save overwrite it: keep the unreadable file for recovery.
-        f.close();
-        quarantine(m_dataDir + "/events.json");
-        m_log.clear();
+    }
+    // A log written before 0.4.3 may hold a peer's malformed event that crashed every start
+    // (WB-1): skip it, and keep it aside rather than losing it.
+    if (!bad.empty()) {
+        fprintf(stderr, "WHISPERBOX skipped %zu malformed events in the log (kept in events.bad.json)\n", bad.size());
+        writeAtomic(m_dataDir + "/events.bad.json", bad.dump());
     }
     // Repair logs written by <= 0.1.x: (1) drop UNSIGNED form.publish placeholders
     // left by importForm — they shadowed the creator's signed event forever (same
@@ -424,20 +457,51 @@ void WhisperboxCoreImpl::loadLog() {
     bool changed = repaired.size() != before || json(repaired).dump() != json(m_log).dump();
     m_log = std::move(repaired);
     if (changed) { fprintf(stderr, "WHISPERBOX log repaired %zu -> %zu events\n", before, m_log.size()); saveLog(); }
-    else if (m_loadDropped) saveLog();   // the malformed events are in events.bad.json now
+    else if (m_loadDropped || journal) saveLog();   // the malformed events are in events.bad.json; the journal folds into the base
+    else { std::error_code ec; auto n = std::filesystem::file_size(m_dataDir + "/events.json", ec); m_baseBytes = ec ? 0 : (size_t)n; }
     recountLog();
 }
 void WhisperboxCoreImpl::recountLog() {
     m_logGen++;
-    m_logBytes = 0; m_logResponses = 0; m_heldHlc.clear();
+    m_logBytes = 0; m_logResponses = 0; m_heldHlc.clear(); m_heldBytes.clear();
     for (const auto& e : m_log) {
-        m_logBytes += e.dump().size(); if (e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++;
-        m_heldHlc[whisperbox::eventKey(e)] = e.value("hlc", json::object());
+        const size_t n = e.dump().size();
+        m_logBytes += n; if (e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++;
+        const std::string key = whisperbox::eventKey(e);
+        m_heldHlc[key] = e.value("hlc", json::object());
+        m_heldBytes[key] = n;
     }
 }
-void WhisperboxCoreImpl::saveLog() {
+// The log on disk is events.json (the base, rewritten rarely) plus events.journal (one event per line,
+// appended). Every flush used to rewrite the whole log: 1.8 s at 4 MB, 11 s at 84 MB (open-review
+// 2026-11-03, FR-5). The journal is folded into the base once it outgrows max(4 MiB, the base), so
+// rewriting costs O(1) per byte over time. Loading merges both (the merge drops duplicates).
+void WhisperboxCoreImpl::saveLog() {   // compaction: the whole log as the base, an empty journal
     m_logDirty = false;
-    writeAtomic(m_dataDir + "/events.json", json(m_log).dump());
+    m_journalPending.clear();
+    const std::string text = json(m_log).dump();
+    if (writeAtomic(m_dataDir + "/events.json", text)) {
+        m_baseBytes = text.size();
+        std::error_code ec;
+        std::filesystem::remove(m_dataDir + "/events.journal", ec);
+        m_journalBytes = 0;
+    }
+}
+void WhisperboxCoreImpl::flushLog() {
+    m_logDirty = false;
+    if (m_journalPending.empty()) return;
+    const std::string path = m_dataDir + "/events.journal";
+    const bool fresh = !std::filesystem::exists(path);
+    {
+        std::ofstream f(path, std::ios::app | std::ios::binary);
+        if (!f) return;   // kept pending: the next flush tries again
+        if (fresh) { std::error_code ec; std::filesystem::permissions(path, kPrivateFile, std::filesystem::perm_options::replace, ec); }
+        for (const auto& e : m_journalPending) { const std::string line = e.dump() + "\n"; f << line; m_journalBytes += line.size(); }
+        f.flush();
+        if (!f) return;
+    }
+    m_journalPending.clear();
+    if (m_journalBytes > std::max<size_t>(size_t(4) << 20, m_baseBytes)) saveLog();
 }
 void WhisperboxCoreImpl::loadWatched() {
     m_watched.clear();
@@ -478,7 +542,12 @@ void WhisperboxCoreImpl::loadMySubmissions() {
     } catch (...) { /* ignore */ }
 }
 void WhisperboxCoreImpl::loadLocalPrefs() {
-    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_seen.clear(); m_netTimes.clear();
+    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_seen.clear(); m_netTimes.clear(); m_firstSeen.clear();
+    try {
+        std::ifstream fs(m_dataDir + "/firstseen.json");
+        if (fs) { json o = parseFile(fs);
+                  if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) if (it.value().is_number_integer() && it.value().get<long long>() > 0) m_firstSeen[it.key()] = it.value().get<long long>(); }
+    } catch (...) { /* ignore */ }
     try {
         std::ifstream nt(m_dataDir + "/nettime.json");
         if (nt) { json o = parseFile(nt);
@@ -490,22 +559,56 @@ void WhisperboxCoreImpl::loadLocalPrefs() {
                   if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) if (it.value().is_number_integer()) m_seen[lc(it.key())] = it.value().get<long long>(); }
     } catch (...) { /* ignore */ }
     try {
-        std::ifstream d(m_dataDir + "/drafts.json");
-        if (d) { json o = parseFile(d);
-                 if (o.contains("forms") && o["forms"].is_object()) for (auto it = o["forms"].begin(); it != o["forms"].end(); ++it) m_drafts[it.key()] = it.value();
-                 if (o.contains("answers") && o["answers"].is_object()) for (auto it = o["answers"].begin(); it != o["answers"].end(); ++it) m_answerDrafts[lc(it.key())] = it.value();
-                 if (o.contains("autoReceipts") && o["autoReceipts"].is_array()) for (auto& x : o["autoReceipts"]) if (x.is_string()) m_autoReceipts.insert(lc(x.get<std::string>())); }
-    } catch (...) { fprintf(stderr, "WHISPERBOX drafts.json unreadable - starting without drafts\n"); }
-    try {
         std::ifstream h(m_dataDir + "/hidden.json");
         if (h) { json a = parseFile(h);
                  if (a.is_array()) for (auto& x : a) if (x.is_string()) m_hidden.insert(lc(x.get<std::string>())); }
     } catch (...) { /* ignore */ }
+    loadPrivateFiles();
+}
+// my_answers.json and drafts.json: plaintext, or sealed under the identity when a passphrase is set
+// (open-review 2026-11-03, FR-13). Sealed + locked = not read yet (unlock() reads them).
+std::string WhisperboxCoreImpl::readPrivate(const std::string& name, bool& readable) {
+    readable = true;
+    std::ifstream f(m_dataDir + "/" + name);
+    if (!f) return "";
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (!whisperbox::vault::isSealedLocal(text)) return text;
+    if (!m_signId.valid) { readable = false; return ""; }
+    return whisperbox::vault::openLocal(whisperbox::vault::localKey(m_signId.priv), text);
+}
+void WhisperboxCoreImpl::writePrivate(const std::string& name, const std::string& text) {
+    if (m_locked) return;   // nothing loaded yet: never overwrite the sealed file
+    if (m_protected && m_signId.valid) writeAtomic(m_dataDir + "/" + name, whisperbox::vault::sealLocal(whisperbox::vault::localKey(m_signId.priv), text));
+    else writeAtomic(m_dataDir + "/" + name, text);
+}
+void WhisperboxCoreImpl::loadPrivateFiles() {
+    m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_draftTrash.clear();
+    bool ok = true;
     try {
-        std::ifstream m(m_dataDir + "/my_answers.json");
-        if (m) { json o = parseFile(m);
-                 if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) m_myAnswers[lc(it.key())] = it.value(); }
+        std::string t = readPrivate("drafts.json", ok);
+        if (!t.empty()) {
+            json o = whisperbox::parseLimited(t, whisperbox::kMaxJsonDepth + 2, size_t(256) << 20);
+            if (o.is_object()) {
+                if (o.contains("forms") && o["forms"].is_object()) for (auto it = o["forms"].begin(); it != o["forms"].end(); ++it) m_drafts[it.key()] = it.value();
+                if (o.contains("answers") && o["answers"].is_object()) for (auto it = o["answers"].begin(); it != o["answers"].end(); ++it) m_answerDrafts[lc(it.key())] = it.value();
+                if (o.contains("autoReceipts") && o["autoReceipts"].is_array()) for (auto& x : o["autoReceipts"]) if (x.is_string()) m_autoReceipts.insert(lc(x.get<std::string>()));
+                if (o.contains("trash") && o["trash"].is_array()) for (auto& x : o["trash"]) if (x.is_object() && m_draftTrash.size() < kMaxDraftTrash) m_draftTrash.push_back(x);
+            }
+        }
+    } catch (...) { fprintf(stderr, "WHISPERBOX drafts.json unreadable - starting without drafts\n"); }
+    try {
+        std::string t = readPrivate("my_answers.json", ok);
+        if (!t.empty()) {
+            json o = whisperbox::parseLimited(t, whisperbox::kMaxJsonDepth + 2, size_t(256) << 20);
+            if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) m_myAnswers[lc(it.key())] = it.value();
+        }
     } catch (...) { /* ignore */ }
+}
+size_t WhisperboxCoreImpl::draftsBytes() const {
+    size_t n = 0;
+    for (const auto& kv : m_drafts) n += kv.second.dump().size();
+    for (const auto& kv : m_answerDrafts) n += kv.second.dump().size();
+    return n;
 }
 void WhisperboxCoreImpl::saveDrafts() {
     json o = json::object();
@@ -513,7 +616,9 @@ void WhisperboxCoreImpl::saveDrafts() {
     json a = json::object(); for (auto& kv : m_answerDrafts) a[kv.first] = kv.second;
     json r = json::array(); for (auto& id : m_autoReceipts) r.push_back(id);
     o["forms"] = d; o["answers"] = a; o["autoReceipts"] = r;
-    writeAtomic(m_dataDir + "/drafts.json", o.dump());
+    o["trash"] = json(m_draftTrash);
+    m_draftsDirty = false;
+    writePrivate("drafts.json", o.dump());
 }
 void WhisperboxCoreImpl::saveSeen() {
     json o = json::object(); for (auto& kv : m_seen) o[kv.first] = kv.second;
@@ -537,7 +642,7 @@ void WhisperboxCoreImpl::saveHidden() {
 }
 void WhisperboxCoreImpl::saveMyAnswers() {
     json o = json::object(); for (auto& kv : m_myAnswers) o[kv.first] = kv.second;
-    writeAtomic(m_dataDir + "/my_answers.json", o.dump());
+    writePrivate("my_answers.json", o.dump());
 }
 void WhisperboxCoreImpl::saveMySubmissions() {
     json o = json::object();
@@ -555,7 +660,7 @@ void WhisperboxCoreImpl::saveMySubmissions() {
 // them back base64'd once more.
 void WhisperboxCoreImpl::bootstrapDelivery() {
     if (m_nodeReady || m_deliveryStarting) return;
-    if (!m_signId.valid) { setStatus("No identity"); return; }
+    if (!m_signId.valid) { setStatus(m_locked ? "Locked - enter your passphrase" : "No identity"); return; }
     // a failed start is retried, backing off to once a minute (open-review 2026-11-02, FR-14)
     const int64_t backoff = std::min<int64_t>(60000, 5000LL * (1LL << std::min<long>(m_startFailures, 4)));
     if (m_startFailures > 0 && nowMs() - m_lastStartMs < backoff) return;
@@ -751,10 +856,16 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
     if (whisperbox::mergeOne(m_log, e)) {
         m_logGen++;
         const std::string key = whisperbox::eventKey(e);
-        if (!m_heldHlc.count(key)) { m_logBytes += e.dump().size(); if (e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++; }
+        const size_t eBytes = e.dump().size();
+        const size_t oldBytes = m_heldBytes.count(key) ? m_heldBytes[key] : 0;
+        if (!m_heldHlc.count(key) && e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++;
+        m_logBytes = m_logBytes + eBytes - oldBytes;
         m_heldHlc[key] = e.value("hlc", json::object());
+        m_heldBytes[key] = eBytes;
         m_clock.receive(e.value("hlc", json::object()));
-        saveLog();
+        // appended to the journal at once: a local event must survive a crash right after it
+        m_journalPending.push_back(e);
+        flushLog();
     }
 }
 
@@ -844,34 +955,47 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
         }
         if (type == "EVENT" && env.contains("event")) {
             json e = env["event"];
-            if (!admitEvent(e)) return true;   // dropped by admission (counted), not a decode failure
+            // The cheap checks, then the budget, then the signature: a forged signature used to cost a
+            // full verification before any budget was taken (open-review 2026-11-03, FR-6).
+            if (!whisperbox::wellFormedEvent(e)) { m_admDropShape++; return true; }
+            if (e["hlc"]["wall"].get<long long>() > nowMs() + whisperbox::kMaxClockLeadMs) { m_admDropFuture++; return true; }
             // Unsigned answers: anyone can send any number of them, so answers have a node-wide
-            // budget and the log a cap (open-review 2026-11-01, FR-3). Every copy of an answer costs,
-            // a replayed one too (FR-6), and signed events have their own budget (open-review
-            // 2026-11-02, FR-2). A peer that missed out gets the rest on a later catch-up round.
+            // budget and the log a cap (open-review 2026-11-01, FR-3). Every copy costs, a replayed one
+            // too (2026-11-02, FR-6), and signed events have their own budget (2026-11-02, FR-2). A peer
+            // that missed out gets the rest on a later catch-up round.
             const bool isResp = e.value("type", "") == RESPONSE_SUBMIT;
             const std::string key = whisperbox::eventKey(e);
             auto held = m_heldHlc.find(key);
-            const bool dup = held != m_heldHlc.end() && whisperbox::compareHlc(e["hlc"], held->second) >= 0;
+            // An answer we hold is never replaced: its HLC is the sender's and unsigned, and an earlier
+            // copy reordered answers (2026-11-03, FR-3). A signed event may be replaced by an
+            // earlier-HLC copy (the merge rule), and is charged for its size (FR-1).
+            const bool dup = held != m_heldHlc.end() && (isResp || whisperbox::compareHlc(e["hlc"], held->second) >= 0);
             if (!(isResp ? takeToken(m_respTokens, m_respRefillMs, 600) : takeToken(m_sigTokens, m_sigRefillMs, 600))) { m_admDropBudget++; return true; }
-            const size_t eBytes = dup ? 0 : e.dump().size();
-            if (!dup && held == m_heldHlc.end()) {
-                if (isResp ? (m_logResponses >= kMaxLogResponses || m_logBytes + eBytes > kMaxLogBytes)
-                           : (m_logBytes + eBytes > kMaxLogBytes + kLogReserveBytes)) { m_admDropFull++; return true; }
-            }
-            const bool earlier = noteNetTime(e, netMs);
-            if (dup) {   // known without a scan of the log
+            if (dup) {   // known without a scan of the log, and without verifying it again
                 m_rxDup++;
-                if (earlier) { m_publishDirty = true; scheduleFlush(); }
+                if (noteNetTime(e, netMs)) { m_publishDirty = true; scheduleFlush(); }
                 return true;
             }
-            const bool replaced = held != m_heldHlc.end();   // an earlier-HLC copy of an event we hold
+            if (!admitEvent(e)) return true;   // the signature (counted)
+            const bool replaced = held != m_heldHlc.end();
+            const size_t eBytes = e.dump().size();
+            const size_t oldBytes = replaced && m_heldBytes.count(key) ? m_heldBytes[key] : 0;
+            const size_t grow = eBytes > oldBytes ? eBytes - oldBytes : 0;
+            // the caps apply to a replacement too: a small event replaced by a large one used to grow
+            // the log without bound (FR-1)
+            if (isResp ? (m_logResponses >= kMaxLogResponses || m_logBytes + grow > kMaxLogBytes)
+                       : (grow > 0 && m_logBytes + grow > kMaxLogBytes + kLogReserveBytes)) { m_admDropFull++; return true; }
+            noteNetTime(e, netMs);
             if (!whisperbox::mergeOne(m_log, e)) { m_rxDup++; return true; }
             m_heldHlc[key] = e["hlc"];
+            m_heldBytes[key] = eBytes;
+            m_logBytes = m_logBytes + eBytes - oldBytes;
+            if (!replaced && isResp) m_logResponses++;
+            if (isResp) noteFirstSeen(e);
             m_logGen++;
             m_rxNew++;
-            if (!replaced) { m_logBytes += eBytes; if (isResp) m_logResponses++; }
             m_clock.receive(e["hlc"], nowMs() + whisperbox::kMaxClockLeadMs);
+            m_journalPending.push_back(e);
             m_logDirty = true; m_publishDirty = true; scheduleFlush();
             return true;
         }
@@ -906,6 +1030,19 @@ bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
     m_netGen++;
     m_netDirty = true; scheduleFlush();   // saved with the next flush, not per copy (FR-6)
     return true;
+}
+// When this device first saw an answer (local clock, kept, never synced): the time an answer with no
+// network time is judged by against a close (open-review 2026-11-03, FR-3).
+void WhisperboxCoreImpl::noteFirstSeen(const json& e) {
+    const std::string id = e.value("id", "");
+    if (id.empty() || m_firstSeen.count(id)) return;
+    m_firstSeen[id] = nowMs();
+    m_netGen++;
+    m_firstDirty = true; scheduleFlush();
+}
+void WhisperboxCoreImpl::saveFirstSeen() {
+    json o = json::object(); for (auto& kv : m_firstSeen) o[kv.first] = kv.second;
+    writeAtomic(m_dataDir + "/firstseen.json", o.dump());
 }
 void WhisperboxCoreImpl::saveNetTimes() {
     json o = json::object(); for (auto& kv : m_netTimes) o[kv.first] = kv.second;
@@ -961,13 +1098,33 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     // Creator view: decrypt the response pool with our key, then mark each
     // response confirmed by matching its receipt id against the public set
     // (module layer, NOT the engine - keeps the TS/C++ engine parity intact).
+    // Only counts and receipt state go out: the snapshot is also the stateChanged event, which any
+    // module in the same Basecamp can receive. Answers, respondents, scores, my own answers, my
+    // replies and quiz keys come from formDetail(formId), for the form the view shows (open-review
+    // 2026-11-03, FR-2). Scoring every answer of every form on every snapshot is gone too (FR-12).
     json creatorViewJson;
     if (m_signId.valid && (full["creator"] != nullptr || !coOwnedForms(full).empty())) {
         OrderedJson cv = decryptView(full);
-        creatorViewJson = json::parse(cv.dump());
-        const auto keys = formKeysFor(full);
-        for (auto it = creatorViewJson["responses"].begin(); it != creatorViewJson["responses"].end(); ++it)
-            enrichResponses(full, it.key(), it.value(), keys);
+        creatorViewJson = json::object();
+        creatorViewJson["address"] = cv["address"];
+        creatorViewJson["forms"] = cv["forms"];
+        creatorViewJson["dropped"] = cv["dropped"];          // counts per reason
+        creatorViewJson["undecrypted"] = cv["undecrypted"];
+        creatorViewJson["confirmations"] = cv["confirmations"];   // public receipt ids
+        json counts = json::object();
+        for (auto it = cv["responses"].begin(); it != cv["responses"].end(); ++it) {
+            const std::string fid = it.key();
+            std::unordered_set<std::string> confs;
+            if (full["forms"].contains(fid)) for (const auto& c : full["forms"][fid]["confirmations"]) if (c.is_string()) confs.insert(c.get<std::string>());
+            json arr = json::array();
+            for (const auto& r : it.value()) {
+                json rj = json::parse(r.dump());
+                arr.push_back({{"confirmed", confs.count(confirmIdOf(rj, fid)) > 0},
+                               {"verified", !(rj.contains("verified") && rj["verified"].is_boolean() && !rj["verified"].get<bool>())}});
+            }
+            counts[fid] = arr;
+        }
+        creatorViewJson["responses"] = counts;
     }
 
     // Only the forms this device shows: mine, co-owned, answered, opened from a link, hidden or
@@ -988,6 +1145,11 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
             for (auto f = it.value().begin(); f != it.value().end(); ++f)
                 if (shown.count(f.key())) whisperbox::appendNewKey(o, f.key(), OrderedJson(f.value()));
             state[k] = std::move(o);
+        } else if (k == "pending") {
+            // the count only: a peer's signed events for invented form ids used to be listed in every
+            // snapshot (open-review 2026-11-03, FR-11)
+            OrderedJson pn = OrderedJson::object(); pn["count"] = it.value()["count"]; pn["events"] = OrderedJson::array();
+            state[k] = std::move(pn);
         } else if (k == "feed") {
             OrderedJson a = OrderedJson::array();
             for (const auto& id : it.value()) if (id.is_string() && shown.count(id.get<std::string>())) a.push_back(id);
@@ -1045,30 +1207,13 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         }
         f["hidden"] = m_hidden.count(fid) > 0;
         f["autoReceipts"] = m_autoReceipts.count(fid) > 0;
-        if (m_answerDrafts.count(fid)) f["answerDraft"] = m_answerDrafts[fid];
-        if (m_myAnswers.count(fid)) f["myAnswers"] = m_myAnswers[fid];
-        if (mine || coOwner) {   // the opened answer key (builder edit + score column)
-            json q = quizOf(f, formKeysFor(state));
-            if (q.is_object()) f["quiz"] = q;
-        }
+        // the content itself (answer draft, my answers, quiz key, my replies) is in formDetail (FR-2)
+        f["hasAnswerDraft"] = m_answerDrafts.count(fid) > 0;
+        f["hasMyAnswers"] = m_myAnswers.count(fid) > 0;
         if (submitted && m_myConfirmIds.count(fid) && f.contains("replies") && !f["replies"].empty()) {
-            // private replies / scores addressed to my answer
             const std::string cid = m_myConfirmIds[fid];
-            json mine2 = json::array();
-            whisperbox::SignId rk;
-            for (const auto& r : f["replies"]) {
-                if (r.value("to", "") != cid) continue;
-                const std::string sealed = r.value("sealed", "");
-                auto c = m_replyCache.find(sealed);
-                if (c == m_replyCache.end()) {
-                    if (!rk.valid) rk = whisperbox::deriveReplyKey(m_signId, fid, cid);
-                    json body;
-                    try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
-                    c = m_replyCache.emplace(sealed, body.is_object() ? body : json()).first;
-                }
-                if (c->second.is_object()) mine2.push_back(c->second);
-            }
-            if (!mine2.empty()) f["myReplies"] = mine2;
+            long long n = 0; for (const auto& r : f["replies"]) if (r.value("to", "") == cid) n++;
+            f["myReplyCount"] = n;   // the replies themselves: formDetail
         }
         f["myConfirmed"] = confirmed;
         f["allowed"] = allowed;
@@ -1079,7 +1224,9 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     OrderedJson snap = OrderedJson::object();
     snap["v"] = 1;
     snap["identity"] = m_signId.valid
-        ? json({{"address", m_signId.address}, {"pubHex", m_signId.pubHex}}) : nullptr;
+        ? json({{"address", m_signId.address}, {"pubHex", m_signId.pubHex}, {"protected", m_protected}}) : nullptr;
+    // a passphrase-protected identity not unlocked yet: the view asks for the passphrase (FR-13)
+    snap["locked"] = m_locked ? json({{"address", m_lockedAddress}}) : json(nullptr);
     if (seenDirty) saveSeen();
     snap["deviceId"] = m_deviceId;
     snap["newResponses"] = newTotal;   // across my (non-hidden) forms
@@ -1184,11 +1331,12 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
         return dec;
     };
     auto netTime = [this](const std::string& id) -> long long { auto n = m_netTimes.find(id); return n == m_netTimes.end() ? 0 : n->second; };
+    auto localTime = [this](const std::string& id) -> long long { auto n = m_firstSeen.find(id); return n == m_firstSeen.end() ? 0 : n->second; };
     // the pool straight from the log: the fold no longer copies it (FR-5)
     std::vector<const json*> pool;
     pool.reserve(m_logResponses);
     for (const auto& e : m_log) if (e.contains("type") && e["type"].is_string() && e["type"].get_ref<const std::string&>() == RESPONSE_SUBMIT) pool.push_back(&e);
-    m_cvCache = whisperbox::creatorViewPool<json>(state, pool, me, open, verifyInnerResponse, also, netTime);
+    m_cvCache = whisperbox::creatorViewPool<json>(state, pool, me, open, verifyInnerResponse, also, netTime, localTime);
     m_cvValid = true; m_cvLogGen = m_logGen; m_cvPinsGen = m_pinsGen; m_cvNetGen = m_netGen; m_cvIdent = me;
     return m_cvCache;
 }
@@ -1225,14 +1373,28 @@ void WhisperboxCoreImpl::enrichResponses(const OrderedJson& state, const std::st
     const json quiz = quizOf(f, keys);
     std::map<std::string, int> replies;
     if (f.contains("replies")) for (const auto& r : f["replies"]) replies[r.value("to", "")]++;
+    std::unordered_set<std::string> confs;
+    for (const auto& c : f["confirmations"]) if (c.is_string()) confs.insert(c.get<std::string>());
+    // questions parsed once, and each answer's score kept until the form or the answer changes: every
+    // snapshot re-parsed and re-scored every answer (5,000 x 500 questions = 18 s, open-review
+    // 2026-11-03, FR-12)
+    json questions;
+    const std::string formVer = formId + "|" + f["version"].dump() + "|" + f["quizKey"].dump() + "|";
     for (auto& r : responses) {
         if (!r.is_object()) continue;
         const std::string cid = confirmIdOf(r, formId);
-        r["confirmed"] = containsStr(f["confirmations"], cid);
+        r["confirmed"] = confs.count(cid) > 0;
         r["replies"] = replies.count(cid) ? replies[cid] : 0;
         if (quiz.is_object()) {
-            json sc = whisperbox::scoreAnswers(json::parse(f["questions"].dump()), quiz, r.value("answers", json::array()));
-            r["score"] = sc["score"]; r["outOf"] = sc["outOf"]; r["correct"] = sc["correct"];
+            const std::string key = formVer + r.value("respondent", "") + "|" + (r.contains("hlc") ? r["hlc"].dump() : "") + "|" + (r.contains("edits") ? r["edits"].dump() : "");
+            auto c = m_scoreCache.find(key);
+            if (c == m_scoreCache.end()) {
+                if (questions.is_null()) questions = json::parse(f["questions"].dump());
+                json sc = whisperbox::scoreAnswers(questions, quiz, r.contains("answers") && r["answers"].is_array() ? r["answers"] : json::array());
+                if (m_scoreCache.size() >= 60000) m_scoreCache.clear();
+                c = m_scoreCache.emplace(key, sc).first;
+            }
+            r["score"] = c->second["score"]; r["outOf"] = c->second["outOf"]; r["correct"] = c->second["correct"];
         }
     }
 }
@@ -1673,6 +1835,54 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) try {
     return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
 }
 
+// The private parts of one form, for the view showing it: the answers (creator / co-owner, with
+// receipts, replies and scores), my own answers, my replies, the quiz key, my answer draft. They used
+// to be in every snapshot and every stateChanged event (open-review 2026-11-03, FR-2).
+std::string WhisperboxCoreImpl::formDetail(std::string formId) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    const std::string fid = lc(formId);
+    const OrderedJson& state = foldedState();
+    if (!m_foldIds.count(fid)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    const auto& f = state["forms"][fid];
+    const bool mine = f["creator"].get<std::string>() == m_signId.address, coOwner = !mine && isCoOwner(f);
+    out["ok"] = true; out["formId"] = fid; out["mine"] = mine; out["coOwner"] = coOwner;
+    const auto keys = formKeysFor(state);
+    if (mine || coOwner) {
+        OrderedJson view = decryptView(state);
+        json rs = view["responses"].contains(fid) ? json::parse(view["responses"][fid].dump()) : json::array();
+        enrichResponses(state, fid, rs, keys);
+        out["responses"] = rs;
+        json q = quizOf(f, keys);
+        if (q.is_object()) out["quiz"] = q;
+    }
+    if (m_answerDrafts.count(fid)) out["answerDraft"] = m_answerDrafts[fid];
+    if (m_myAnswers.count(fid)) out["myAnswers"] = m_myAnswers[fid];
+    if (m_mySubmissions.count(fid) && m_myConfirmIds.count(fid) && f.contains("replies") && !f["replies"].empty()) {
+        // private replies / scores addressed to my answer
+        const std::string cid = m_myConfirmIds[fid];
+        json mine2 = json::array();
+        whisperbox::SignId rk;
+        for (const auto& r : f["replies"]) {
+            if (r.value("to", "") != cid) continue;
+            const std::string sealed = r.value("sealed", "");
+            auto c = m_replyCache.find(sealed);
+            if (c == m_replyCache.end()) {
+                if (!rk.valid) rk = whisperbox::deriveReplyKey(m_signId, fid, cid);
+                json body;
+                try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
+                c = m_replyCache.emplace(sealed, body.is_object() ? body : json()).first;
+            }
+            if (c->second.is_object()) mine2.push_back(c->second);
+        }
+        if (!mine2.empty()) out["myReplies"] = mine2;
+    }
+    return out.dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
+}
+
 // ── manage ───────────────────────────────────────────────────────────────────────
 // A form id as links carry it (review 2026-10-22: anything used to be accepted and watched forever).
 static bool plausibleFormId(const std::string& id) {
@@ -1689,6 +1899,7 @@ std::string WhisperboxCoreImpl::joinForm(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     if (!plausibleFormId(formId)) return json({{"ok", false}, {"error", "that isn't a WhisperBox form id or link"}}).dump();
+    if (!m_watched.count(formId) && m_watched.size() >= kMaxWatched) return json({{"ok", false}, {"error", "too many opened forms - remove some"}}).dump();   // FR-14
     m_watched.insert(formId);
     saveWatched();
     publishState();
@@ -1701,12 +1912,11 @@ std::string WhisperboxCoreImpl::joinForm(std::string formId) try {
 std::string WhisperboxCoreImpl::deleteLocalForm(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(formId);
+    // off this device: the link it was opened from (pin), and hidden. My own answers and receipt ids
+    // stay: any module can call this, and they used to go with it (FR-7)
     m_watched.erase(formId);
     saveWatched();
-    m_mySubmissions.erase(formId);
-    saveMySubmissions();
-    m_myAnswers.erase(formId);
-    saveMyAnswers();
+    if (m_hidden.erase(formId)) saveHidden();
     if (m_pinned.erase(formId)) savePins();   // a new link may pin another creator (FR-5)
     publishState();
     json out = {{"ok", true}, {"formId", formId}};
@@ -1721,6 +1931,7 @@ std::string WhisperboxCoreImpl::hideForm(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     if (formId.empty()) return json({{"ok", false}, {"error", "formId required"}}).dump();
+    if (!m_hidden.count(formId) && m_hidden.size() >= kMaxHidden) return json({{"ok", false}, {"error", "too many hidden forms"}}).dump();   // FR-14
     m_hidden.insert(formId);
     saveHidden();
     publishState();
@@ -1797,6 +2008,12 @@ std::string WhisperboxCoreImpl::setAutoReceipts(std::string formId, std::string 
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     const bool enable = trim(on) == "1" || trim(on) == "true";
+    if (enable) {   // only on a form I make or co-own (FR-7)
+        const OrderedJson& st = foldedState();
+        if (!m_foldIds.count(formId)) return json({{"ok", false}, {"error", "unknown form"}}).dump();
+        const auto& f = st["forms"][formId];
+        if (!m_signId.valid || (f["creator"].get<std::string>() != m_signId.address && !isCoOwner(f))) return json({{"ok", false}, {"error", "not the creator or a co-owner"}}).dump();
+    }
     if (enable) m_autoReceipts.insert(formId); else m_autoReceipts.erase(formId);
     saveDrafts();
     publishState();
@@ -1815,9 +2032,15 @@ std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) try {
     if (!d.is_object() || !d.contains("def") || !d["def"].is_object()) return json({{"ok", false}, {"error", "draft needs a def object"}}).dump();
     std::string id = d.value("id", "");
     if (id.empty()) id = "draft-" + randomHex(4);
+    if (!m_drafts.count(id) && m_drafts.size() >= kMaxDrafts) return json({{"ok", false}, {"error", "too many drafts - publish or delete some"}}).dump();   // FR-14
     json rec = {{"id", id}, {"def", d["def"]}, {"updatedAt", nowMs()},
                 {"publishAt", d.contains("publishAt") && d["publishAt"].is_number() ? d["publishAt"] : json(nullptr)}};
+    json before = m_drafts.count(id) ? m_drafts[id] : json();
     m_drafts[id] = rec;
+    if (draftsBytes() > kMaxDraftsBytes) {   // FR-14
+        if (before.is_null()) m_drafts.erase(id); else m_drafts[id] = before;
+        return json({{"ok", false}, {"error", "drafts are too large - publish or delete some"}}).dump();
+    }
     saveDrafts();
     publishState();
     return json({{"ok", true}, {"draftId", id}}).dump();
@@ -1828,7 +2051,12 @@ std::string WhisperboxCoreImpl::saveDraft(std::string draftJson) try {
 }
 std::string WhisperboxCoreImpl::deleteDraft(std::string draftId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    m_drafts.erase(trim(draftId));
+    // kept in the drafts' trash (the last 20) instead of gone: any module can call this (FR-7)
+    auto it = m_drafts.find(trim(draftId));
+    if (it == m_drafts.end()) return json({{"ok", false}, {"error", "no such draft"}}).dump();
+    m_draftTrash.push_back(it->second);
+    while (m_draftTrash.size() > kMaxDraftTrash) m_draftTrash.erase(m_draftTrash.begin());
+    m_drafts.erase(it);
     saveDrafts();
     publishState();
     return json({{"ok", true}}).dump();
@@ -1854,9 +2082,19 @@ std::string WhisperboxCoreImpl::saveAnswerDraft(std::string formId, std::string 
     formId = lc(trim(formId));
     json a;
     try { a = trim(answersJson).empty() ? json::array() : parseUntrusted(trim(answersJson), kMaxLocalJson); } catch (...) { return json({{"ok", false}, {"error", "bad answersJson"}}).dump(); }
-    if (!a.is_array() || a.empty()) m_answerDrafts.erase(formId); else m_answerDrafts[formId] = a;
-    saveDrafts();
-    return json({{"ok", true}}).dump();   // no publishState: called while typing
+    if (!a.is_array() || a.empty()) m_answerDrafts.erase(formId);
+    else {
+        if (!m_answerDrafts.count(formId) && m_answerDrafts.size() >= kMaxAnswerDrafts) return json({{"ok", false}, {"error", "too many unsent answers saved"}}).dump();   // FR-14
+        json before = m_answerDrafts.count(formId) ? m_answerDrafts[formId] : json();
+        m_answerDrafts[formId] = a;
+        if (draftsBytes() > kMaxDraftsBytes) {
+            if (before.is_null()) m_answerDrafts.erase(formId); else m_answerDrafts[formId] = before;
+            return json({{"ok", false}, {"error", "unsent answers are too large to keep"}}).dump();
+        }
+    }
+    // saved with the next flush, not per keystroke (FR-14); no publishState: called while typing
+    m_draftsDirty = true; scheduleFlush();
+    return json({{"ok", true}}).dump();
 } catch (const std::exception& ex) {
     // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
     // of the module (open-review FR-8).
@@ -1921,9 +2159,20 @@ std::string WhisperboxCoreImpl::unhideForm(std::string formId) try {
 std::string WhisperboxCoreImpl::importIdentity(std::string privHex) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;
+    if (m_locked) { out["ok"] = false; out["error"] = "unlock WhisperBox first"; return out.dump(); }
     if (!isHex(trim(privHex), 64)) { out["ok"] = false; out["error"] = "privHex must be 64 hex chars"; return out.dump(); }
-    m_signId = whisperbox::identityFromPriv(whisperbox::fromHex(trim(privHex)));
-    if (!m_signId.valid) { out["ok"] = false; out["error"] = "invalid scalar (0, >= n, or bad point)"; return out.dump(); }
+    whisperbox::SignId next = whisperbox::identityFromPriv(whisperbox::fromHex(trim(privHex)));
+    if (!next.valid) { out["ok"] = false; out["error"] = "invalid scalar (0, >= n, or bad point)"; return out.dump(); }
+    // The current key is the only one that opens the answers sealed to this identity: it is kept as
+    // identity.json.prev (0600; sealed if a passphrase is set), never just overwritten (open-review
+    // 2026-11-03, FR-4).
+    {
+        std::error_code ec;
+        std::filesystem::copy_file(m_dataDir + "/identity.json", m_dataDir + "/identity.json.prev", std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::permissions(m_dataDir + "/identity.json.prev", kPrivateFile, std::filesystem::perm_options::replace, ec);
+    }
+    out["previousAddress"] = m_signId.address;
+    m_signId = next;
     // Everything tied to the previous identity goes: its keys and opened answers, its own answers and
     // receipts, its private replies, its "seen" counts. They used to stay, readable under the new one
     // (open-review 2026-11-01, FR-9). The files are copied to *.prev first, in case the import was a mistake.
@@ -1942,6 +2191,65 @@ std::string WhisperboxCoreImpl::importIdentity(std::string privHex) try {
     // A local caller's malformed JSON (a mistyped field) must come back as an error, never throw out
     // of the module (open-review FR-8).
     return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
+}
+
+// ── passphrase (open-review 2026-11-03, FR-13; whisperbox_vault.hpp) ─────────────────
+// Unlock a passphrase-protected identity: until then the core has no identity (no signing, sending
+// or decrypting) and my_answers.json / drafts.json stay sealed.
+std::string WhisperboxCoreImpl::unlock(std::string passphrase) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_locked) return json({{"ok", true}, {"address", m_signId.address}}).dump();
+    whisperbox::Bytes key = whisperbox::vault::keyFor(m_lockedIdentity, passphrase);
+    whisperbox::Bytes priv;
+    try { priv = whisperbox::vault::openIdentity(m_lockedIdentity, key); }
+    catch (...) { return json({{"ok", false}, {"error", "wrong passphrase"}}).dump(); }
+    whisperbox::SignId id = whisperbox::identityFromPriv(priv);
+    if (!id.valid || id.address != m_lockedAddress) return json({{"ok", false}, {"error", "the identity file doesn't match its address"}}).dump();
+    m_signId = id;
+    m_vaultKey = key; m_vaultSalt = whisperbox::fromHex(m_lockedIdentity["kdf"]["salt"].get<std::string>());
+    m_locked = false; m_lockedIdentity = json();
+    loadPrivateFiles();
+    m_foldValid = false; m_cvValid = false;
+    setStatus("Starting...");
+    publishState();
+    return json({{"ok", true}, {"address", m_signId.address}}).dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
+}
+// Set, change or remove the passphrase. currentPassphrase: needed when one is set. newPassphrase: ""
+// removes it (back to plaintext files), else at least 8 characters.
+std::string WhisperboxCoreImpl::setPassphrase(std::string currentPassphrase, std::string newPassphrase) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (m_locked || !m_signId.valid) return json({{"ok", false}, {"error", "unlock WhisperBox first"}}).dump();
+    if (m_protected) {
+        json o = json::parse(std::ifstream(m_dataDir + "/identity.json"), nullptr, false);
+        bool good = false;
+        try { good = whisperbox::vault::isSealedIdentity(o) && whisperbox::vault::openIdentity(o, whisperbox::vault::keyFor(o, currentPassphrase)) == m_signId.priv; } catch (...) { good = false; }
+        if (!good) return json({{"ok", false}, {"error", "the current passphrase is wrong"}}).dump();
+    }
+    if (!newPassphrase.empty() && newPassphrase.size() < whisperbox::vault::kMinPassphrase)
+        return json({{"ok", false}, {"error", "a passphrase has at least 8 characters"}}).dump();
+    // the backups of a previous identity follow: sealed with the new passphrase, or opened when it's removed
+    const whisperbox::Bytes oldKey = m_vaultKey;
+    if (newPassphrase.empty()) { m_protected = false; m_vaultKey.clear(); m_vaultSalt.clear(); }
+    else { m_protected = true; m_vaultSalt = whisperbox::vault::randomBytes(16); m_vaultKey = whisperbox::vault::passKey(newPassphrase, m_vaultSalt); }
+    saveIdentity(); saveMyAnswers(); saveDrafts();
+    {   // identity.json.prev (an imported-over identity): re-sealed or opened like the current one
+        json prev = json::parse(std::ifstream(m_dataDir + "/identity.json.prev"), nullptr, false);
+        whisperbox::Bytes ppriv;
+        if (whisperbox::vault::isSealedIdentity(prev) && oldKey.size() == 32) { try { ppriv = whisperbox::vault::openIdentity(prev, oldKey); } catch (...) {} }
+        else if (prev.is_object() && prev.contains("privHex") && prev["privHex"].is_string()) ppriv = whisperbox::fromHex(prev["privHex"].get<std::string>());
+        whisperbox::SignId pid = ppriv.size() == 32 ? whisperbox::identityFromPriv(ppriv) : whisperbox::SignId{};
+        if (pid.valid) {
+            json o = m_protected ? whisperbox::vault::sealIdentity(pid.priv, pid.address, pid.pubHex, m_vaultKey, m_vaultSalt)
+                                 : json({{"privHex", whisperbox::toHex(pid.priv)}, {"pubHex", pid.pubHex}, {"address", pid.address}});
+            writeAtomic(m_dataDir + "/identity.json.prev", o.dump());
+        }
+    }
+    publishState();
+    return json({{"ok", true}, {"protected", m_protected}}).dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
 }
 
 std::string WhisperboxCoreImpl::setDeviceId(std::string deviceId) try {
@@ -2103,6 +2411,7 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
         out["error"] = "this link names creator " + by + ", but you opened this form from a link by " + pinIt->second + ". Remove the form from this device first if you trust the new link.";
         return out.dump();
     }
+    if (!m_watched.count(formId) && m_watched.size() >= kMaxWatched) { out["ok"] = false; out["error"] = "too many opened forms - remove some"; return out.dump(); }   // FR-14
     OrderedJson state = foldedState();
     const bool have = state["forms"].contains(formId);
     if (!have && m_nodeReady) { requestSync(); catchupRound(); }

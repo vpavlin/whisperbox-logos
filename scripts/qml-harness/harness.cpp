@@ -16,12 +16,12 @@
 #include <QWindow>
 #include <QImage>
 #include <QTimer>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QFile>
 #include <QMessageLogger>
 #include <QString>
 #include <QVariantList>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QJsonArray>
 #include <QJSValue>
 // QTest only declares the QWindow mouse helpers when QT_GUI_LIB is defined.
@@ -65,7 +65,34 @@ public:
                     (int)args.size(), a.join(" | ").toUtf8().constData());
         }
         if (mod != "whisperbox_core") return "{\"error\":\"unknown module\"}";
-        if (method == "snapshot" || method == "status") return m_fixture;
+        if (method == "snapshot" || method == "status") {
+            // WB_STRIP_PRIVATE=1: the snapshot as the 0.5.5 core sends it (no answers, my answers,
+            // replies, quiz keys or answer drafts); the view must get them from formDetail
+            if (qEnvironmentVariableIsSet("WB_LOCKED")) {   // a passphrase-protected identity, not unlocked (0.5.5, FR-13)
+                QJsonObject fx = QJsonDocument::fromJson(m_fixture.toUtf8()).object();
+                fx["locked"] = QJsonObject{{"address", "0x1234567890abcdef1234567890abcdef12345678"}};
+                fx["identity"] = QJsonValue::Null;
+                return QString::fromUtf8(QJsonDocument(fx).toJson(QJsonDocument::Compact));
+            }
+            if (!qEnvironmentVariableIsSet("WB_STRIP_PRIVATE")) return m_fixture;
+            QJsonObject fx = QJsonDocument::fromJson(m_fixture.toUtf8()).object();
+            QJsonObject st = fx["state"].toObject(), forms = st["forms"].toObject();
+            for (auto it = forms.begin(); it != forms.end(); ++it) {
+                QJsonObject f = it.value().toObject();
+                for (const char* k : {"myAnswers", "myReplies", "quiz", "answerDraft"}) f.remove(k);
+                it.value() = f;
+            }
+            st["forms"] = forms; fx["state"] = st;
+            if (fx["creatorView"].isObject()) {
+                QJsonObject cv = fx["creatorView"].toObject(), rs = cv["responses"].toObject();
+                for (auto it = rs.begin(); it != rs.end(); ++it) {
+                    QJsonArray slim; for (const auto& r : it.value().toArray()) slim.append(QJsonObject{{"confirmed", r.toObject()["confirmed"]}, {"verified", true}});
+                    it.value() = slim;
+                }
+                cv["responses"] = rs; fx["creatorView"] = cv;
+            }
+            return QString::fromUtf8(QJsonDocument(fx).toJson(QJsonDocument::Compact));
+        }
         // Canned mutation responses so click-through paths don't error.
         if (method == "createForm") return "{\"ok\":true,\"formId\":\"form-harness1\",\"event\":{}}";
         if (method == "shareUri") return "{\"ok\":true,\"uri\":\"whisperbox://form?id=" + (args.isEmpty() ? QString() : args[0].toString()) + "\"}";
@@ -78,6 +105,19 @@ public:
             for (int y = 0; y < qr.getSize(); y++) for (int x = 0; x < qr.getSize(); x++) cells += qr.getModule(x, y) ? "true," : "false,";
             cells.chop(1);
             return QString("{\"ok\":true,\"n\":%1,\"cells\":[%2]}").arg(qr.getSize()).arg(cells);
+        }
+        if (method == "formDetail") {
+            // the selected form's private parts, from the fixture (the real core keeps them out of
+            // the snapshot since 0.5.5; older fixtures still carry them there)
+            const QString id = args.isEmpty() ? QString() : args[0].toString();
+            const QJsonObject fx = QJsonDocument::fromJson(m_fixture.toUtf8()).object();
+            const QJsonObject f = fx["state"].toObject()["forms"].toObject()[id].toObject();
+            if (f.isEmpty()) return "{\"ok\":false,\"error\":\"unknown form\"}";
+            QJsonObject o{{"ok", true}, {"formId", id}};
+            for (const char* k : {"myAnswers", "myReplies", "quiz", "answerDraft"}) if (f.contains(k)) o[k] = f[k];
+            const QJsonObject cv = fx["creatorView"].toObject()["responses"].toObject();
+            if (cv.contains(id)) o["responses"] = cv[id];
+            return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
         }
         if (method == "exportCsv") return "{\"ok\":true,\"csv\":\"respondent,q1\\n0xabc,hi\"}";
         if (method == "saveDraft") return "{\"ok\":true,\"draftId\":\"draft-harness1\"}";

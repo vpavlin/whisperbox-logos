@@ -34,6 +34,7 @@
 #include "whisperbox_identity.hpp"
 #include "whisperbox_wire.hpp"
 #include "whisperbox_rbsr.hpp"
+#include "whisperbox_vault.hpp"
 
 class QTimer;
 
@@ -53,6 +54,8 @@ public:
     // --- respond ---
     std::string submitResponse(std::string formId, std::string answersJson);
     std::string getDecryptedResponses(std::string formId);
+    // One form's private parts for the view showing it: answers, my answers, my replies, quiz key, answer draft
+    std::string formDetail(std::string formId);
 
     // --- manage ---
     std::string joinForm(std::string formId);
@@ -72,6 +75,10 @@ public:
     std::string replyToResponse(std::string formId, std::string confirmationId, std::string message);
     std::string sendScores(std::string formId);
     std::string importIdentity(std::string privHex);
+    // Unlock a passphrase-protected identity (until then: no signing, sending or decrypting)
+    std::string unlock(std::string passphrase);
+    // Set, change or remove the passphrase; newPassphrase "" removes it, else 8+ characters
+    std::string setPassphrase(std::string currentPassphrase, std::string newPassphrase);
     std::string setDeviceId(std::string deviceId);
     std::string shareUri(std::string formId);
     std::string formSummary(std::string formId);
@@ -261,4 +268,30 @@ private:
     int64_t m_lastStartMs = 0;
     long m_startFailures = 0;
     bool adoptChecked(const whisperbox::json& e);   // FR-9/10: only events peers accept
+    // open-review 2026-11-03 (0.5.5; appended last: layout rule above).
+    // FR-1: each held event's size, so a replacement is charged for what it adds
+    std::unordered_map<std::string, size_t> m_heldBytes;
+    // FR-5: the log on disk = events.json (base) + events.journal (appended lines)
+    std::vector<whisperbox::json> m_journalPending;
+    size_t m_journalBytes = 0, m_baseBytes = 0;
+    void flushLog();
+    // FR-3: when this device first saw each answer (local clock)
+    std::map<std::string, long long> m_firstSeen;
+    bool m_firstDirty = false;
+    void noteFirstSeen(const whisperbox::json& e);
+    void saveFirstSeen();
+    // FR-12: quiz scores per answer, until the form or the answer changes
+    std::unordered_map<std::string, whisperbox::json> m_scoreCache;
+    // FR-13: an optional passphrase over the identity and the private local files
+    bool m_protected = false, m_locked = false;
+    std::string m_lockedAddress;
+    whisperbox::json m_lockedIdentity;
+    whisperbox::Bytes m_vaultKey, m_vaultSalt;
+    std::string readPrivate(const std::string& name, bool& readable);
+    void writePrivate(const std::string& name, const std::string& text);
+    void loadPrivateFiles();
+    // FR-7/14: deleted drafts kept (the last 20), drafts saved per flush, sizes bounded
+    std::vector<whisperbox::json> m_draftTrash;
+    bool m_draftsDirty = false;
+    size_t draftsBytes() const;
 };

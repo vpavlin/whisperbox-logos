@@ -299,11 +299,37 @@ From 0.5.4 (open-review 2026-11-02, the 0.5.3 re-review):
 - **Network time:** a copy received again may still move an answer's time earlier, within the
   5-minute window (FR-6, accepted).
 
-**Trust boundary.** The host (Basecamp, logosctl) gives a module no caller identity. Any module or
-view installed in the same Basecamp can call `whisperbox_core`: read decrypted answers
-(`getDecryptedResponses`, `snapshot`, `exportCsv`), import an identity, or act as the user. Install
-only modules you trust alongside it. A headless bot (logosctl) should run in its own session, with
-nothing else loaded (open-review FR-9).
+From 0.5.5 (open-review 2026-11-03, the 0.5.4 re-review):
+- **Log on disk:** `events.json` (the base) plus `events.journal` (one event per line, appended). The
+  journal is folded into the base when it outgrows max(4 MiB, the base); loading merges both
+  (FR-5).
+- **Replacements** (an earlier-HLC copy of a signed event) are charged for their size against the
+  caps. A held `response.submit` is never replaced (FR-1, FR-3).
+- **Budgets before signatures:** the event budget is taken before a signature is verified; a
+  duplicate is dropped without verifying it again (FR-6).
+- **Closes and answers without network time:** the device records when it first saw each answer
+  (`firstseen.json`, local, never synced). An answer with no network time first seen while the
+  form was closed (from a `form.close` to the next `form.reopen`) is dropped as `form-closed`,
+  whatever its HLC says (FR-3). Close-at dates (`expiresAt`) still use the answer's HLC when there
+  is no network time: a creator who is offline at the deadline would otherwise lose every answer
+  caught up afterwards.
+- **Snapshot:** no decrypted content (FR-2): see `formDetail`. `state.pending` carries the count
+  only (FR-11).
+- **Passphrase** (optional, FR-13): `identity.json` v2 seals the private key with
+  ChaCha20-Poly1305 under scrypt (N=2^15, r=8, p=1) of the passphrase; `my_answers.json` and
+  `drafts.json` are sealed (`WBENC1:`) under HKDF(identity key, "whisperbox-local-v1"). Until
+  `unlock`, the core has no identity. `importIdentity` keeps the previous key as
+  `identity.json.prev` (FR-4).
+
+**Trust boundary.** The host (Basecamp, logosctl) gives a module no caller identity, and every
+module runs as the same OS user. Any module or view installed in the same Basecamp can call
+`whisperbox_core`: read decrypted answers (`formDetail`, `getDecryptedResponses`, `exportCsv`),
+import an identity, or act as the user. From 0.5.5 the decrypted content is no longer in
+`snapshot()` or the `stateChanged` event every module can receive, and an optional passphrase keeps
+the key and the saved answers sealed on disk; a module that calls the methods directly still gets
+what the user would. `formSummary` answers for any form on the topic: that is public data (title,
+status, receipt count). Install only modules you trust alongside WhisperBox. A headless bot
+(logosctl) should run in its own session, with nothing else loaded (open-review FR-9).
 
 ## 7. Merge
 
@@ -443,21 +469,24 @@ exposes the same names.
 
 | method | args | notes |
 |---|---|---|
-| `snapshot` / `status` | | full state for the view (section 10.2) / counters |
+| `snapshot` / `status` | | state for the view (section 10.2) / counters. From 0.5.5 no decrypted content: answers, respondents, scores, my answers, my replies, quiz keys and answer drafts are in `formDetail` |
+| `formDetail` | formId | the private parts of one form: `responses` (creator / co-owner, with receipts, replies, scores), `myAnswers`, `myReplies`, `quiz`, `answerDraft` |
+| `unlock` | passphrase | unlocks a passphrase-protected identity (`snapshot.locked` until then) |
+| `setPassphrase` | current, new | sets, changes or removes (`new` = "") the passphrase over the key and the private local files; 8+ characters |
 | `createForm` | def JSON | `def.quiz` (plain) is sealed into `quizKey`; returns `formId` |
 | `updateForm` | formId, def JSON | creator only |
 | `closeForm` / `reopenForm` | formId | creator only; re-open refused at the cap or after `expiresAt` |
 | `submitResponse` | formId, answers JSON | validates, seals, handles edits, anonymous identity, reply key |
 | `confirmResponse` | formId, respondent address | creator / co-owner |
 | `confirmAll` | formId | one batch receipt for every unreceipted answer |
-| `setAutoReceipts` | formId, "1"/"0" | local setting |
+| `setAutoReceipts` | formId, "1"/"0" | local setting; turning it on needs a form you make or co-own |
 | `getDecryptedResponses` / `exportCsv` | formId | creator / co-owner; CSV has a `score` column on quizzes. Cells are answers from untrusted respondents: one starting with `=`, `+`, `-`, `@`, tab or CR that isn't a plain number gets a leading `'`, so a spreadsheet shows it as text instead of running it as a formula |
 | `addCoOwner` | formId, co-owner code (pub33 hex) | creator only; needs the form key on this device |
 | `replyToResponse` | formId, confirmationId, message | creator / co-owner |
 | `sendScores` | formId | one score reply per answer without any reply yet |
 | `joinForm` / `importForm` | link or id / def | watch a form |
-| `hideForm` / `unhideForm` / `deleteLocalForm` | formId | local only |
-| `saveDraft` / `deleteDraft` / `publishDraft` | draft JSON / id / id | local drafts, optional `publishAt` |
+| `hideForm` / `unhideForm` / `deleteLocalForm` | formId | local only. `deleteLocalForm` drops the watch, the creator pin and hidden; your own answers and receipt ids stay |
+| `saveDraft` / `deleteDraft` / `publishDraft` | draft JSON / id / id | local drafts, optional `publishAt`; at most 200 drafts and 16 MiB with answer drafts; a deleted draft is kept in the trash (the last 20) |
 | `saveAnswerDraft` | formId, answers JSON | local unsent answers |
 | `markSeen` | formId | resets `newResponses` |
 | `shareUri` / `shareQr` | formId | link / QR matrix |

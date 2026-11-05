@@ -97,9 +97,14 @@ Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release sig
   it and when (there's no mixnet in this path). The creator can't tell who answered an
   anonymous form, but a well-placed network observer could still link a response to a
   sender's network address.
-- **On your computer:** the identity key, the forms and your own answers are kept unencrypted
-  in the data folder (`~/.whisperbox-core`), readable only by your user (0600 from 0.4.3).
-  Anyone with access to your account can read them.
+- **On your computer:** the identity key, the forms and your own answers are kept in the data
+  folder (`~/.whisperbox-core`), readable only by your user (0600 from 0.4.3). Without a
+  passphrase they are unencrypted: anyone, or any app, running as your user can read them. With a
+  passphrase (Identity, from 0.5.5) the key and your saved answers are sealed, and WhisperBox asks
+  for it when it starts. A forgotten passphrase can't be recovered.
+- **Other Basecamp apps:** apps installed in the same Basecamp can call WhisperBox as you (Basecamp
+  doesn't tell a module who is calling). From 0.5.5 decrypted answers are no longer broadcast in
+  the state every app can listen to, but install only apps you trust next to it.
 
 ## Development
 `scripts/test.sh` runs every layer that doesn't need nix: TS engine
