@@ -129,6 +129,9 @@ private:
 
     // --- transport: loam_core (all calls async / fire-and-forget) ---
     void bootstrapDelivery();
+    // ADR 0021: loam_core when it is installed (today's path, unchanged), else delivery_module directly
+    void probeTransport();
+    void bootstrapDirect();
     void onTransportStatus(const std::string& st);
     void onLoop(std::function<void()> fn);   // run on the module's thread
     void joinTransport();
@@ -150,6 +153,11 @@ private:
     bool m_deliveryStarting = false;
     bool m_subscribed = false;
     int64_t m_lastStatusPollMs = 0;
+    enum class Via { Unknown, Loam, Direct };
+    Via m_via = Via::Unknown;
+    bool m_probing = false;
+    int m_probeTries = 0;
+    int64_t m_probeAt = 0;
 
     // diagnostic counters (surfaced in snapshot, per logos-distributed-debugging)
     long m_rxRaw = 0, m_rxSeen = 0, m_rxNew = 0, m_rxDup = 0, m_txTotal = 0;

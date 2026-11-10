@@ -250,6 +250,8 @@ void WhisperboxCoreImpl::onContextReady() {
     QObject::connect(m_hubTimer, &QTimer::timeout, [this] {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
         if (!m_nodeReady) {
+            if (m_via == Via::Unknown) { probeTransport(); return; }
+            if (m_via == Via::Direct) { bootstrapDirect(); return; }
             bootstrapDelivery();
             if (m_deliveryStarting && nowMs() - m_lastStatusPollMs >= 3000) {
                 m_lastStatusPollMs = nowMs();
@@ -710,6 +712,59 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
         m_startFailures++;
         setStatus(std::string("loam_core unavailable: ") + e.what());
     }
+}
+
+// ADR 0021: which transport. An installed loam_core answers statusAsync with a non-empty status
+// ("Starting..." before anything started it); an absent optional module answers empty or with an error,
+// without hanging. Only async calls go to loam_core, and nothing subscribes to its events before it has
+// answered (subscribing to an absent module's events may wedge). Three silent tries, then go direct.
+// WHISPERBOX_TRANSPORT=loam|direct forces the choice (tests, hubs).
+void WhisperboxCoreImpl::probeTransport() {
+    if (const char* f = std::getenv("WHISPERBOX_TRANSPORT")) {
+        const std::string v = f;
+        if (v == "loam" || v == "direct") {
+            m_via = v == "loam" ? Via::Loam : Via::Direct;
+            fprintf(stderr, "WHISPERBOX transport: %s (WHISPERBOX_TRANSPORT)\n", v.c_str());
+            return;
+        }
+    }
+    const int64_t now = nowMs();
+    if (m_probing && now - m_probeAt < 8000) return;   // an answer is on its way (or lost: retry after 8 s)
+    if (now - m_probeAt < 2000) return;
+    if (m_probing) m_probing = false;                   // no answer at all counts as a silent try
+    // Going direct is only possible once DirectTransport exists (kHaveDirect). Until then a missing
+    // loam_core keeps being retried - exactly today's behaviour - so no existing install can lose Loam
+    // to an early error ("auth token not recognized" at start is a transient error, not absence).
+    static constexpr bool kHaveDirect = false;
+    if (m_probeTries >= 3 && kHaveDirect) {
+        m_via = Via::Direct;
+        fprintf(stderr, "WHISPERBOX transport: delivery_module (loam_core not installed)\n");
+        return;
+    }
+    if (m_probeTries >= 3 && m_status != "Waiting for loam_core") setStatus("Waiting for loam_core");
+    m_probing = true;
+    m_probeAt = now;
+    m_probeTries++;
+    auto life = m_life;
+    try {
+        modules().loam_core.statusAsync([life](std::string st) {
+            withSelf(life, [st](WhisperboxCoreImpl* self) {
+                std::lock_guard<std::recursive_mutex> lk(self->m_mtx);
+                if (self->m_via != Via::Unknown) return;
+                self->m_probing = false;
+                if (!st.empty() && st.find("error") == std::string::npos) {
+                    self->m_via = Via::Loam;
+                    fprintf(stderr, "WHISPERBOX transport: loam_core (%s)\n", st.c_str());
+                }
+            });
+        });
+    } catch (...) { m_probing = false; }
+}
+
+// delivery_module directly, through Loam's shared header (loam/delivery_transport.hpp, loam_core 0.7.4).
+// Until that lands, a desktop without loam_core says so instead of hanging on "Connecting...".
+void WhisperboxCoreImpl::bootstrapDirect() {
+    if (m_status != "Needs loam_core") setStatus("Needs loam_core");
 }
 
 // loam_core reports "Connected" by event; the event can be lost or come before we listened, so
@@ -1249,6 +1304,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
+        {"transport", m_via == Via::Loam ? "loam_core" : m_via == Via::Direct ? "delivery_module" : "probing"},
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
