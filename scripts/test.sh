@@ -49,6 +49,7 @@ fi
 export WB_OUT="$WB_TMP/render"
 "$ROOT/scripts/qml-harness/render.sh" | grep -E 'PASS|FAIL|FATAL'
 "$ROOT/scripts/qml-harness/scenarios.sh" | tail -1
+"$ROOT/scripts/sync-respond.sh" --check   # the respond module's copies of the shared view files (ADR 0021)
 
 step "7/8 interop: JS client vs C++ core"
 "$ROOT/whisperbox_core/test/run-bridge-build.sh" "$WB_TMP/wb-bridge" >/dev/null

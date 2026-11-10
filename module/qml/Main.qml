@@ -5,6 +5,8 @@ import QtQuick.Layouts
 // the view itself styles with its own palette below.
 import Logos.Theme
 import Logos.Controls
+import "WbPalette.js" as P
+import "WbAnswers.js" as WA
 
 // WhisperBox - pure-QML view over whisperbox_core (no C++ backend).
 // Contract with the core (whisperbox_core_impl.h):
@@ -23,23 +25,23 @@ Item {
     anchors.fill: parent
 
     // ── palette (approved v0.3 indigo/charcoal) ──
-    readonly property color wbPrimary: "#7c6ff7"
-    readonly property color wbPrimarySubtle: "#1e1b3a"
-    readonly property color wbAccent: "#f7a44c"
-    readonly property color wbBg: "#0b0b10"
-    readonly property color wbSurface: "#14141e"
-    readonly property color wbSurfaceRaised: "#1c1c2a"
-    readonly property color wbBorder: "#2a2a3e"
-    readonly property color wbBorderSubtle: "#1e1e30"
-    readonly property color wbText: "#f0f0f8"
-    readonly property color wbTextSec: "#a0a0b8"
-    readonly property color wbTextTert: "#6b6b82"
-    readonly property color wbSuccess: "#4ade80"
-    readonly property color wbSuccessSubtle: "#16301f"
-    readonly property color wbWarning: "#fbbf24"
-    readonly property color wbWarningSubtle: "#2e2714"
-    readonly property color wbError: "#f87171"
-    readonly property color wbErrorSubtle: "#341a1d"
+    readonly property color wbPrimary: P.wbPrimary
+    readonly property color wbPrimarySubtle: P.wbPrimarySubtle
+    readonly property color wbAccent: P.wbAccent
+    readonly property color wbBg: P.wbBg
+    readonly property color wbSurface: P.wbSurface
+    readonly property color wbSurfaceRaised: P.wbSurfaceRaised
+    readonly property color wbBorder: P.wbBorder
+    readonly property color wbBorderSubtle: P.wbBorderSubtle
+    readonly property color wbText: P.wbText
+    readonly property color wbTextSec: P.wbTextSec
+    readonly property color wbTextTert: P.wbTextTert
+    readonly property color wbSuccess: P.wbSuccess
+    readonly property color wbSuccessSubtle: P.wbSuccessSubtle
+    readonly property color wbWarning: P.wbWarning
+    readonly property color wbWarningSubtle: P.wbWarningSubtle
+    readonly property color wbError: P.wbError
+    readonly property color wbErrorSubtle: P.wbErrorSubtle
 
     // ── state ──
     property var st: ({})
@@ -50,8 +52,8 @@ Item {
     property bool showShare: false
     property bool showCsv: false
     property bool showIdentity: false
-    property bool showErrors: false
-    property var answers: ({})
+    property alias showErrors: respond.showErrors
+    property alias answers: respond.answers
     property string shareText: ""
     property var qr: null
     property string csvText: ""
@@ -72,16 +74,7 @@ Item {
     property bool draftQuiz: false
     property string editingFormId: ""     // builder is editing a PUBLISHED form (form.update)
     property bool showCoOwners: false
-    property bool editing: false          // respondent is editing an already-sent answer
-    property double nowTick: Date.now()   // refreshes "N min left"
-    Timer { interval: 20000; running: true; repeat: true; onTriggered: root.nowTick = Date.now() }
-    function minutesLeft(until) { return Math.max(0, Math.ceil((Number(until) - root.nowTick) / 60000)); }
-    function startEditing() {
-        var f = root.sel; if (!f || !f.myAnswers) return;
-        var a = {}; var l = f.myAnswers.answers || [];
-        for (var i = 0; i < l.length; i++) a[l[i].questionId] = l[i].value;
-        root.answers = a; root.showErrors = false; root.editing = true;
-    }
+    property alias editing: respond.editing
     property string draftPublishAt: ""     // schedule field
     property bool draftScheduling: false
     property bool draftDirty: false
@@ -287,21 +280,11 @@ Item {
         return creatorView.responses[fid];
     }
     // Arrays from the host/model can be sequence wrappers (Array.isArray false).
-    function isList(v) { return v !== null && v !== undefined && typeof v === "object" && typeof v.length === "number"; }
-    function toList(v) { return isList(v) ? Array.prototype.slice.call(v) : []; }
-    function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
-    function shortAddr(a) { if (!a) return "-"; return a.length > 14 ? a.substr(0, 6) + "..." + a.substr(-4) : a; }
     function answerTimeText(r) {
         if (!r) return "";
         if (r.timeVerified === true) return root.fmtTime(r.receivedAt) + (r.timeSkew ? "  (sender's clock says " + root.fmtTime(r.submittedAt) + ")" : "");
         if (r.timeVerified === false) return root.fmtTime(r.submittedAt) + "  (time not verified)";
         return root.fmtTime(r.submittedAt);
-    }
-    function fmtTime(ms) { if (!ms) return ""; return Qt.formatDateTime(new Date(Number(ms)), "d MMM yyyy, hh:mm"); }
-    function normType(t) {
-        var s = String(t);
-        var known = ["text", "textarea", "radioButtons", "checkbox", "boolean", "dropdown", "scale", "number", "date", "time", "email", "url", "section"];
-        return known.indexOf(s) >= 0 ? s : "text";
     }
     function questionFor(f, qid) {
         if (!f || !f.questions) return null;
@@ -309,17 +292,6 @@ Item {
         return null;
     }
     // Answer value -> display text (choice values are option indices).
-    function answerText(q, v) {
-        if (v === null || v === undefined || v === "") return "";
-        var opts = (q && q.options) ? q.options : [];
-        var one = function (x) {
-            if (typeof x === "boolean") return x ? "Yes" : "No";
-            if (x !== null && typeof x === "object" && x.other !== undefined) return "Other: " + x.other;
-            return (typeof x === "number" && opts[x] !== undefined) ? String(opts[x]) : String(x);
-        };
-        if (isList(v)) { var parts = []; for (var i = 0; i < v.length; i++) parts.push(one(v[i])); return parts.join(", "); }
-        return one(v);
-    }
 
     // Sidebar rows: section headers + form rows, grouped by relationship.
     readonly property var sidebarRows: {
@@ -360,23 +332,37 @@ Item {
         return rows;
     }
 
+
+    // ── answering lives in FormRespond.qml (shared with the respond module); these keep the studio's
+    // and the test harness's names working ──
+    function restoreAnswerDraft() { respond.restoreAnswerDraft(); }
+    function setAnswer(qid, v) { respond.setAnswer(qid, v); }
+    function saveAnswerDraftNow() { respond.saveAnswerDraftNow(); }
+    function doSubmit() { respond.doSubmit(); }
+    function startEditing() { respond.startEditing(); }
+    function minutesLeft(until) { return respond.minutesLeft(until); }
+    function problemOf(q) { return respond.problemOf(q); }
+    // ── shared helpers (WbAnswers.js) ──
+    function isList(v) { return WA.isList(v); }
+    function toList(v) { return WA.toList(v); }
+    function plural(n, one, many) { return WA.plural(n, one, many); }
+    function shortAddr(a) { return WA.shortAddr(a); }
+    function fmtTime(ms) { return WA.fmtTime(ms); }
+    function normType(t) { return WA.normType(t); }
+    function answerText(q, v) { return WA.answerText(q, v); }
+    function isOtherVal(v) { return WA.isOtherVal(v); }
+    function emptyVal(v) { return WA.emptyVal(v); }
+
     // ── actions ──
     function selectForm(id) {
-        if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); }   // flush the form we're leaving
-        if (root.selectedId !== id) { root.detail = ({}); root.answers = ({}); }
+        respond.flushDraft();   // save the half-filled answers of the form we're leaving
+        if (root.selectedId !== id) { root.detail = ({}); respond.reset(); }
         root.selectedId = id; root.showErrors = false; root.respIndex = 0; root.respFilter = ""; root.editing = false;
         Qt.callLater(root.checkSeen);
         restoreAnswerDraft();
         Qt.callLater(root.loadDetail);
     }
     // Half-filled answers saved while typing come back (crash, restart, switching forms).
-    function restoreAnswerDraft() {
-        var f = root.sel, a = {};
-        if (f && f.answerDraft && !f.mySubmitted) for (var i = 0; i < f.answerDraft.length; i++) a[f.answerDraft[i].questionId] = f.answerDraft[i].value;
-        // the draft arrives with formDetail, after the form is selected: keep anything typed meanwhile
-        for (var k in root.answers) if (root.answers.hasOwnProperty(k) && root.answers[k] !== undefined) return;
-        root.answers = a;
-    }
     function joinForm() {
         var t = String(joinField.text || "").trim();
         if (!t) return;
@@ -387,98 +373,8 @@ Item {
             toast(r.pending ? "Form added - waiting for it to sync" : "Form opened");
         });
     }
-    function setAnswer(qid, v) { var a = Object.assign({}, root.answers); a[qid] = v; root.answers = a; answerDraftTimer.restart(); }
-    function saveAnswerDraftNow() {
-        if (root.previewDef || !root.sel || root.sel.mine || root.sel.mySubmitted) return;
-        var arr = [];
-        for (var k in root.answers) if (root.answers.hasOwnProperty(k)) arr.push({ questionId: k, value: root.answers[k] });
-        callVia("saveAnswerDraft", [root.sel.id, JSON.stringify(arr)], function () {});
-    }
-    function toggleChoice(qid, idx) {
-        var cur = toList(root.answers[qid]);
-        var at = cur.indexOf(idx);
-        if (at >= 0) cur.splice(at, 1); else { cur.push(idx); cur.sort(function (a, b) { return a - b; }); }
-        setAnswer(qid, cur);
-    }
     // ── answer rules (mirror contract/src/answers.mjs; the core enforces them too) ──
-    function isOtherVal(v) { return v !== null && v !== undefined && typeof v === "object" && !isList(v) && v.other !== undefined; }
-    function emptyVal(v) {
-        if (v === null || v === undefined) return true;
-        if (typeof v === "string") return v.trim() === "";
-        if (isList(v)) return v.length === 0;
-        if (isOtherVal(v)) return String(v.other || "").trim() === "";
-        return false;
-    }
-    function validateVal(q, v) {
-        var t = normType(q.type);
-        if (t === "section") return "";
-        if (emptyVal(v)) return q.required ? "required" : "";
-        var n = (q.options || []).length, isInt = function (x) { return typeof x === "number" && Math.floor(x) === x; };
-        var otherOk = function (x) { return !!q.allowOther && isOtherVal(x) && String(x.other).trim() !== ""; };
-        if (t === "text" || t === "textarea") return typeof v === "string" ? "" : "must be text";
-        if (t === "email") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim()) ? "" : "not an email address";
-        if (t === "url") return /^https?:\/\/\S+\.\S+$/i.test(String(v).trim()) ? "" : "not a link (https://...)";
-        if (t === "radioButtons" || t === "dropdown") return (isInt(v) && v >= 0 && v < n) || otherOk(v) ? "" : "pick one of the options";
-        if (t === "checkbox") { var l = toList(v), others = 0; for (var i = 0; i < l.length; i++) { if (otherOk(l[i])) others++; else if (!(isInt(l[i]) && l[i] >= 0 && l[i] < n)) return "pick from the options"; } return others > 1 ? "only one 'other'" : ""; }
-        if (t === "boolean") return typeof v === "boolean" ? "" : "pick yes or no";
-        if (t === "scale") { var lo = typeof q.min === "number" ? q.min : 1, hi = typeof q.max === "number" ? q.max : 5; return isInt(v) && v >= lo && v <= hi ? "" : "pick " + lo + "-" + hi; }
-        if (t === "number") { if (typeof v !== "number" || !isFinite(v)) return "must be a number"; if (typeof q.min === "number" && v < q.min) return "at least " + q.min; if (typeof q.max === "number" && v > q.max) return "at most " + q.max; return ""; }
-        if (t === "date") { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v)); if (!m) return "use YYYY-MM-DD"; var d = new Date(+m[1], +m[2] - 1, +m[3]); return d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? "" : "not a real date"; }
-        if (t === "time") return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v)) ? "" : "use HH:MM (24 h)";
-        return "";
-    }
-    function problemOf(q) { return validateVal(q, root.answers[q.id]); }
     // Deterministic shuffle per respondent + form (stable across restarts, different per person).
-    function seededOrder(n, seedStr) {
-        var h = 2166136261; for (var i = 0; i < seedStr.length; i++) { h ^= seedStr.charCodeAt(i); h = (h * 16777619) >>> 0; }
-        var idx = []; for (var k = 0; k < n; k++) idx.push(k);
-        for (var j = n - 1; j > 0; j--) { h = (h * 1103515245 + 12345) >>> 0; var r = h % (j + 1); var t = idx[j]; idx[j] = idx[r]; idx[r] = t; }
-        return idx;
-    }
-    readonly property var shownQuestions: {
-        var f = root.sel; if (!f || !f.questions) return [];
-        if (!f.shuffleQuestions) return f.questions;
-        var o = seededOrder(f.questions.length, root.myAddress + "|" + f.id), out = [];
-        for (var i = 0; i < o.length; i++) out.push(f.questions[o[i]]);
-        return out;
-    }
-    function optionOrder(q) {   // indices of q.options in display order
-        var n = (q.options || []).length;
-        if (!q.shuffleOptions) { var a = []; for (var i = 0; i < n; i++) a.push(i); return a; }
-        return seededOrder(n, root.myAddress + "|" + (root.sel ? root.sel.id : "") + "|" + q.id);
-    }
-    readonly property var progress: {
-        var qs = root.shownQuestions, n = 0, done = 0;
-        for (var i = 0; i < qs.length; i++) { if (normType(qs[i].type) === "section") continue; n++; if (!emptyVal(root.answers[qs[i].id])) done++; }
-        return { n: n, done: done };
-    }
-    function isMissing(q) {
-        var v = root.answers[q.id];
-        return !!q.required && (v === undefined || v === null || (typeof v === "string" && v.trim() === "") || (isList(v) && v.length === 0));
-    }
-    function doSubmit() {
-        var f = root.sel;
-        if (root.previewDef) { toast("This is a preview - answers aren't sent"); return; }
-        if (!f || !(f.canRespond || (root.editing && f.canEdit))) return;
-        for (var pi = 0; pi < f.questions.length; pi++) {
-            var pq = f.questions[pi], pe = problemOf(pq);
-            if (pe) { root.showErrors = true; toast(pq.text + ": " + pe); return; }
-        }
-        var arr = [];
-        for (var i = 0; i < f.questions.length; i++) {
-            var q = f.questions[i];
-            if (isMissing(q)) { root.showErrors = true; toast("Please answer: " + q.text); return; }
-            var v = root.answers[q.id];
-            if (normType(q.type) === "section") continue;
-            if (v === undefined) { var tt = normType(q.type); v = tt === "checkbox" ? [] : ((tt === "text" || tt === "textarea" || tt === "email" || tt === "url") ? "" : null); }
-            arr.push({ questionId: q.id, value: v });
-        }
-        answerDraftTimer.stop();   // the core drops the answer draft on submit
-        var wasEditing = root.editing;
-        act("submitResponse", [f.id, JSON.stringify(arr)], wasEditing ? "Your edited answer is sealed and sent" : "Response sealed and sent", function () {
-            root.answers = ({}); root.showErrors = false; root.editing = false;
-        });
-    }
     readonly property bool selQuiz: !!(root.sel && root.sel.quiz)
     readonly property int selUnscored: {
         var n = 0; if (!root.selQuiz) return 0;
@@ -816,7 +712,6 @@ Item {
     function saveCurrentDraftNow() { saveCurrentDraft(null, function () { toast("Draft saved"); }); }
     Timer { id: draftAutosave; interval: 2500; repeat: true; running: root.showCreate && root.draftDirty && !root.editingFormId
             onTriggered: if (!root.builderEmpty()) root.saveCurrentDraft(null) }
-    Timer { id: answerDraftTimer; interval: 900; onTriggered: root.saveAnswerDraftNow() }
     function closeBuilder() {
         if (root.editingFormId) { if (root.draftDirty) toast("Changes not saved"); root.showCreate = false; root.editingFormId = ""; return; }
         if (root.draftDirty && !builderEmpty()) saveCurrentDraft(null, function () { toast("Saved as a draft"); });
@@ -875,30 +770,6 @@ Item {
     TextEdit { id: clip; visible: false }
 
     // ── reusable bits ──
-    component WbButton: Rectangle {
-        id: btn
-        property string label: ""
-        property bool primary: false
-        property bool danger: false
-        property bool active: true
-        signal clicked()
-        implicitWidth: btnT.implicitWidth + 28
-        implicitHeight: 36
-        radius: 10
-        opacity: active ? 1 : 0.45
-        color: primary ? (btnMa.containsMouse && active ? "#9187f9" : root.wbPrimary) : (btnMa.containsMouse && active ? root.wbBorder : root.wbSurfaceRaised)
-        border.color: primary ? "transparent" : (danger ? root.wbError : root.wbBorder)
-        border.width: 1
-        Text { textFormat: Text.PlainText;
-            id: btnT
-            anchors.centerIn: parent
-            text: btn.label
-            font.pixelSize: 12
-            font.weight: Font.DemiBold
-            color: btn.primary ? "white" : (btn.danger ? root.wbError : root.wbText)
-        }
-        MouseArea { id: btnMa; anchors.fill: parent; hoverEnabled: true; cursorShape: btn.active ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: if (btn.active) btn.clicked() }
-    }
     component Badge: Rectangle {
         property string label: ""
         property color fg: root.wbSuccess
@@ -909,14 +780,6 @@ Item {
         color: bg
         Text { textFormat: Text.PlainText; id: bT; anchors.centerIn: parent; text: parent.label; font.pixelSize: 10; font.weight: Font.DemiBold; color: parent.fg }
     }
-    component SectionLabel: Text { textFormat: Text.PlainText; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.6; color: root.wbTextTert }
-    component LockIcon: Item {
-        property color tint: root.wbPrimary
-        implicitWidth: 16; implicitHeight: 19
-        Rectangle { x: 3; y: 0; width: 10; height: 12; radius: 5; color: "transparent"; border.color: parent.tint; border.width: 2 }
-        Rectangle { x: 0; y: 7; width: 16; height: 12; radius: 3; color: parent.tint }
-        Rectangle { x: 7; y: 11; width: 2; height: 4; radius: 1; color: root.wbBg }
-    }
     component FormGlyph: Rectangle {
         implicitWidth: 32; implicitHeight: 32; radius: 8; color: root.wbPrimarySubtle
         Column {
@@ -925,13 +788,6 @@ Item {
             Rectangle { width: 10; height: 2; radius: 1; color: root.wbPrimary }
             Rectangle { width: 12; height: 2; radius: 1; color: root.wbPrimary }
         }
-    }
-    component InputBox: Rectangle {
-        property bool invalid: false
-        radius: 10
-        color: root.wbSurfaceRaised
-        border.color: invalid ? root.wbError : root.wbBorder
-        border.width: 1
     }
 
     RowLayout {
@@ -1649,342 +1505,15 @@ Item {
                         }
                     }
 
-                    // ══ RESPONDENT VIEW ══
-                    ColumnLayout {
+                    // ══ RESPONDENT VIEW ══ (FormRespond.qml, shared with the respond module - ADR 0021)
+                    FormRespond {
+                        id: respond
                         Layout.fillWidth: true
                         visible: !!(root.sel && !root.sel.mine && !root.sel.coOwner)
-                        spacing: 14
-
-                        Text { textFormat: Text.PlainText
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextTert
-                            visible: text.length > 0
-                            text: {
-                                var f = root.sel, parts = [];
-                                if (!f) return "";
-                                if (f.showResponseCount) parts.push(root.plural((f.confirmations || []).length, "response", "responses") + " received so far");
-                                if (f.maxResponses) parts.push("limited to " + f.maxResponses);
-                                if (f.expiresAt) parts.push((f.status === "closed" ? "closed " : "closes ") + root.fmtTime(f.expiresAt));
-                                if (f.answerDraft && !f.mySubmitted) parts.push("your unsent answers were restored");
-                                if (f.anonymous) parts.push("anonymous: you answer under a one-off identity for this form - the creator can't link it to your address");
-                                return parts.join("  ·  ");
-                            }
-                        }
-                        // status banner (submitted / confirmed / closed / not allowed)
-                        Rectangle {
-                            Layout.fillWidth: true
-                            visible: !!(root.sel && !root.sel.canRespond)
-                            implicitHeight: bannerT.implicitHeight + 26
-                            radius: 12
-                            property bool good: !!(root.sel && root.sel.mySubmitted)
-                            property bool danger: !!(root.sel && (root.sel.linkMismatch || (root.sel.contested && root.sel.pinnedCreator !== root.sel.creator)))
-                            color: danger ? root.wbErrorSubtle : (good ? root.wbSuccessSubtle : root.wbSurfaceRaised)
-                            border.color: danger ? root.wbError : (good ? "#2a4d3a" : root.wbBorder)
-                            border.width: 1
-                            Text { textFormat: Text.PlainText;
-                                id: bannerT
-                                anchors.fill: parent
-                                anchors.margins: 13
-                                wrapMode: Text.WordWrap
-                                font.pixelSize: 13
-                                color: parent.danger ? root.wbError : (parent.good ? root.wbSuccess : root.wbTextSec)
-                                text: {
-                                    var f = root.sel;
-                                    if (!f) return "";
-                                    if (f.linkMismatch) return "This form's creator (" + root.shortAddr(f.creator) + ") is not the one in the link you opened (" + root.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it. If that link was wrong, Remove the form, then open the right one.";
-                                    if (f.needsLink) return "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it, and WhisperBox only sends answers to the creator a link names.";
-                                    if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
-                                    if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed
-                                        ? "Your answers were received - the creator sent you a receipt."
-                                        : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.");
-                                    if (f.status === "closed") return "This form is closed and no longer accepts answers.";
-                                    if (!f.allowed) return "This form only accepts answers from specific addresses, and yours (" + root.shortAddr(root.myAddress) + ") isn't on the list.";
-                                    if (!f.publicKey) return "Still syncing this form...";
-                                    return "";
-                                }
-                            }
-                        }
-                        // private replies + quiz score from the creator (sealed to this answer)
-                        Rectangle {
-                            Layout.fillWidth: true
-                            visible: !!(root.sel && root.sel.myReplies && root.sel.myReplies.length)
-                            implicitHeight: repCol.implicitHeight + 28
-                            radius: 12; color: root.wbPrimarySubtle; border.color: root.wbPrimary; border.width: 1
-                            ColumnLayout {
-                                id: repCol; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14; spacing: 10
-                                Text { textFormat: Text.PlainText; text: "FROM THE CREATOR - ONLY YOU CAN READ THIS"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 0.8; color: root.wbPrimary }
-                                Repeater {
-                                    model: root.sel && root.sel.myReplies ? root.sel.myReplies : []
-                                    ColumnLayout {
-                                        Layout.fillWidth: true; spacing: 4
-                                        Text { textFormat: Text.PlainText; visible: modelData.kind === "score"; text: "Your score: " + modelData.score + " / " + modelData.outOf; font.pixelSize: 18; font.weight: Font.Bold; color: root.wbText }
-                                        Text { textFormat: Text.PlainText; visible: modelData.kind === "score"; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
-                                            text: {
-                                                if (modelData.kind !== "score" || !root.sel) return "";
-                                                var c = modelData.correct || {}, out = [];
-                                                for (var i = 0; i < root.sel.questions.length; i++) { var q = root.sel.questions[i]; if (q.id in c) out.push((c[q.id] ? "\u2713 " : "\u2717 ") + q.text); }
-                                                return out.join("\n");
-                                            } }
-                                        Text { textFormat: Text.PlainText; visible: !!modelData.message; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData.message || ""; font.pixelSize: 14; color: root.wbText }
-                                        Text { textFormat: Text.PlainText; text: modelData.at ? root.fmtTime(modelData.at) : ""; font.pixelSize: 10; color: root.wbTextTert }
-                                    }
-                                }
-                            }
-                        }
-
-                        // What I answered (a private local copy - the sent answers are sealed to the creator)
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            visible: !!(root.sel && !root.sel.mine && root.sel.mySubmitted && !root.editing)
-                            spacing: 10
-                            RowLayout {
-                                Layout.fillWidth: true
-                                SectionLabel { Layout.fillWidth: true; text: "YOUR ANSWERS" }
-                                WbButton {
-                                    visible: !!(root.sel && root.sel.canEdit)
-                                    label: "Edit answers (" + root.minutesLeft(root.sel ? root.sel.editUntil : 0) + " min left)"
-                                    onClicked: root.startEditing()
-                                }
-                            }
-                            Text { textFormat: Text.PlainText
-                                visible: !!(root.sel && root.sel.mySubmitted && !root.sel.myAnswers)
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "Sent from an older WhisperBox that didn't keep a copy. Only the creator can read them now."
-                                font.pixelSize: 12; color: root.wbTextTert
-                            }
-                            Repeater {
-                                model: (root.sel && root.sel.myAnswers) ? root.sel.questions : []
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 2
-                                    property var v: {
-                                        var a = root.sel.myAnswers.answers || [];
-                                        for (var i = 0; i < a.length; i++) if (a[i].questionId === modelData.id) return a[i].value;
-                                        return null;
-                                    }
-                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                        text: modelData.text; font.pixelSize: 12; color: root.wbTextTert }
-                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                        property string t: root.answerText(modelData, parent.v)
-                                        text: t.length ? t : "(no answer)"
-                                        font.pixelSize: 14; color: t.length ? root.wbText : root.wbTextTert }
-                                }
-                            }
-                            Text { textFormat: Text.PlainText
-                                visible: !!(root.sel && root.sel.myAnswers)
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "Kept only on this device. What went out is sealed - only the creator can open it."
-                                font.pixelSize: 11; color: root.wbTextTert
-                            }
-                        }
-
-                        // progress (longer forms)
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            visible: !!(root.sel && root.sel.canRespond) && root.progress.n >= 4
-                            spacing: 4
-                            Text { textFormat: Text.PlainText; text: root.progress.done + " of " + root.progress.n + " answered"; font.pixelSize: 11; color: root.wbTextTert }
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 4; radius: 2; color: root.wbSurfaceRaised
-                                Rectangle { height: parent.height; radius: 2; color: root.wbPrimary; width: parent.width * (root.progress.n ? root.progress.done / root.progress.n : 0) } }
-                        }
-
-                        Repeater {
-                            model: (root.sel && (root.sel.canRespond || (root.editing && root.sel.canEdit))) ? root.shownQuestions : []
-                            ColumnLayout {
-                                id: qBlock
-                                Layout.fillWidth: true
-                                spacing: 8
-                                property var q: modelData
-                                property string qt: root.normType(modelData.type)
-                                property string problem: root.showErrors ? root.problemOf(modelData) : ""
-                                property bool invalid: problem.length > 0
-                                property var cur: root.answers[modelData.id]
-                                property bool single: qt === "text" || qt === "email" || qt === "url" || qt === "number" || qt === "date" || qt === "time"
-                                property bool choice: qt === "radioButtons" || qt === "checkbox" || qt === "dropdown" || qt === "boolean"
-                                property bool multi: qt === "checkbox"
-                                property string otherText: root.isOtherVal(cur) ? String(cur.other) : ""
-                                function hasOther() {
-                                    if (root.isOtherVal(cur)) return true;
-                                    var l = root.toList(cur); for (var i = 0; i < l.length; i++) if (root.isOtherVal(l[i])) return true; return false;
-                                }
-                                function setOther(t, on) {
-                                    if (!multi) { root.setAnswer(q.id, on ? { other: t } : null); return; }
-                                    var l = root.toList(cur).filter(function (x) { return !root.isOtherVal(x); });
-                                    if (on) l.push({ other: t });
-                                    root.setAnswer(q.id, l);
-                                }
-
-                                Text { textFormat: Text.PlainText
-                                    Layout.fillWidth: true
-                                    text: (qBlock.qt === "section" ? "" : (index + 1) + ". ") + qBlock.q.text + (qBlock.q.required ? "  *" : "")
-                                    wrapMode: Text.WordWrap
-                                    font.pixelSize: qBlock.qt === "section" ? 17 : 14
-                                    font.weight: qBlock.qt === "section" ? Font.Bold : Font.DemiBold
-                                    color: qBlock.invalid ? root.wbError : root.wbText
-                                }
-                                Text { textFormat: Text.PlainText
-                                    visible: !!qBlock.q.help
-                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                    text: qBlock.q.help || ""; font.pixelSize: 12; color: root.wbTextTert
-                                }
-                                // one-line inputs: text, email, link, number, date, time
-                                InputBox {
-                                    visible: qBlock.single
-                                    Layout.fillWidth: true
-                                    implicitHeight: 42
-                                    invalid: qBlock.invalid
-                                    TextField {
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13; background: null
-                                        placeholderText: ({ email: "name@example.com", url: "https://...", number: "A number", date: "YYYY-MM-DD", time: "HH:MM" })[qBlock.qt] || "Your answer"
-                                        inputMethodHints: qBlock.qt === "number" ? Qt.ImhFormattedNumbersOnly : (qBlock.qt === "email" ? Qt.ImhEmailCharactersOnly : Qt.ImhNone)
-                                        text: qBlock.cur === undefined || qBlock.cur === null ? "" : String(qBlock.cur)
-                                        onTextChanged: {
-                                            if (qBlock.qt !== "number") { if (text !== String(qBlock.cur === undefined || qBlock.cur === null ? "" : qBlock.cur)) root.setAnswer(qBlock.q.id, text); return; }
-                                            var t = text.trim().replace(",", ".");
-                                            var v = t === "" ? null : (isNaN(Number(t)) ? t : Number(t));
-                                            if (v !== qBlock.cur) root.setAnswer(qBlock.q.id, v);
-                                        }
-                                    }
-                                }
-                                InputBox {
-                                    visible: qBlock.qt === "textarea"
-                                    Layout.fillWidth: true
-                                    implicitHeight: 104
-                                    invalid: qBlock.invalid
-                                    ScrollView {
-                                        anchors.fill: parent
-                                        anchors.margins: 4
-                                        TextArea {
-                                            color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13
-                                            wrapMode: TextEdit.Wrap; background: null; placeholderText: "Your answer"
-                                            text: typeof qBlock.cur === "string" ? qBlock.cur : ""
-                                            onTextChanged: if (text !== (typeof qBlock.cur === "string" ? qBlock.cur : "")) root.setAnswer(qBlock.q.id, text)
-                                        }
-                                    }
-                                }
-                                // choices: single / multiple / dropdown (compact) / yes-no
-                                Flow {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    visible: qBlock.choice
-                                    Repeater {
-                                        model: qBlock.qt === "boolean" ? [0, 1] : (qBlock.choice ? root.optionOrder(qBlock.q) : [])
-                                        Rectangle {
-                                            id: opt
-                                            property int oi: modelData
-                                            property string label: qBlock.qt === "boolean" ? (oi === 0 ? "Yes" : "No") : String((qBlock.q.options || [])[oi])
-                                            property var val: qBlock.qt === "boolean" ? oi === 0 : oi
-                                            property bool on: qBlock.multi ? root.toList(qBlock.cur).indexOf(oi) >= 0 : qBlock.cur === val
-                                            width: qBlock.qt === "dropdown" ? optLbl.implicitWidth + 28 : qBlock.width
-                                            height: qBlock.qt === "dropdown" ? 32 : 46
-                                            radius: qBlock.qt === "dropdown" ? 16 : 10
-                                            color: on ? root.wbPrimarySubtle : (optMa.containsMouse ? root.wbBorderSubtle : root.wbSurfaceRaised)
-                                            border.color: on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)
-                                            border.width: 1
-                                            RowLayout {
-                                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                                Rectangle {
-                                                    visible: qBlock.qt !== "dropdown"
-                                                    width: 16; height: 16; radius: qBlock.multi ? 4 : 8; color: "transparent"
-                                                    border.color: opt.on ? root.wbPrimary : root.wbTextTert; border.width: 2
-                                                    Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: qBlock.multi ? 2 : 4; color: root.wbPrimary; visible: opt.on }
-                                                }
-                                                Text { id: optLbl; textFormat: Text.PlainText; Layout.fillWidth: qBlock.qt !== "dropdown"; text: opt.label; font.pixelSize: 13; color: opt.on ? root.wbPrimary : root.wbText; elide: Text.ElideRight }
-                                            }
-                                            MouseArea {
-                                                id: optMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: qBlock.multi ? root.toggleChoice(qBlock.q.id, opt.oi) : root.setAnswer(qBlock.q.id, opt.on && !qBlock.q.required ? null : opt.val)
-                                            }
-                                        }
-                                    }
-                                }
-                                // "Other: ___"
-                                RowLayout {
-                                    visible: qBlock.choice && !!qBlock.q.allowOther && qBlock.qt !== "boolean"
-                                    Layout.fillWidth: true
-                                    spacing: 10
-                                    Rectangle {
-                                        width: 16; height: 16; radius: qBlock.multi ? 4 : 8; color: "transparent"
-                                        border.color: qBlock.hasOther() ? root.wbPrimary : root.wbTextTert; border.width: 2
-                                        Rectangle { anchors.centerIn: parent; width: 8; height: 8; radius: qBlock.multi ? 2 : 4; color: root.wbPrimary; visible: qBlock.hasOther() }
-                                        MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: qBlock.setOther(otherField.text, !qBlock.hasOther()) }
-                                    }
-                                    Text { textFormat: Text.PlainText; text: "Other:"; font.pixelSize: 13; color: root.wbTextSec }
-                                    InputBox { Layout.fillWidth: true; implicitHeight: 36
-                                        TextField { id: otherField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
-                                            color: root.wbText; placeholderTextColor: root.wbTextTert; font.pixelSize: 13; background: null; placeholderText: "Your own answer"
-                                            text: qBlock.otherText
-                                            onTextChanged: if (text !== qBlock.otherText) qBlock.setOther(text, text.trim() !== "") } }
-                                }
-                                // linear scale / stars
-                                ColumnLayout {
-                                    visible: qBlock.qt === "scale"
-                                    Layout.fillWidth: true
-                                    spacing: 4
-                                    property int lo: typeof qBlock.q.min === "number" ? qBlock.q.min : 1
-                                    property int hi: typeof qBlock.q.max === "number" ? qBlock.q.max : 5
-                                    Flow {
-                                        Layout.fillWidth: true; spacing: 6
-                                        Repeater {
-                                            model: qBlock.qt === "scale" ? Math.max(0, Math.min(101, parent.parent.hi - parent.parent.lo + 1)) : 0   // at most 101 (FR-7)
-                                            Rectangle {
-                                                property int v: parent.parent.lo + index
-                                                property bool stars: qBlock.q.style === "stars"
-                                                property bool on: stars ? (typeof qBlock.cur === "number" && v <= qBlock.cur) : qBlock.cur === v
-                                                width: stars ? 34 : 40; height: stars ? 34 : 36; radius: stars ? 17 : 8
-                                                color: stars ? "transparent" : (on ? root.wbPrimary : root.wbSurfaceRaised)
-                                                border.color: stars ? "transparent" : (on ? root.wbPrimary : (qBlock.invalid ? root.wbError : root.wbBorder)); border.width: 1
-                                                Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: parent.stars ? "★" : String(parent.v)
-                                                    font.pixelSize: parent.stars ? 26 : 13; font.weight: Font.DemiBold
-                                                    color: parent.stars ? (parent.on ? root.wbAccent : root.wbBorder) : (parent.on ? "white" : root.wbText) }
-                                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setAnswer(qBlock.q.id, parent.v) }
-                                            }
-                                        }
-                                    }
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        visible: !!(qBlock.q.minLabel || qBlock.q.maxLabel)
-                                        Text { textFormat: Text.PlainText; text: qBlock.q.minLabel || ""; font.pixelSize: 11; color: root.wbTextTert }
-                                        Item { Layout.fillWidth: true }
-                                        Text { textFormat: Text.PlainText; text: qBlock.q.maxLabel || ""; font.pixelSize: 11; color: root.wbTextTert }
-                                    }
-                                }
-                                Text { textFormat: Text.PlainText; visible: qBlock.invalid; text: qBlock.problem; font.pixelSize: 12; color: root.wbError }
-                            }
-                        }
-
-                        WbButton {
-                            visible: !!(root.sel && (root.sel.canRespond || (root.editing && root.sel.canEdit)))
-                            Layout.fillWidth: true
-                            implicitHeight: 46
-                            primary: true
-                            label: root.busy("submitResponse") ? "Sealing..." : (root.editing ? "Seal and send the edited answer" : "Seal and send answers")
-                            active: !root.busy("submitResponse")
-                            onClicked: root.doSubmit()
-                        }
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: privRow.implicitHeight + 24
-                            radius: 12
-                            color: "#141c18"
-                            border.color: "#24392d"
-                            border.width: 1
-                            RowLayout {
-                                id: privRow
-                                anchors.fill: parent
-                                anchors.margins: 12
-                                spacing: 10
-                                LockIcon { tint: root.wbSuccess; Layout.alignment: Qt.AlignTop }
-                                Text { textFormat: Text.PlainText;
-                                    Layout.fillWidth: true
-                                    text: "Answers are encrypted to the creator's key before they leave this device. Everyone else on the network - including peers that relay and store them - sees only an opaque blob. The receipt the creator sends back can't be linked to your address."
-                                    wrapMode: Text.WordWrap
-                                    font.pixelSize: 12
-                                    color: root.wbSuccess
-                                }
-                            }
-                        }
+                        form: root.sel
+                        myAddress: root.myAddress
+                        preview: !!root.previewDef
+                        host: root
                     }
                 }
             }

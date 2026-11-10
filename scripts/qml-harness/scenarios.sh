@@ -5,7 +5,7 @@
 # Run render.sh first (builds ./harness). Env: WB_DS, WB_OUT as for render.sh.
 set -uo pipefail
 HDIR="$(cd "$(dirname "$0")" && pwd)"
-QML="$HDIR/../../module/Main.qml"
+QML="$HDIR/../../module/qml/Main.qml"
 FX="$HDIR/fixtures"
 OUT="${WB_OUT:-/tmp/wb-harness}/scenarios"
 mkdir -p "$OUT"

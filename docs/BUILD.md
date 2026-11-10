@@ -98,7 +98,7 @@ WB_TEST_OUT=/tmp/wb whisperbox_core/test/run-e2e.sh          # prints "N/N check
 whisperbox_core/test/run-bridge-build.sh /tmp/wb-bridge && (cd packages/client && WB_BRIDGE=/tmp/wb-bridge node --test test/interop.test.mjs)
 WB_DS=<logos-design-system>/src/qml WB_OUT=/tmp/r bash scripts/qml-harness/render.sh     # screenshots in $WB_OUT
 WB_DS=... WB_OUT=/tmp/r bash scripts/qml-harness/scenarios.sh                          # $WB_OUT/scenarios/*.png
-python3 ~/logos-skills/logos-basecamp-module/qml-plaintext.py --check module/Main.qml  # every Text is PlainText
+python3 ~/logos-skills/logos-basecamp-module/qml-plaintext.py --check module/qml/Main.qml  # every Text is PlainText
 ```
 
 The end-to-end test also runs under AddressSanitizer (no system libasan needed; clang ships it):

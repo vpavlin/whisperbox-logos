@@ -1,0 +1,39 @@
+{
+  "name": "whisperbox_respond",
+  "display_name": "WhisperBox - Answer a Form",
+  "version": "0.5.6",
+  "type": "ui_qml",
+  "category": "social",
+  "description": "Answer one WhisperBox form, opened from a link or by another app (intent whisperbox.respond). Answers are sealed end to end: only the form's creators can read them. Uses the whisperbox_core engine; making and managing forms is the WhisperBox studio.",
+  "view": "qml/Main.qml",
+  "icon": "icon.png",
+  "dependencies": [
+    "whisperbox_core"
+  ],
+  "provides": [
+    {
+      "intent": "whisperbox.respond",
+      "params": [
+        {
+          "name": "link",
+          "type": "string",
+          "required": true,
+          "description": "The form's link: whisperbox://form?id=<form>&by=<creator>"
+        }
+      ]
+    }
+  ],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

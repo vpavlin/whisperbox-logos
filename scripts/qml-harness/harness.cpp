@@ -1,5 +1,5 @@
 // Offscreen QQuickView render harness for the whisperbox view.
-// Loads the REAL module/Main.qml with a mock `logos` context property that
+// Loads the REAL module/qml/Main.qml with a mock `logos` context property that
 // serves a fixture snapshot, lets the poll timers fire, then saves a screenshot
 // and reports any QML errors. Catches runtime QML errors qmllint cannot.
 //

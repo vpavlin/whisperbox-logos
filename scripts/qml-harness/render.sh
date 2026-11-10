@@ -10,7 +10,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HDIR="$ROOT/scripts/qml-harness"
-QML="$ROOT/module/Main.qml"
+QML="$ROOT/module/qml/Main.qml"
 OUTDIR="${WB_OUT:-/tmp/wb-harness}"
 mkdir -p "$OUTDIR"
 
