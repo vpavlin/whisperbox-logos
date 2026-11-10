@@ -2,7 +2,7 @@
 # release, so they can be merged into the Linux packages (one .lgx per module, every platform inside).
 #
 # Runs on a push of a tag `darwin-*` (git tag darwin-0.4.2 && git push origin darwin-0.4.2), or by hand.
-# The release `<tag>` gets whisperbox_core-darwin-arm64.lgx, whisperbox-darwin-arm64.lgx and the build logs.
+# The release `<tag>` gets whisperbox_core-darwin-arm64.lgx, whisperbox-darwin-arm64.lgx, whisperbox_respond-darwin-arm64.lgx and the build logs.
 # Basecamp ships no Intel-Mac build, so there is no darwin-amd64.
 name: darwin packages
 
@@ -32,7 +32,7 @@ jobs:
           set -u -o pipefail
           mkdir -p out logs
           ok=1
-          for m in whisperbox_core:whisperbox_core whisperbox:module; do
+          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond; do
             name=${m%%:*}; dir=${m#*:}
             if (cd "$dir" && nix build --accept-flake-config .#lgx-portable -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
               cp -L res-$name/*.lgx "out/$name-darwin-arm64.lgx"; echo "$name OK"

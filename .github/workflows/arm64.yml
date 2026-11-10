@@ -2,7 +2,7 @@
 # can be merged into the linux-amd64 packages (one .lgx per module, both platforms inside).
 #
 # Runs on a push of a tag `arm64-*` (git tag arm64-0.5.5 && git push origin arm64-0.5.5), or by hand.
-# The release `<tag>` gets whisperbox_core-linux-arm64.lgx, whisperbox-linux-arm64.lgx and the build logs.
+# The release `<tag>` gets whisperbox_core-linux-arm64.lgx, whisperbox-linux-arm64.lgx, whisperbox_respond-linux-arm64.lgx and the build logs.
 #
 # ARMv8.0 (Pi 3/4, MT8183 Chromebooks like the Lenovo Duet) has no LSE atomics: the build checks the
 # plugin has no inline LSE instructions, which would SIGILL there.
@@ -34,7 +34,7 @@ jobs:
           set -u -o pipefail
           mkdir -p out logs
           ok=1
-          for m in whisperbox_core:whisperbox_core whisperbox:module; do
+          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond; do
             name=${m%%:*}; dir=${m#*:}
             if (cd "$dir" && nix build --accept-flake-config .#lgx-portable -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
               cp -L res-$name/*.lgx "out/$name-linux-arm64.lgx"; echo "$name OK"

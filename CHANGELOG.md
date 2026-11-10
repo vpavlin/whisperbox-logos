@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 desktop core + studio + NEW respond module (2026-11-10) - Loam optional, answer a form from a link
+
+ADR 0021. Android unchanged.
+- **whisperbox_respond (new module):** answer one form, opened from a link or by another app with the
+  intent `whisperbox.respond {link}`; paste a link when opened directly. Nothing to create or manage.
+  It uses the same core and the same answering component as the studio.
+- **Loam is optional:** `whisperbox_core` now requires only `delivery_module`; `loam_core` is optional.
+  With Loam installed nothing changes (it is used exactly as before). Without it the core talks to
+  `delivery_module` directly through Loam's shared wire header (loam_core 0.7.4), on the same network
+  and wire, and joins a delivery node another module already started.
+- **Studio:** the answering UI is now `FormRespond.qml`, shared with the respond module; every studio
+  screen renders pixel-identical. Views moved under `qml/` (the builder only packages the entry file
+  when it sits at the package root).
+- Tests: ALL 8 LAYERS GREEN (e2e 356, incl. Loam peer <-> direct peer and adopting a running node).
+  Live on logos.test: a delivery_module-only build <-> the published 0.5.5 on loam_core 0.7.4, forms and
+  answers both ways.
+
 ## 0.5.5 desktop core + view, Android 0.5.5 (2026-11-05) - open-review fixes, round 5
 
 From the open-review report on 0.5.4 (https://or.vpavlin.xyz/whisperbox-logos-3915b2592feb-full/),
