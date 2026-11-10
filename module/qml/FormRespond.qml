@@ -45,6 +45,9 @@ ColumnLayout {
     property var answers: ({})
     property bool editing: false        // editing an already-sent answer
     property bool showErrors: false
+    // a draft saved earlier was put back when the form opened (not the one autosaved while typing,
+    // which used to flip this note on mid-typing and shift the form under the cursor)
+    property bool draftRestored: false
     property double nowTick: Date.now() // refreshes "N min left"
     Timer { interval: 20000; running: true; repeat: true; onTriggered: fr.nowTick = Date.now() }
     Timer { id: answerDraftTimer; interval: 900; onTriggered: fr.saveAnswerDraftNow() }
@@ -62,7 +65,7 @@ ColumnLayout {
 
     // ── answering ──
     // a new form: forget what was typed for the previous one
-    function reset() { answerDraftTimer.stop(); fr.answers = ({}); fr.showErrors = false; fr.editing = false; }
+    function reset() { answerDraftTimer.stop(); fr.answers = ({}); fr.showErrors = false; fr.editing = false; fr.draftRestored = false; }
     // leaving a form: save the half-filled answers now
     function flushDraft() { if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); } }
     // Half-filled answers saved while typing come back (crash, restart, switching forms).
@@ -72,6 +75,7 @@ ColumnLayout {
         // the draft arrives with formDetail, after the form is selected: keep anything typed meanwhile
         for (var k in fr.answers) if (fr.answers.hasOwnProperty(k) && fr.answers[k] !== undefined) return;
         fr.answers = a;
+        fr.draftRestored = Object.keys(a).length > 0;
     }
     function setAnswer(qid, v) { var a = Object.assign({}, fr.answers); a[qid] = v; fr.answers = a; answerDraftTimer.restart(); }
     function saveAnswerDraftNow() {
@@ -147,7 +151,7 @@ ColumnLayout {
             if (f.showResponseCount) parts.push(fr.plural((f.confirmations || []).length, "response", "responses") + " received so far");
             if (f.maxResponses) parts.push("limited to " + f.maxResponses);
             if (f.expiresAt) parts.push((f.status === "closed" ? "closed " : "closes ") + fr.fmtTime(f.expiresAt));
-            if (f.answerDraft && !f.mySubmitted) parts.push("your unsent answers were restored");
+            if (fr.draftRestored && !f.mySubmitted) parts.push("your unsent answers were restored");
             if (f.anonymous) parts.push("anonymous: you answer under a one-off identity for this form - the creator can't link it to your address");
             return parts.join("  ·  ");
         }
