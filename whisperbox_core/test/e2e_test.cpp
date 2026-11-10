@@ -64,13 +64,18 @@ static std::string g_base;
 
 struct Peer {
     std::string name, dir;
+    bool loam = true;            // ADR 0021: false = no loam_core installed, the core goes direct
+    bool nodeAlreadyUp = false;  // the delivery node exists and runs before this module starts
     std::unique_ptr<FakeNode> node;
     std::unique_ptr<WhisperboxCoreImpl> core;
     void start() {
         setenv("WHISPERBOX_CORE_DATA", dir.c_str(), 1);
         node = std::make_unique<FakeNode>(); node->name = name;
+        node->loamInstalled = loam;
+        if (nodeAlreadyUp) { node->created = node->up = true; }   // another module created + started the node first
         core = std::make_unique<WhisperboxCoreImpl>();
         core->modules().loam_core.node = node.get();
+        core->modules().delivery_module.node = node.get();
         FakeBus::get().nodes.push_back(node.get());
         core->fakeStart();
     }
@@ -114,6 +119,13 @@ static std::unique_ptr<Peer> mkPeer(const std::string& name) {
     auto p = std::make_unique<Peer>(); p->name = name; p->dir = g_base + "/" + name;
     p->start(); return p;
 }
+// ADR 0021: a desktop without loam_core (delivery_module directly)
+static std::unique_ptr<Peer> mkDirectPeer(const std::string& name, bool nodeAlreadyUp = false) {
+    auto p = std::make_unique<Peer>(); p->name = name; p->dir = g_base + "/" + name;
+    p->loam = false; p->nodeAlreadyUp = nodeAlreadyUp;
+    p->start(); return p;
+}
+static std::string transportOf(Peer& p) { json d = p.snap()["diagnostics"]; return d.is_object() ? d.value("transport", "") : ""; }
 static void pump(int ms) {
     QElapsedTimer t; t.start();
     while (t.elapsed() < ms) { QCoreApplication::processEvents(QEventLoop::AllEvents, 20); usleep(2000); }
@@ -176,7 +188,41 @@ int main(int argc, char** argv) {
     std::string addrA = A->snap()["identity"]["address"], addrB = B->snap()["identity"]["address"], addrC = C->snap()["identity"]["address"];
     CHECK(addrA != addrB && addrB != addrC, "identities are distinct");
 
-    // ── Scenario A ─────────────────────────────────────────────────────────────
+    // ── ADR 0021: Loam is optional (first, while the topic is small: later sections flood it and the
+    // receive budget would slow a fresh peer's catch-up).  A desktop without loam_core talks to delivery_module directly,
+    // on the same wire; with loam_core installed nothing changes. ──
+    std::printf("ADR 0021 (direct delivery_module <-> loam_core):\n");
+    {
+        auto L = mkPeer("adr21-loam");
+        auto D = mkDirectPeer("adr21-direct");
+        CHECK(waitUntil([&] { return L->snap()["nodeReady"] == true && D->snap()["nodeReady"] == true; }, 30000), "a loam_core peer and a direct peer both come up");
+        CHECK(transportOf(*L) == "loam_core", "with loam_core installed the core uses it, as before (" + transportOf(*L) + ")");
+        CHECK(transportOf(*D) == "delivery_module", "without loam_core the core goes to delivery_module directly (" + transportOf(*D) + ")");
+        CHECK(D->node->starts == 1 && D->node->subscribed, "the direct peer created, started and subscribed its node");
+        json q = {{"title", "Direct"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Hi?"}, {"required", true}}})}};
+        // direct -> loam
+        std::string f1 = D->call(D->core->createForm(q.dump())).value("formId", "");
+        CHECK(!f1.empty() && waitUntil([&] { return hasForm(*L, f1); }, 15000), "a form made on the direct peer reaches the loam_core peer");
+        openLink(*L, f1);
+        CHECK(L->call(L->core->submitResponse(f1, json::array({{{"questionId", "q1"}, {"value", "from loam"}}}).dump())).value("ok", false), "the loam_core peer answers it");
+        CHECK(waitUntil([&] { auto r = responsesOf(*D, f1); return r.size() == 1 && r[0]["answers"].dump().find("from loam") != std::string::npos; }, 15000),
+              "the direct peer decrypts the answer");
+        // loam -> direct
+        std::string f2 = L->call(L->core->createForm(q.dump())).value("formId", "");
+        CHECK(!f2.empty() && waitUntil([&] { return hasForm(*D, f2); }, 15000), "a form made on the loam_core peer reaches the direct peer");
+        openLink(*D, f2);
+        CHECK(D->call(D->core->submitResponse(f2, json::array({{{"questionId", "q1"}, {"value", "from direct"}}}).dump())).value("ok", false), "the direct peer answers it");
+        CHECK(waitUntil([&] { auto r = responsesOf(*L, f2); return r.size() == 1 && r[0]["answers"].dump().find("from direct") != std::string::npos; }, 15000),
+              "the loam_core peer decrypts the answer");
+        // adopt: another module (e.g. loam_core, or an official app) created and started the node first
+        auto A = mkDirectPeer("adr21-adopt", /*nodeAlreadyUp=*/true);
+        CHECK(waitUntil([&] { return A->snap()["nodeReady"] == true; }, 30000), "a direct peer adopts a delivery node another module already started");
+        CHECK(A->node->starts == 0, "...without starting it a second time");
+        CHECK(waitUntil([&] { return hasForm(*A, f1) && hasForm(*A, f2); }, 30000), "...and catches up the forms already on the topic");
+        A->stop(); D->stop(); L->stop();
+    }
+
+
     std::printf("scenario A (create → respond → decrypt → confirm → CSV):\n");
     json def = {{"title", "Lunch poll"}, {"description", "Friday team lunch"},
         {"questions", json::array({

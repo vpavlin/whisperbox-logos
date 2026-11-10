@@ -1,6 +1,7 @@
 #pragma once
 // In-process stand-in for the Waku fleet + loam_core (test-only).
 #include "logos_module_context.h"
+#include "logos_lp_client.h"
 #include <QCoreApplication>
 #include <QTimer>
 #include <map>
@@ -19,6 +20,11 @@ struct FakeNode {
     int failStarts = 0;   // the next N start() calls fail (a transient loam_core error, FR-14)
     std::string senderId;
     std::set<std::string> joined;
+    // ADR 0021: loamInstalled=false = no loam_core in this Basecamp (its status call answers empty);
+    // the core then goes direct and these raw delivery_module event handlers are its receive path
+    bool loamInstalled = true;
+    std::vector<std::pair<std::string, logos::RawFn>> raw;
+    void fireRaw(const std::string& ev, const nlohmann::json& args) { for (auto& h : raw) if (h.first == ev) h.second(args); }
     FakeLoamCore::RxFn onRx;
     FakeLoamCore::StatusFn onStatus;
     long rx = 0, tx = 0;
@@ -45,13 +51,18 @@ struct FakeBus {
         if (from && !from->online) { dropped++; return; }
         std::string sid = from ? from->senderId : std::string("net");
         for (FakeNode* n : nodes) {
-            if ((n == from && !selfToo) || !n->up || !n->online || !n->onRx || !n->joined.count(topic)) continue;
+            if ((n == from && !selfToo) || !n->up || !n->online || (!n->onRx && n->raw.empty()) || !n->joined.count(topic)) continue;
             if (from && n->senderId == from->senderId) { dropped++; continue; }
             long serial = n->serial;
             long long ts = tsNs;
             later([serial, topic, sid, raw, ts] {
                 FakeNode* nn = FakeBus::get().alive(serial);
-                if (nn && nn->online && nn->onRx) { nn->rx++; auto fn = nn->onRx; fn(topic, sid, b64(raw), ts); }
+                if (!nn || !nn->online) return;
+                if (nn->onRx) { nn->rx++; auto fn = nn->onRx; fn(topic, sid, b64(raw), ts); return; }
+                // direct: delivery_module's messageReceived [hash, contentTopic, payload bytes, source, ts]
+                nlohmann::json bytes = nlohmann::json::array();
+                for (unsigned char c : b64(raw)) bytes.push_back((int)c);
+                nn->rx++; nn->fireRaw("messageReceived", nlohmann::json::array({"0xhash", topic, bytes, "live", (double)ts}));
             });
         }
     }
@@ -81,7 +92,56 @@ inline void FakeLoamCore::startAsync(const std::string&, StrCb cb) {
 }
 inline void FakeLoamCore::statusAsync(StrCb cb) {
     long sid = node->serial;
-    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); cb(n && n->up ? "Connected" : "Connecting..."); });
+    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid);
+        if (n && !n->loamInstalled) { cb(""); return; }   // an absent optional module answers empty
+        cb(n && n->up ? "Connected" : "Connecting..."); });
+}
+// ── delivery_module (direct) ──
+static inline void fakeBindRaw(FakeNode* n) {
+    auto& p = logos::fakeLpPending();
+    for (auto& h : p) n->raw.push_back(std::move(h));
+    p.clear();
+}
+static inline StdLogosResult fakeOk(LogosMap v = LogosMap()) { StdLogosResult r; r.success = true; r.value = std::move(v); return r; }
+inline void FakeDelivery::createNodeAsync(const std::string&, Res cb) {
+    fakeBindRaw(node);
+    // a direct transport sets no sender id (plain relay); give the fake node its own so the bus's
+    // SDS-style self-filter never mistakes two direct nodes for one
+    if (node->senderId.empty()) node->senderId = "direct-" + std::to_string(node->serial);
+    StdLogosResult r = fakeOk();
+    if (node->created) { r.success = false; r.error = "Context already initialized"; }
+    node->created = true;
+    FakeBus::later([cb, r] { cb(r); });
+}
+inline void FakeDelivery::startAsync(Res cb) {
+    fakeBindRaw(node);
+    long sid = node->serial;
+    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); if (!n) return;
+        if (!n->up) { n->up = true; n->starts++; }
+        cb(fakeOk());
+        n->fireRaw("nodeStarted", nlohmann::json::array({true, "started", 0.0})); });
+}
+inline void FakeDelivery::stopAsync(Res cb) { node->up = false; FakeBus::later([cb] { cb(fakeOk()); }); }
+inline void FakeDelivery::subscribeAsync(const std::string& topic, Res cb) {
+    fakeBindRaw(node);
+    node->joined.insert(topic); node->subscribed = true;
+    FakeBus::later([cb] { cb(fakeOk()); });
+}
+inline void FakeDelivery::sendAsync(const std::string& topic, const LogosMap& payload, Res cb) {
+    // encodeSend: the bytes of base64(what the app sent); the bus carries what the app sent
+    std::string text;
+    if (payload.is_array()) for (const auto& c : payload) { if (c.is_number_integer()) text.push_back((char)c.get<int>()); }
+    else if (payload.is_string()) text = payload.get<std::string>();
+    node->tx++; FakeBus::get().channel(node, topic, fakeB64decode(text));
+    FakeBus::later([cb] { cb(fakeOk()); });
+}
+inline void FakeDelivery::getNodeInfoAsync(const std::string&, Res cb) {
+    long sid = node->serial;
+    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); cb(fakeOk(n && n->up ? "libp2p_peers 5\n" : "libp2p_peers 0\n")); });
+}
+inline void FakeDelivery::getConnectionStatusAsync(Res cb) {
+    long sid = node->serial;
+    FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); cb(fakeOk(n && n->up ? "Connected" : "Disconnected")); });
 }
 inline void FakeLoamCore::joinAsync(const std::string& topic, StrCb cb) {
     if (!node->up) throw std::runtime_error("loam_core: not started");

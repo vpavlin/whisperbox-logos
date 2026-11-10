@@ -21,6 +21,6 @@
 | [0017](0017-no-google-services.md) | No Google services: local notifications, ZXing QR scanning | Android 0.3.10 |
 | [0018](0018-protocol-is-a-separate-package.md) | The protocol is a separate package (vpavlin/whisperbox-sdk) | 0.4.2 |
 | [0019](0019-signed-answers-network-time.md) | Every answer is signed; deadlines use the network's timestamp | proposed, 0.5.0 |
-| [0021](0021-studio-respond-split-swappable-transport.md) | A respond module for the official catalog; Loam becomes optional | proposed, 0.6.0 |
+| [0021](0021-studio-respond-split-swappable-transport.md) | A respond module for the official catalog; Loam becomes optional | accepted, 0.6.0 |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.

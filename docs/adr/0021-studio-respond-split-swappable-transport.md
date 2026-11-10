@@ -1,6 +1,6 @@
 # 0021 - A respond module for the official catalog; Loam becomes optional
 
-Status: proposed, 2026-11-10 (0020 is reserved for PR #3)
+Status: accepted, 2026-11-10 (0020 is reserved for PR #3); built on feat/respond-split
 
 ## Context
 

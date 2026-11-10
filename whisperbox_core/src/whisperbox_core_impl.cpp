@@ -7,6 +7,15 @@
 // event-loop thread freezes the module on the IPC timeout).
 #include "whisperbox_core_impl.h"
 #include "logos_sdk.h"   // umbrella: LogosModules + LogosMap(nlohmann::json) + StdLogosResult
+#include "logos_lp_client.h"          // RAW delivery_module events (the generated binding zeroes payloads)
+#include "loam/delivery_transport.hpp" // Loam's delivery wire, vendored (ADR 0021; src/loam/VENDORED.md)
+
+// delivery_module directly, without loam_core (ADR 0021). Same wire as loam_core and the phones.
+struct WhisperboxCoreImpl::Direct {
+    std::unique_ptr<logos::LpClient> raw;
+    std::vector<logos::LpSubscription> subs;
+    std::unique_ptr<loam::delivery::DeliveryTransport<LogosMap>> t;
+};
 #include "qrcodegen.hpp"
 #include "whisperbox_rbsr.hpp"   // catch-up (RBSR v2) over an index, same messages as logos_sync/catchup.hpp
 #include "logos_sync/catchup.hpp"   // loam-sync RBSR catch-up (fp/ids/need) - replaces the whole-log reseed  // vendored Nayuki QR encoder (host qr core unreachable from a pure-QML view)
@@ -179,6 +188,7 @@ WhisperboxCoreImpl::~WhisperboxCoreImpl() {
     // loam_core keeps our onReceived / onStatusChanged and pending async callbacks after we go: they
     // reach us only through m_life, cleared here (open-review 2026-11-02, FR-8: use-after-free)
     if (m_life) { std::lock_guard<std::mutex> g(m_life->mu); m_life->self = nullptr; }
+    m_direct.reset();   // unsubscribes the raw delivery events
     // Parentless QTimer (LogosModuleContext is NOT a QObject in this builder rev)
     // — stop + delete explicitly.
     if (m_flushTimer) { m_flushTimer->stop(); delete m_flushTimer; m_flushTimer = nullptr; }
@@ -249,6 +259,7 @@ void WhisperboxCoreImpl::onContextReady() {
     m_hubTimer = new QTimer();
     QObject::connect(m_hubTimer, &QTimer::timeout, [this] {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        if (m_via == Via::Direct) directTick();
         if (!m_nodeReady) {
             if (m_via == Via::Unknown) { probeTransport(); return; }
             if (m_via == Via::Direct) { bootstrapDirect(); return; }
@@ -735,7 +746,7 @@ void WhisperboxCoreImpl::probeTransport() {
     // Going direct is only possible once DirectTransport exists (kHaveDirect). Until then a missing
     // loam_core keeps being retried - exactly today's behaviour - so no existing install can lose Loam
     // to an early error ("auth token not recognized" at start is a transient error, not absence).
-    static constexpr bool kHaveDirect = false;
+    static constexpr bool kHaveDirect = true;
     if (m_probeTries >= 3 && kHaveDirect) {
         m_via = Via::Direct;
         fprintf(stderr, "WHISPERBOX transport: delivery_module (loam_core not installed)\n");
@@ -755,16 +766,115 @@ void WhisperboxCoreImpl::probeTransport() {
                 if (!st.empty() && st.find("error") == std::string::npos) {
                     self->m_via = Via::Loam;
                     fprintf(stderr, "WHISPERBOX transport: loam_core (%s)\n", st.c_str());
+                    return;
+                }
+                // An installed loam_core can refuse the first calls while the host wires us up ("auth
+                // token not recognized", a timeout): that is not absence, so it doesn't count as a try.
+                std::string low = st;
+                for (auto& c : low) c = (char)std::tolower((unsigned char)c);
+                if (low.find("token") != std::string::npos || low.find("timeout") != std::string::npos || low.find("timed out") != std::string::npos
+                    || low.find("not ready") != std::string::npos) {
+                    if (self->m_probeTries > 0) self->m_probeTries--;
+                    fprintf(stderr, "WHISPERBOX transport: loam_core not answering yet (%s)\n", st.c_str());
                 }
             });
         });
     } catch (...) { m_probing = false; }
 }
 
-// delivery_module directly, through Loam's shared header (loam/delivery_transport.hpp, loam_core 0.7.4).
-// Until that lands, a desktop without loam_core says so instead of hanging on "Connecting...".
+// delivery_module directly, through Loam's shared header (loam/delivery_transport.hpp, loam_core 0.7.4):
+// the same RLN-off logos.test network, the same wire, and it adopts a node another module already
+// created. Every delivery_module callback arrives on an IPC thread: it hops to this module's thread
+// (withSelf) before it touches the transport, which has no locks of its own.
 void WhisperboxCoreImpl::bootstrapDirect() {
-    if (m_status != "Needs loam_core") setStatus("Needs loam_core");
+    if (m_direct) return;
+    if (!m_signId.valid) { setStatus(m_locked ? "Locked - enter your passphrase" : "No identity"); return; }
+    const int64_t backoff = std::min<int64_t>(60000, 5000LL * (1LL << std::min<long>(m_startFailures, 4)));
+    if (m_startFailures > 0 && nowMs() - m_directFailedAt < backoff) return;
+    using DT = loam::delivery::DeliveryTransport<LogosMap>;
+    auto life = m_life;
+    // run cb on the module thread, if the module and its transport still exist
+    auto hop = [life](std::function<void(WhisperboxCoreImpl*)> fn) {
+        withSelf(life, [fn](WhisperboxCoreImpl* s) {
+            std::lock_guard<std::recursive_mutex> lk(s->m_mtx);
+            if (s->m_direct && s->m_direct->t) fn(s);
+        });
+    };
+    auto res = [hop](DT::Cb cb) { return [hop, cb](StdLogosResult r) { hop([cb, r](WhisperboxCoreImpl*) { cb(r.success, r.error); }); }; };
+    auto text = [hop](std::function<void(bool, const std::string&)> cb) {
+        return [hop, cb](StdLogosResult r) {
+            const std::string v = r.value.is_string() ? r.value.get<std::string>() : r.value.dump();
+            hop([cb, r, v](WhisperboxCoreImpl*) { cb(r.success, v); });
+        };
+    };
+    m_direct = std::make_shared<Direct>();
+    Direct* d = m_direct.get();
+    d->raw = std::make_unique<logos::LpClient>("delivery_module", "whisperbox_core");
+    DT::Ops ops;
+    ops.createNode = [this, res](const std::string& cfg, DT::Cb cb) { modules().delivery_module.createNodeAsync(cfg, res(cb)); };
+    ops.start      = [this, res](DT::Cb cb) { modules().delivery_module.startAsync(res(cb)); };
+    ops.stop       = [this, res](DT::Cb cb) { modules().delivery_module.stopAsync(res(cb)); };
+    ops.subscribe  = [this, res](const std::string& t, DT::Cb cb) { modules().delivery_module.subscribeAsync(t, res(cb)); };
+    ops.sendRaw    = [this, res](const std::string& t, const LogosMap& p, DT::Cb cb) { modules().delivery_module.sendAsync(t, p, res(cb)); };
+    ops.metrics    = [this, text](std::function<void(bool, const std::string&)> cb) { modules().delivery_module.getNodeInfoAsync("Metrics", text(cb)); };
+    ops.connectionStatus = [this, text](std::function<void(bool, const std::string&)> cb) { modules().delivery_module.getConnectionStatusAsync(text(cb)); };
+    // RAW messageReceived: [hash, contentTopic, payload, (source,) ts] - the payload untouched (the
+    // generated binding's bytes conversion zeroes anything that isn't {"_bytes":...}); ts is last
+    ops.onMessage = [d, hop](DT::RecvCb rcb) {
+        auto sub = d->raw->subscribe("messageReceived", [hop, rcb](nlohmann::json a) {
+            if (!a.is_array() || a.size() < 4) return;
+            const std::string topic = a.at(1).is_string() ? a.at(1).get<std::string>() : std::string();
+            const int64_t ts = a.back().is_number() ? (int64_t)a.back().get<double>() : 0;
+            LogosMap payload = a.at(2);
+            hop([rcb, topic, payload, ts](WhisperboxCoreImpl*) { rcb(topic, "", payload, ts); });
+        });
+        if (sub.valid()) d->subs.push_back(std::move(sub));
+    };
+    ops.onNodeStarted = [d, hop](std::function<void(bool, const std::string&)> cb) {
+        auto sub = d->raw->subscribe("nodeStarted", [hop, cb](nlohmann::json a) {
+            if (!a.is_array() || a.empty()) return;
+            const bool ok = a.at(0).is_boolean() && a.at(0).get<bool>();
+            const std::string msg = (a.size() > 1 && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
+            hop([cb, ok, msg](WhisperboxCoreImpl*) { cb(ok, msg); });
+        });
+        if (sub.valid()) d->subs.push_back(std::move(sub));
+    };
+    DT::Config cfg;
+    // the same network as the loam_core path: logos.test without RLN (nodeConfig spells it out)
+    json app = {{"mode", "Core"}, {"preset", "logos.test"}};
+    if (const char* ov = std::getenv("WHISPERBOX_DELIVERY_CFG")) {
+        auto j = json::parse(ov, nullptr, false);
+        if (j.is_object()) { app = j; for (const char* k : {"useChannels", "hubMode", "useBle", "useMesh", "useDelivery", "rln"}) app.erase(k); }
+    }
+    cfg.nodeConfigJson = loam::delivery::nodeConfig<LogosMap>(LogosMap(app), false).dump();
+    cfg.useChannels = false;   // plain relay, as on the loam_core path (RBSR does the reliability)
+    cfg.senderId = m_deviceId;
+    d->t = std::make_unique<DT>(std::move(ops), std::move(cfg));
+    d->t->onFrame = [this](const loam::delivery::Frame& f) {
+        if (f.topic != TOPIC) return;
+        // f.bytes = what was sent: the base64 envelope text (the ingest peels one or two layers)
+        ingestEnvelopeText(f.bytes, /*channelPath=*/true, netMsOf(f.ts, nowMs()));
+    };
+    d->t->onReady = [this] { onTransportStatus("Connected"); };
+    d->t->onError = [this](const std::string& e) {
+        m_startFailures++;
+        m_directFailedAt = nowMs();
+        setStatus("Transport error: " + e);   // directTick drops this transport; the next tick starts another
+    };
+    d->t->onWarning = [](const std::string& w) { fprintf(stderr, "WHISPERBOX transport: %s\n", w.c_str()); };
+    fprintf(stderr, "WHISPERBOX transport: delivery_module direct (wire v%d)\n", LOAM_DELIVERY_WIRE_VERSION);
+    d->t->start();
+    setStatus("Connecting...");
+}
+
+// Every hub tick on the direct path: drive the transport (peers, the peerless watchdog, adoption),
+// and replace a transport whose node failed to start (never from inside its own callback).
+void WhisperboxCoreImpl::directTick() {
+    if (!m_direct || !m_direct->t) return;
+    auto& t = *m_direct->t;
+    if (!t.ready() && t.status().rfind("error", 0) == 0) { m_direct.reset(); m_subscribed = false; return; }
+    t.tick(nowMs());
+    if (m_nodeReady && !t.ready() && m_status != "Reconnecting...") setStatus("Reconnecting...");
 }
 
 // loam_core reports "Connected" by event; the event can be lost or come before we listened, so
@@ -814,6 +924,7 @@ void WhisperboxCoreImpl::onLoop(std::function<void()> fn) {
 
 void WhisperboxCoreImpl::joinTransport() {
     if (!m_nodeReady || m_subscribed) return;
+    if (m_via == Via::Direct) { if (m_direct && m_direct->t) { m_direct->t->join(TOPIC); m_subscribed = true; } return; }
     auto life = m_life;
     modules().loam_core.joinAsync(TOPIC, [life](std::string r) {
         // a failed join is tried again on the next status change / catch-up round (FR-14)
@@ -876,6 +987,8 @@ void WhisperboxCoreImpl::requestSync() {
 
 bool WhisperboxCoreImpl::deliverySend(const std::string& topic, const std::string& b64Text) {
     if (!m_nodeReady) return false;
+    // the sealed bytes are the base64 envelope text either way (loam_core gets them base64'd once more)
+    if (m_via == Via::Direct) return m_direct && m_direct->t && m_direct->t->send(topic, b64Text);
     try { modules().loam_core.sendSealedAsync(topic, whisperbox::b64encode(b64Text), [](std::string) {}); }
     catch (...) { return false; }
     return true;

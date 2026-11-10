@@ -33,7 +33,21 @@ struct FakeLoamCore {
     void joinAsync(const std::string& topic, StrCb cb);
     void sendSealedAsync(const std::string& topic, const std::string& sealedB64, StrCb cb);
 };
-struct FakeModules { FakeLoamCore loam_core; };
+// delivery_module as a direct app sees it (ADR 0021): one node per Basecamp (a second createNode =
+// "Context already initialized"), async calls answering StdLogosResult; frames arrive through RAW
+// event subscriptions (logos_lp_client.h), payload = the WakuMessage bytes (base64 of what was sent).
+struct FakeDelivery {
+    FakeNode* node = nullptr;
+    using Res = std::function<void(StdLogosResult)>;
+    void createNodeAsync(const std::string& cfg, Res cb);
+    void startAsync(Res cb);
+    void stopAsync(Res cb);
+    void subscribeAsync(const std::string& topic, Res cb);
+    void sendAsync(const std::string& topic, const LogosMap& payload, Res cb);
+    void getNodeInfoAsync(const std::string& what, Res cb);
+    void getConnectionStatusAsync(Res cb);
+};
+struct FakeModules { FakeLoamCore loam_core; FakeDelivery delivery_module; };
 
 class LogosModuleContext {
 public:

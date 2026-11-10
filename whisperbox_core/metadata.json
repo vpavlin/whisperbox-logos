@@ -4,10 +4,10 @@
  "type": "core",
  "interface": "universal",
  "category": "social",
- "description": "WhisperBox privacy-first forms core: append-only event log over one shared topic synced with loam_core (the Loam transport every Loam app shares), secp256k1 identity + ECIES response sealing to form creators, HLC-ordered CRDT merge with creator-view decryption. Runs headless under logosctl and behind the whisperbox ui_qml view (Basecamp 0.3).",
+ "description": "WhisperBox privacy-first forms core: append-only event log over one shared topic synced over Logos Delivery: through loam_core when it is installed (the Loam transport every Loam app shares), else delivery_module directly on the same wire (ADR 0021), secp256k1 identity + ECIES response sealing to form creators, HLC-ordered CRDT merge with creator-view decryption. Runs headless under logosctl and behind the whisperbox ui_qml view (Basecamp 0.3).",
  "main": "whisperbox_core_plugin",
  "dependencies": [
-  "loam_core"
+  "delivery_module"
  ],
  "nix": {
   "packages": {
@@ -25,5 +25,8 @@
    "extra_include_dirs": [],
    "extra_link_libraries": []
   }
- }
+ },
+ "optional_dependencies": [
+  "loam_core"
+ ]
 }

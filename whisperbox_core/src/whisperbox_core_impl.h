@@ -132,6 +132,10 @@ private:
     // ADR 0021: loam_core when it is installed (today's path, unchanged), else delivery_module directly
     void probeTransport();
     void bootstrapDirect();
+    void directTick();
+    struct Direct;                      // delivery_module directly (loam/delivery_transport.hpp), in the .cpp
+    std::shared_ptr<Direct> m_direct;   // shared_ptr: the generated glue builds this class without seeing Direct
+    int64_t m_directFailedAt = 0;
     void onTransportStatus(const std::string& st);
     void onLoop(std::function<void()> fn);   // run on the module's thread
     void joinTransport();

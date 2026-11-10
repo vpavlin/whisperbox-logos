@@ -25,6 +25,8 @@ logos_module(
         src/qrcodegen.hpp
         src/qrcodegen.cpp
         src/logos_sync/catchup.hpp
+        src/loam/delivery_transport.hpp
+        src/loam/segment_compat.hpp
         src/logos_sync/event.hpp
         src/logos_sync/reconcile.hpp
     INCLUDE_DIRS src
