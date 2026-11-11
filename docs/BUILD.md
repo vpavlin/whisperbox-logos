@@ -243,8 +243,9 @@ logosctl call whisperbox_core createForm 'str:{"title":"Lunch?","questions":[{"i
 logosctl call whisperbox_core getDecryptedResponses str:form-...
 ```
 
-Set `WHISPERBOX_CORE_DATA`: without it the core keeps its data under the account's real home
-(`getpwuid`), so every session on one account shares one identity. A full two-node test against
+Set `WHISPERBOX_CORE_DATA`: without it a headless core keeps its data under the account's real home
+(`getpwuid`), so every session on one account shares one identity. In Basecamp (0.6.1+) the data
+follows `--user-dir` instead: each profile has its own (SPEC section 13). A full two-node test against
 the live network is in the review kit (`probes/live-two-node.sh`, 2026-10-22).
 
 **0.3.x (Basecamp 0.2 runtime): logoscore.**
@@ -267,7 +268,7 @@ the live network is in the review kit (`probes/live-two-node.sh`, 2026-10-22).
 |---|---|
 | a core method "doesn't exist" from the view or hub | trailing comment after its declaration in `whisperbox_core_impl.h`; move it above |
 | Basecamp shows "Invalid response" after an update | view and core versions differ; install both |
-| new identity on every Basecamp start | data dir not writable / relative; check the Identity panel's storage line (`~/.whisperbox-core`, or `$WHISPERBOX_CORE_DATA`) |
+| new identity on every Basecamp start | data dir not writable / relative; check the Identity panel's storage line (Basecamp's `module_data/whisperbox_core/<id>` from 0.6.1, `~/.whisperbox-core` headless, or `$WHISPERBOX_CORE_DATA`) |
 | desktop never connects when another Logos app runs | that app created the delivery node first; the core must join it ("already initialized"), see ADR 0015 |
 | gradle killed / "SDK location not found" | OOM: foreground, `-x lintVitalRelease`; recreate `android/local.properties` |
 | phone shows "Loam isn't running" | open Loam once and approve WhisperBox; or switch to own node (Settings → Identity & network) |

@@ -98,7 +98,7 @@ Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release sig
   anonymous form, but a well-placed network observer could still link a response to a
   sender's network address.
 - **On your computer:** the identity key, the forms and your own answers are kept in the data
-  folder (`~/.whisperbox-core`), readable only by your user (0600 from 0.4.3). Without a
+  folder (in Basecamp's data folder for the module from 0.6.1, one per Basecamp profile; `~/.whisperbox-core` before), readable only by your user (0600 from 0.4.3). Without a
   passphrase they are unencrypted: anyone, or any app, running as your user can read them. With a
   passphrase (Identity, from 0.5.5) the key and your saved answers are sealed, and WhisperBox asks
   for it when it starts. A forgotten passphrase can't be recovered.

@@ -149,7 +149,7 @@ private:
     whisperbox::Clock m_clock;
     whisperbox::SignId m_signId;          // local identity (persisted)
     std::string m_deviceId = "whisperbox-core";
-    std::string m_dataDir;                // ~/.whisperbox-core or $WHISPERBOX_CORE_DATA
+    std::string m_dataDir;                // $WHISPERBOX_CORE_DATA, Basecamp module folder, or ~/.whisperbox-core
     std::set<std::string> m_watched;      // locally joined form ids
     std::string m_snapshot = "{}";
     std::string m_status = "Starting...";

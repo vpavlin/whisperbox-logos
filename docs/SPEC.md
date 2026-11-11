@@ -495,9 +495,15 @@ exposes the same names.
 
 ## 13. Local state
 
-Desktop data dir: `$WHISPERBOX_CORE_DATA`, else the first writable of `~/.whisperbox-core`
-(home from the user database, never a relative path) and the host's instance folder. If the
-chosen folder has no identity but another candidate does, its files are adopted. Files are
+Desktop data dir (0.6.1+): `$WHISPERBOX_CORE_DATA`; else, in Basecamp, the host's folder for the
+module (`<user-dir>/module_data/whisperbox_core/<id>/`, so each Basecamp profile, `--user-dir`, has
+its own identity; it survives restarts, upgrades and uninstall); else the first writable of
+`~/.whisperbox-core` (home from the user database, never a relative path) and `$HOME/.whisperbox-core`.
+Migration: only Basecamp's DEFAULT profile (no `--user-dir`) copies the data older versions kept in
+`<that home>/.whisperbox-core`, once; it writes `CLAIMED-BY.txt` there and leaves the folder as a
+backup. Other profiles start with their own identity. A claimed folder is taken over again only if
+the claiming folder has lost its identity. Outside Basecamp, a chosen folder with no identity adopts
+the files of another candidate that has one. Files are
 written atomically (temp file + rename); unreadable files are quarantined, not overwritten.
 The folder is owner-only (0700) and every file in it 0600: it holds the private key every form
 key derives from, and plaintext copies of the user's own answers. A start tightens folders that

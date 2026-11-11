@@ -859,6 +859,79 @@ int main(int argc, char** argv) {
         if (!savedData.empty()) setenv("WHISPERBOX_CORE_DATA", savedData.c_str(), 1); else unsetenv("WHISPERBOX_CORE_DATA");
     }
 
+    // Basecamp profiles (--user-dir): the data lives in Basecamp's folder for the module; only the
+    // DEFAULT profile takes over ~/.whisperbox-core, once; every other profile has its own identity.
+    std::printf("basecamp profiles (--user-dir):\n");
+    {
+        auto K = mkPeer("P"); K->node->online = false;
+        std::string addrOld = K->snap()["identity"]["address"];
+        std::string dirOld = K->dir;
+        K->stop();
+        std::string home = g_base + "/home-p";
+        std::filesystem::create_directories(home + "/.whisperbox-core");
+        for (const auto& de : std::filesystem::directory_iterator(dirOld))
+            if (de.is_regular_file()) std::filesystem::copy_file(de.path(), home + "/.whisperbox-core/" + de.path().filename().string(), std::filesystem::copy_options::overwrite_existing);
+        { std::ofstream w(home + "/.whisperbox-core/watched.json"); w << "[\"form-0a0b0c0d\"]"; }   // stands in for the rest
+        std::string savedData = std::getenv("WHISPERBOX_CORE_DATA") ? std::getenv("WHISPERBOX_CORE_DATA") : "";
+        std::string savedHome = std::getenv("HOME") ? std::getenv("HOME") : "";
+        unsetenv("WHISPERBOX_CORE_DATA");
+        setenv("WHISPERBOX_TEST_REAL_HOME", home.c_str(), 1);
+        setenv("HOME", home.c_str(), 1);
+        auto startIn = [&](const std::string& persist, auto&& check) {
+            FakeNode n; n.name = "p"; n.online = false;
+            WhisperboxCoreImpl c; c.modules().loam_core.node = &n; c.m_fakePersist = persist;
+            FakeBus::get().nodes.push_back(&n);
+            c.fakeStart();
+            check(json::parse(c.snapshot()));
+            auto& v = FakeBus::get().nodes; v.erase(std::remove(v.begin(), v.end(), &n), v.end());
+        };
+        const std::string defInst = home + "/.local/share/Logos/LogosBasecamp/module_data/whisperbox_core/a1b2c3d4e5f6";
+        const std::string altInst = g_base + "/profile-2/module_data/whisperbox_core/0f0e0d0c0b0a";
+        const std::string defInst2 = home + "/.local/share/Logos/LogosBasecamp/module_data/whisperbox_core/ffeeddccbbaa";
+        std::string altAddr;
+        startIn(defInst, [&](const json& s) {
+            CHECK(s["storage"]["dir"] == defInst, "the default profile keeps its data in Basecamp's module folder");
+            CHECK(s["identity"]["address"] == addrOld, "the default profile takes over the identity from ~/.whisperbox-core");
+            CHECK(s["storage"]["note"].get<std::string>().find("backup") != std::string::npos, "the move is reported, old folder kept as a backup");
+        });
+        CHECK(std::filesystem::exists(home + "/.whisperbox-core/identity.json"), "the old folder is left in place");
+        CHECK(std::filesystem::exists(home + "/.whisperbox-core/CLAIMED-BY.txt"), "the old folder is marked as taken over");
+        {
+            bool all = true; int n = 0;
+            for (const auto& de : std::filesystem::directory_iterator(home + "/.whisperbox-core")) {
+                const std::string f = de.path().filename().string();
+                if (f == "CLAIMED-BY.txt") continue;
+                n++; if (!std::filesystem::exists(defInst + "/" + f)) all = false;
+            }
+            CHECK(all && n >= 3, "every file of the old folder comes along (forms, journal, pins ...)");
+        }
+        startIn(defInst, [&](const json& s) {
+            CHECK(s["identity"]["address"] == addrOld, "same identity after a restart");
+        });
+        startIn(altInst, [&](const json& s) {
+            altAddr = s["identity"]["address"];
+            CHECK(s["storage"]["dir"] == altInst, "a --user-dir profile uses its own folder");
+            CHECK(altAddr != addrOld, "a --user-dir profile gets its own identity, never a copy of the default one");
+        });
+        startIn(altInst, [&](const json& s) {
+            CHECK(s["identity"]["address"] == altAddr, "the --user-dir profile keeps its identity across restarts");
+        });
+        startIn(defInst2, [&](const json& s) {
+            CHECK(s["identity"]["address"] != addrOld, "an identity already taken over is never copied a second time");
+        });
+        std::filesystem::remove_all(std::filesystem::path(defInst).parent_path());     // module_data wiped by hand
+        startIn(defInst, [&](const json& s) {
+            CHECK(s["identity"]["address"] == addrOld, "after module_data is wiped, the backup is taken over again");
+        });
+        startIn("", [&](const json& s) {                                               // headless (logosctl): as before
+            CHECK(s["storage"]["dir"] == home + "/.whisperbox-core", "without a Basecamp folder, ~/.whisperbox-core as before");
+            CHECK(s["identity"]["address"] == addrOld, "headless keeps the old identity");
+        });
+        unsetenv("WHISPERBOX_TEST_REAL_HOME");
+        setenv("HOME", savedHome.c_str(), 1);
+        if (!savedData.empty()) setenv("WHISPERBOX_CORE_DATA", savedData.c_str(), 1); else unsetenv("WHISPERBOX_CORE_DATA");
+    }
+
     // Truncated files (module killed mid-write by an old version): never overwritten.
     std::printf("corrupt files:\n");
     {

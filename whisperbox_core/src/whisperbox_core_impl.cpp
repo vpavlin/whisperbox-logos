@@ -299,7 +299,7 @@ void WhisperboxCoreImpl::onContextReady() {
     }
 }
 
-// ── data dir + persistence (~/.whisperbox-core, $WHISPERBOX_CORE_DATA override) ──
+// ── data dir + persistence ($WHISPERBOX_CORE_DATA > Basecamp's module folder > ~/.whisperbox-core) ──
 // The data folder holds the identity key: losing it silently mints a new identity, and every
 // answer sealed to the old one is gone (seen in a real Basecamp: new address on each start).
 // So: never a relative path (the host's working dir can be an AppImage mount that changes
@@ -325,6 +325,43 @@ static bool hasIdentityFile(const std::string& d) {
     std::error_code ec;
     return !d.empty() && std::filesystem::is_regular_file(d + "/identity.json", ec) && std::filesystem::file_size(d + "/identity.json", ec) > 0;
 }
+// Copy every regular file of an old data folder into the new one (never overwriting): the old
+// folder stays as it was, as a backup.
+static void copyDataFiles(const std::string& from, const std::string& to) {
+    std::error_code ec;
+    for (const auto& de : std::filesystem::directory_iterator(from, ec)) {
+        std::error_code e2;
+        if (!de.is_regular_file(e2)) continue;
+        const std::string n = de.path().filename().string();
+        if (n == ".write-test" || n == "CLAIMED-BY.txt") continue;
+        std::filesystem::copy_file(de.path(), to + "/" + n, std::filesystem::copy_options::skip_existing, e2);
+    }
+}
+static std::string normDir(const std::string& p) {
+    std::error_code ec;
+    std::string n = std::filesystem::weakly_canonical(std::filesystem::path(p), ec).lexically_normal().string();
+    if (ec || n.empty()) n = std::filesystem::path(p).lexically_normal().string();
+    while (n.size() > 1 && n.back() == '/') n.pop_back();
+    return n;
+}
+// Basecamp's folder for this module is <user-dir>/module_data/whisperbox_core/<id>. When <user-dir> is
+// Basecamp's DEFAULT data folder of some home H (no --user-dir given), returns H; else "" (an explicit
+// --user-dir profile, or not Basecamp at all).
+static std::string defaultProfileHome(const std::string& instDir, const std::string& rh) {
+    const std::filesystem::path base = std::filesystem::path(normDir(instDir)).parent_path().parent_path().parent_path();
+    if (base.filename() != "LogosBasecamp" || base.parent_path().filename() != "Logos") return "";
+    const std::string b = normDir(base.string());
+    std::vector<std::string> homes;
+    if (!rh.empty()) homes.push_back(rh);
+    if (const char* eh = std::getenv("HOME")) if (*eh == '/') homes.push_back(eh);
+    for (const auto& h : homes) {
+        if (b == normDir(h + "/.local/share/Logos/LogosBasecamp")) return h;                    // Linux
+        if (b == normDir(h + "/Library/Application Support/Logos/LogosBasecamp")) return h;     // macOS
+    }
+    if (const char* x = std::getenv("XDG_DATA_HOME"))
+        if (*x == '/' && b == normDir(std::string(x) + "/Logos/LogosBasecamp") && !homes.empty()) return homes.back();
+    return "";
+}
 void WhisperboxCoreImpl::setupDataDir() {
     m_storageOk = true; m_storageNote.clear();
     if (const char* ov = std::getenv("WHISPERBOX_CORE_DATA")) {
@@ -333,18 +370,48 @@ void WhisperboxCoreImpl::setupDataDir() {
         else makePrivate(m_dataDir);
         return;
     }
-    std::vector<std::string> cands;
     const std::string rh = realHome();
+    // Basecamp gives each module a folder under its data directory (--user-dir): one WhisperBox per
+    // Basecamp profile, so two profiles never share an identity. It survives restarts, module upgrades
+    // and uninstall (the package manager removes only the module's install folder).
+    const std::string inst = instancePersistencePath();
+    if (!inst.empty() && dirWritable(inst)) {
+        m_dataDir = inst;
+        if (!hasIdentityFile(m_dataDir)) {
+            // First start of this profile on 0.6.1+. Only the DEFAULT profile takes over the data kept in
+            // ~/.whisperbox-core by older versions, and only once (CLAIMED-BY.txt); any other profile starts
+            // with its own identity instead of copying someone else's.
+            const std::string h = defaultProfileHome(inst, rh);
+            const std::string old = h.empty() ? "" : h + "/.whisperbox-core";
+            if (!old.empty() && hasIdentityFile(old)) {
+                std::string claimedBy;
+                { std::ifstream c(old + "/CLAIMED-BY.txt"); std::getline(c, claimedBy); }
+                // re-claim if the claiming folder lost its identity (module_data wiped by hand): never strand it
+                if (claimedBy.empty() || normDir(claimedBy) == normDir(inst) || !hasIdentityFile(claimedBy)) {
+                    copyDataFiles(old, m_dataDir);
+                    std::ofstream c(old + "/CLAIMED-BY.txt", std::ios::trunc);
+                    c << inst << "\n"
+                      << "WhisperBox 0.6.1+ keeps its data in the Basecamp folder above. This folder is the copy\n"
+                      << "taken at that moment, kept as a backup; WhisperBox in Basecamp no longer reads or writes it.\n";
+                    fprintf(stderr, "WHISPERBOX copied data from %s (kept there as a backup)\n", old.c_str());
+                    m_storageNote = "Copied your data from " + old + " (kept there as a backup)";
+                }
+            }
+        }
+        makePrivate(m_dataDir);
+        return;
+    }
+    // Not in Basecamp (logosctl, other hosts) or its folder isn't writable: ~/.whisperbox-core as before.
+    std::vector<std::string> cands;
     if (!rh.empty()) cands.push_back(rh + "/.whisperbox-core");                       // survives reinstall
     if (const char* eh = std::getenv("HOME"))
         if (*eh == '/' && std::string(eh) + "/.whisperbox-core" != (cands.empty() ? "" : cands[0])) cands.push_back(std::string(eh) + "/.whisperbox-core");
-    if (!instancePersistencePath().empty()) cands.push_back(instancePersistencePath()); // host-owned; wiped on uninstall
     m_dataDir.clear();
     for (const auto& c : cands) if (dirWritable(c)) { m_dataDir = c; break; }
     if (m_dataDir.empty()) {
         m_storageOk = false;
-        m_dataDir = cands.empty() ? std::string("/tmp/whisperbox-core-") + std::to_string(getuid()) : cands[0];
-        m_storageNote = "Can't save anything (tried " + std::to_string(cands.size()) + " folders) - forms and your identity will not survive a restart";
+        m_dataDir = !inst.empty() ? inst : (cands.empty() ? std::string("/tmp/whisperbox-core-") + std::to_string(getuid()) : cands[0]);
+        m_storageNote = "Can't save anything (tried " + std::to_string(cands.size() + (inst.empty() ? 0 : 1)) + " folders) - forms and your identity will not survive a restart";
         fprintf(stderr, "WHISPERBOX STORAGE NOT WRITABLE: %s\n", m_storageNote.c_str());
         return;
     }
@@ -352,10 +419,7 @@ void WhisperboxCoreImpl::setupDataDir() {
     if (!hasIdentityFile(m_dataDir)) {
         for (const auto& c : cands) {
             if (c == m_dataDir || !hasIdentityFile(c)) continue;
-            std::error_code ec;
-            for (const char* fn : {"identity.json", "device_id.txt", "events.json", "watched.json", "my_submissions.json", "pins.json"})
-                if (std::filesystem::exists(c + "/" + fn, ec))
-                    std::filesystem::copy_file(c + "/" + fn, m_dataDir + "/" + fn, std::filesystem::copy_options::skip_existing, ec);
+            copyDataFiles(c, m_dataDir);
             fprintf(stderr, "WHISPERBOX adopted data from %s\n", c.c_str());
             m_storageNote = "Moved your data from " + c;
             break;

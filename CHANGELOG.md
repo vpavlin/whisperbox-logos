@@ -1,8 +1,21 @@
 # Changelog
 
+## 0.6.1 core (2026-11-11) - one WhisperBox per Basecamp profile
+
+- **The identity follows `--user-dir`.** Two Basecamp instances under one OS user shared one identity
+  and one set of files: the core kept everything in `~/.whisperbox-core`, taking home from the user
+  database. So a second instance saw every form as "your own" and couldn't answer it, and both wrote
+  the same files. In Basecamp the data now lives in Basecamp's folder for the module
+  (`<user-dir>/module_data/whisperbox_core/<id>/`), which survives restarts, upgrades and uninstall.
+- **Migration:** only the default profile (no `--user-dir`) copies the old `~/.whisperbox-core`, once,
+  and marks it `CLAIMED-BY.txt`; the old folder stays as a backup. Other profiles get their own
+  identity. Headless (logosctl) and `WHISPERBOX_CORE_DATA` are unchanged.
+- Tests: e2e 370 (profiles: takeover once, restart, own identity per `--user-dir`, no second
+  takeover, re-takeover after `module_data` is wiped, headless unchanged).
+
 ## 0.6.1 studio + respond views (2026-11-11) - respond module: My forms, Cancel, own-form message
 
-Core unchanged (0.6.0). Found testing 0.6.0 from lan03 (Václav).
+Core 0.6.0 at the time. Found testing 0.6.0 from lan03 (Václav).
 - **Own form showed an empty box:** opening your own form's link in the respond module showed the title
   and one empty, uneditable box. A creator can't answer their own form, and the "can't answer" banner
   had no text for that case (the studio never shows the answering view for your own forms). It now
