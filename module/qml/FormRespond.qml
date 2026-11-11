@@ -68,6 +68,12 @@ ColumnLayout {
     function reset() { answerDraftTimer.stop(); fr.answers = ({}); fr.showErrors = false; fr.editing = false; fr.draftRestored = false; }
     // leaving a form: save the half-filled answers now
     function flushDraft() { if (answerDraftTimer.running) { answerDraftTimer.stop(); saveAnswerDraftNow(); } }
+    // cancelling a form: forget the half-filled answers here and in the core
+    function discardDraft() {
+        answerDraftTimer.stop();
+        if (fr.form && fr.form.id && !fr.preview) fr.host.callVia("saveAnswerDraft", [fr.form.id, "[]"], function () {});
+        fr.reset();
+    }
     // Half-filled answers saved while typing come back (crash, restart, switching forms).
     function restoreAnswerDraft() {
         var f = fr.form, a = {};
@@ -159,7 +165,7 @@ ColumnLayout {
     // status banner (submitted / confirmed / closed / not allowed)
     Rectangle {
         Layout.fillWidth: true
-        visible: !!(fr.form && !fr.form.canRespond)
+        visible: !!(fr.form && !fr.form.canRespond) && bannerT.text.length > 0
         implicitHeight: bannerT.implicitHeight + 26
         radius: 12
         property bool good: !!(fr.form && fr.form.mySubmitted)
@@ -183,6 +189,7 @@ ColumnLayout {
                 if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed
                     ? "Your answers were received - the creator sent you a receipt."
                     : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.");
+                if (f.mine) return "This is your own form - it was created with this Basecamp's address (" + fr.shortAddr(f.creator) + "), and a creator can't answer their own form. Its answers are in the WhisperBox studio. To try it as a respondent, open the link on another device.";
                 if (f.status === "closed") return "This form is closed and no longer accepts answers.";
                 if (!f.allowed) return "This form only accepts answers from specific addresses, and yours (" + fr.shortAddr(fr.myAddress) + ") isn't on the list.";
                 if (!f.publicKey) return "Still syncing this form...";
@@ -452,6 +459,7 @@ ColumnLayout {
 
     Rectangle {
         Layout.fillWidth: true
+        visible: !!(fr.form && !fr.form.mine)
         implicitHeight: privRow.implicitHeight + 24
         radius: 12
         color: "#141c18"

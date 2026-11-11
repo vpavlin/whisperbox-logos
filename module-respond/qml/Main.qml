@@ -24,6 +24,41 @@ Item {
     readonly property string myAddress: (st.identity && st.identity.address) ? st.identity.address : ""
     readonly property string coreStatus: st.status || (st.nodeReady ? "Connected" : "Connecting...")
     readonly property var sel: withDetail(forms[selectedId] || null)
+    // Forms opened here or answered: the core keeps them (watched = opened from a link). Newest first.
+    readonly property var myForms: {
+        var ids = [].concat(st.watched || [], st.mySubmissions || []), seen = ({}), out = [];
+        var hidden = st.hidden || [];
+        for (var i = ids.length - 1; i >= 0; i--) {
+            var id = String(ids[i]);
+            if (seen[id] || hidden.indexOf(id) >= 0) continue;
+            seen[id] = true;
+            var f = forms[id] || null;
+            out.push({ id: id, title: f && f.title ? f.title : "", status: root.listStatus(f), at: f ? (f.createdAt || 0) : 0 });
+        }
+        out.sort(function (a, b) { return (a.at === 0) - (b.at === 0) || b.at - a.at; });
+        return out;
+    }
+    function listStatus(f) {
+        if (!f) return "Waiting for the form to arrive from its creator";
+        if (f.mine) return "Your own form";
+        if (f.mySubmitted) return f.myConfirmed ? "Answered - received by the creator" : "Answered - waiting for a receipt";
+        if (f.status === "closed") return "Closed";
+        if (f.hasAnswerDraft) return "Not sent yet - answers saved";
+        return f.canRespond ? "Not answered yet" : "";
+    }
+    // leave the open form: Back keeps half-filled answers, Cancel forgets them
+    function closeForm(discard) {
+        if (discard) respond.discardDraft(); else { respond.flushDraft(); respond.reset(); }
+        root.detail = ({});
+        root.selectedId = "";
+    }
+    function openId(id) {
+        if (root.selectedId === id) return;
+        respond.flushDraft(); respond.reset();
+        root.detail = ({});
+        root.selectedId = id;
+        Qt.callLater(root.loadDetail);
+    }
 
     // ── core plumbing (async only: a blocking call would freeze the view) ──
     function callVia(m, a, cb) {
@@ -151,13 +186,22 @@ Item {
                 Text { text: root.coreStatus; color: root.coreStatus === "Connected" ? P.wbSuccess : P.wbTextTert; font.pixelSize: 11; textFormat: Text.PlainText }
             }
 
-            // no form yet: paste a link
+            // a form is open (or on its way): back to the list
+            Text {
+                visible: root.selectedId !== ""
+                text: "\u2039  My forms"; color: P.wbPrimary; font.pixelSize: 13; textFormat: Text.PlainText
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.closeForm(false) }
+            }
+            Text { visible: root.selectedId !== "" && !root.sel; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: P.wbTextSec; font.pixelSize: 14; textFormat: Text.PlainText
+                   text: "Waiting for the form to arrive from its creator... It opens here as soon as someone who has it is online." }
+
+            // home: paste a link, then the forms opened before
             ColumnLayout {
                 Layout.fillWidth: true
-                visible: !root.sel
+                visible: root.selectedId === ""
                 spacing: 10
                 Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: P.wbTextSec; font.pixelSize: 14; textFormat: Text.PlainText
-                       text: root.selectedId ? "Waiting for the form to arrive from its creator..." : "Paste the link to a form. Your answers are sealed: only the people who made the form can read them." }
+                       text: "Paste the link to a form. Your answers are sealed: only the people who made the form can read them." }
                 RowLayout {
                     Layout.fillWidth: true; spacing: 8
                     InputBox {
@@ -167,6 +211,26 @@ Item {
                     }
                     WbButton { label: root.busy("importForm") ? "Opening..." : "Open"; primary: true; active: linkField.text.trim().length > 0 && !root.busy("importForm")
                                onClicked: root.openLink(linkField.text, "") }
+                }
+                Text { visible: root.myForms.length > 0; Layout.topMargin: 14; text: "My forms"; color: P.wbText; font.pixelSize: 15; font.weight: Font.DemiBold; textFormat: Text.PlainText }
+                Repeater {
+                    model: root.myForms
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: rowCol.implicitHeight + 22
+                        radius: 10
+                        color: rowMa.containsMouse ? P.wbSurfaceRaised : P.wbSurface
+                        border.color: P.wbBorder; border.width: 1
+                        ColumnLayout {
+                            id: rowCol
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 14; anchors.rightMargin: 14
+                            spacing: 3
+                            Text { Layout.fillWidth: true; elide: Text.ElideRight; text: modelData.title || modelData.id; color: P.wbText; font.pixelSize: 14; textFormat: Text.PlainText }
+                            Text { Layout.fillWidth: true; elide: Text.ElideRight; visible: text.length > 0; text: modelData.status; color: P.wbTextTert; font.pixelSize: 12; textFormat: Text.PlainText }
+                        }
+                        MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openId(modelData.id) }
+                    }
                 }
             }
 
@@ -186,6 +250,12 @@ Item {
                 form: root.sel
                 myAddress: root.myAddress
                 host: root
+            }
+            WbButton {
+                visible: !!(root.sel && root.sel.canRespond)
+                Layout.fillWidth: true
+                label: "Cancel"
+                onClicked: root.closeForm(true)
             }
             Text { visible: !!root.sel; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: P.wbTextTert; font.pixelSize: 11; textFormat: Text.PlainText
                    text: "To make your own forms, install the WhisperBox studio." }

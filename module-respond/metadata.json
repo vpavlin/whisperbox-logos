@@ -1,7 +1,7 @@
 {
   "name": "whisperbox_respond",
   "display_name": "WhisperBox - Answer a Form",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "ui_qml",
   "category": "social",
   "description": "Answer one WhisperBox form, opened from a link or by another app (intent whisperbox.respond). Answers are sealed end to end: only the form's creators can read them. Uses the whisperbox_core engine; making and managing forms is the WhisperBox studio.",

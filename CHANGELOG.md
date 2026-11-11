@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1 studio + respond views (2026-11-11) - respond module: My forms, Cancel, own-form message
+
+Core unchanged (0.6.0). Found testing 0.6.0 from lan03 (Václav).
+- **Own form showed an empty box:** opening your own form's link in the respond module showed the title
+  and one empty, uneditable box. A creator can't answer their own form, and the "can't answer" banner
+  had no text for that case (the studio never shows the answering view for your own forms). It now
+  says so and points to the studio; an empty banner is never drawn.
+- **respond module, My forms:** the home screen lists the forms opened or answered here (with their
+  state: not answered, saved, answered, received, closed, still arriving); click one to open it.
+- **Back and Cancel:** "My forms" leaves a form and keeps half-filled answers; Cancel leaves it and
+  forgets them. A form still arriving can be left too.
+- Studio renders pixel-identical to 0.6.0.
+
 ## 0.6.0 desktop core + studio + NEW respond module (2026-11-10) - Loam optional, answer a form from a link
 
 ADR 0021. Android unchanged.

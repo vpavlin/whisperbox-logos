@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
 
     QQuickView view;
     view.setResizeMode(QQuickView::SizeRootObjectToView);
-    view.resize(1280, 800);
+    view.resize(1280, qEnvironmentVariableIsSet("WB_H") ? qEnvironmentVariableIntValue("WB_H") : 800);   // WB_H: taller renders
 
     // NOTE: QQuickView owns its OWN QQmlEngine — context properties must be set
     // on view.engine(), not a separate engine, or the component never sees them.
