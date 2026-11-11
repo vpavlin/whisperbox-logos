@@ -70,6 +70,8 @@ Item {
     property string draftThankYou: ""
     property bool draftShuffle: false
     property bool draftAllowEdits: false
+    property bool draftMulti: false        // several answers per person (ADR 0022)
+    property string draftPerPerson: ""     // ... up to this many ("" = no limit)
     property bool draftAnonymous: false
     property bool draftQuiz: false
     property string editingFormId: ""     // builder is editing a PUBLISHED form (form.update)
@@ -397,6 +399,22 @@ Item {
         act("replyToResponse", [root.selectedId, cid, text], "Reply sent - only this person can read it", done);
     }
     function confirmResponse(addr) { act("confirmResponse", [root.selectedId, addr], "Receipt sent"); }
+    // one answer's receipt: by its receipt id (forms taking several answers per person, ADR 0022)
+    function confirmOne(r) {
+        if (r && r.confirmationId && root.sel && root.sel.maxPerRespondent !== undefined) act("confirmAnswer", [root.selectedId, r.confirmationId], "Receipt sent");
+        else if (r) confirmResponse(r.respondent);
+    }
+    // answers and receipts per person, most received first (rewards: count what you received)
+    function respondentTally() {
+        var by = ({}), out = [];
+        for (var i = 0; i < root.selResponses.length; i++) {
+            var r = root.selResponses[i]; if (r.verified === false) continue;
+            var k = String(r.respondent || ""); if (!by[k]) { by[k] = { respondent: k, answers: 0, received: 0 }; out.push(by[k]); }
+            by[k].answers++; if (r.confirmed) by[k].received++;
+        }
+        out.sort(function (a, b) { return b.received - a.received || b.answers - a.answers; });
+        return out;
+    }
     function toggleHidden() {
         var f = root.sel; if (!f) return;
         var hide = !f.hidden;
@@ -469,7 +487,7 @@ Item {
         root.draftId = ""; root.draftTitle = ""; root.draftDescription = ""; root.draftRestrict = false; root.draftAllowList = "";
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
-        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false; root.draftQuiz = false;
+        root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false; root.draftQuiz = false; root.draftMulti = false; root.draftPerPerson = "";
     }
     function openCreate() { resetBuilder(); root.editingFormId = ""; rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     // Edit a published form: same builder, existing questions keep their ids (answers are
@@ -487,7 +505,8 @@ Item {
         loadBuilder({ title: f.title || "", description: f.description || "", questions: qs, restrict: !!(f.whitelist && f.whitelist.type === "addresses"),
                       allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"), max: f.maxResponses ? String(f.maxResponses) : "",
                       closeAt: f.expiresAt ? Qt.formatDateTime(new Date(Number(f.expiresAt)), "yyyy-MM-dd HH:mm") : "",
-                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz });
+                      showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz,
+                      multi: f.maxPerRespondent !== undefined && f.maxPerRespondent !== 1, perPerson: f.maxPerRespondent > 1 ? String(f.maxPerRespondent) : "" });
         root.editingFormId = f.id;
         rebuildBuilder(); root.draftDirty = false; root.showCreate = true;
     }
@@ -542,6 +561,7 @@ Item {
         root.draftRestrict = !!b.restrict; root.draftAllowList = b.allowList || "";
         root.draftMax = b.max || ""; root.draftCloseAt = b.closeAt || ""; root.draftShowCount = !!b.showCount;
         root.draftThankYou = b.thankYou || ""; root.draftShuffle = !!b.shuffle; root.draftAllowEdits = !!b.allowEdits; root.draftAnonymous = !!b.anonymous; root.draftQuiz = !!b.quiz;
+        root.draftMulti = !!b.multi; root.draftPerPerson = b.perPerson || "";
     }
     function openDraft(d) {
         var b = (d.def && d.def._builder) ? d.def._builder : null;
@@ -565,7 +585,8 @@ Item {
         loadBuilder({ title: (f.title || "") + " (copy)", description: f.description || "", questions: qs,
                       restrict: !!(f.whitelist && f.whitelist.type === "addresses"), allowList: (f.whitelist && f.whitelist.value || "").split(",").join("\n"),
                       max: f.maxResponses ? String(f.maxResponses) : "", showCount: !!f.showResponseCount, thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions,
-                      allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz });
+                      allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz,
+                      multi: f.maxPerRespondent !== undefined && f.maxPerRespondent !== 1, perPerson: f.maxPerRespondent > 1 ? String(f.maxPerRespondent) : "" });
         rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
     }
     readonly property var templates: [
@@ -625,7 +646,8 @@ Item {
     // Everything the builder shows - stored inside the draft so it reopens exactly.
     readonly property var builderState: ({ title: root.draftTitle, description: root.draftDescription, questions: root.draftQuestions,
         restrict: root.draftRestrict, allowList: root.draftAllowList, max: root.draftMax, closeAt: root.draftCloseAt, showCount: root.draftShowCount,
-        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous, quiz: root.draftQuiz })
+        thankYou: root.draftThankYou, shuffle: root.draftShuffle, allowEdits: root.draftAllowEdits, anonymous: root.draftAnonymous, quiz: root.draftQuiz,
+        multi: root.draftMulti, perPerson: root.draftPerPerson })
     onBuilderStateChanged: if (root.showCreate) root.draftDirty = true
     // -> { ok, def, error }. strict=false never fails (autosave of a half-done form).
     function buildDef(strict) {
@@ -679,6 +701,12 @@ Item {
         if (root.draftThankYou.trim()) def.thankYou = root.draftThankYou.trim();
         if (root.draftShuffle) def.shuffleQuestions = true;
         if (root.draftAllowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+        if (root.draftMulti) {   // ADR 0022: 0 = no limit
+            var pp = root.draftPerPerson.trim(), np = pp ? parseInt(pp, 10) : 0;
+            if (strict && pp && (!(np > 1) || String(np) !== pp)) return err("Answers per person: a whole number above 1, or leave it empty for no limit");
+            def.maxPerRespondent = np > 1 ? np : 0;
+            if (strict && root.draftAllowEdits) return err("A form that takes several answers per person can't also allow edits");
+        }
         if (root.draftQuiz) {
             if (strict && nQuiz === 0) return err("Quiz: mark the right answer for at least one question");
             if (nQuiz > 0) def.quiz = quiz;
@@ -1208,6 +1236,16 @@ Item {
                                 }
                             }
                         }
+                        // several answers per person (ADR 0022): who sent how many, and how many you received
+                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                            visible: !!(root.sel && root.sel.maxPerRespondent !== undefined && (root.sel.mine || root.sel.coOwner) && root.selResponses.length > 0)
+                            text: {
+                                if (!visible) return "";
+                                var t = root.respondentTally(), parts = [];
+                                for (var i = 0; i < Math.min(t.length, 6); i++)
+                                    parts.push(root.shortAddr(t[i].respondent) + ": " + root.plural(t[i].answers, "answer", "answers") + (t[i].received ? " (" + t[i].received + " received)" : ""));
+                                return root.plural(t.length, "person", "people") + " answered  \u00B7  " + parts.join(",  ") + (t.length > 6 ? ", ..." : "");
+                            } }
                         Text { textFormat: Text.PlainText; visible: root.selQuiz; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbSuccess
                             text: "Quiz" + (root.selAvgScore ? "  \u00B7  average score " + root.selAvgScore : "") + "  \u00B7  scores and replies are sealed to each person - nobody else can read them" }
                         Text { textFormat: Text.PlainText
@@ -1217,6 +1255,7 @@ Item {
                                 var f = root.sel, parts = [];
                                 if (!f) return "";
                                 if (f.maxResponses) parts.push("Closes automatically at " + root.plural(f.maxResponses, "response", "responses"));
+                                if (f.maxPerRespondent !== undefined) parts.push(f.maxPerRespondent > 1 ? "Up to " + f.maxPerRespondent + " answers per person" : "Any number of answers per person");
                                 if (f.expiresAt) parts.push((f.status === "closed" ? "End date " : "Closes ") + root.fmtTime(f.expiresAt));
                                 if (f.showResponseCount) parts.push("respondents see how many receipts you sent");
                                 return parts.join("  ·  ");
@@ -1381,7 +1420,7 @@ Item {
                                                             color: index === 3 + root.sel.questions.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
                                                             text: {
                                                                 if (index === 0) return String(trow.ri + 1) + (trow.r.edits > 0 ? " \u270E" : "");
-                                                                if (index === 1) return root.shortAddr(trow.r.respondent) + (trow.r.verified === false ? "  (unverified)" : "");
+                                                                if (index === 1) return root.shortAddr(trow.r.respondent) + (trow.r.answerNo ? "  #" + trow.r.answerNo : "") + (trow.r.verified === false ? "  (unverified)" : "");
                                                                 if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
                                                                 if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
                                                                 if (index === 4 + root.sel.questions.length) return root.scoreText(trow.r) + (trow.r.replies > 0 ? "  \u2709" : "");
@@ -1465,7 +1504,7 @@ Item {
                                             Layout.fillWidth: true
                                             spacing: 8
                                             // ADR 0019: an unsigned answer (older client, or someone claiming this address) proves nothing
-                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) + (oneNav.r.verified === false ? "  unverified: not signed, could be from anyone" : "") : ""; font.pixelSize: 12; font.family: "monospace"; color: oneNav.r && oneNav.r.verified === false ? root.wbWarning : root.wbTextSec
+                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) + (oneNav.r.answerNo ? "  \u00B7  their answer #" + oneNav.r.answerNo : "") + (oneNav.r.verified === false ? "  unverified: not signed, could be from anyone" : "") : ""; font.pixelSize: 12; font.family: "monospace"; color: oneNav.r && oneNav.r.verified === false ? root.wbWarning : root.wbTextSec
                                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
                                             // ADR 0019: when the network had it (deadlines use that), or the sender's own claim
                                             Text { textFormat: Text.PlainText; text: root.answerTimeText(oneNav.r); font.pixelSize: 11; color: oneNav.r && oneNav.r.timeSkew ? root.wbWarning : root.wbTextTert }
@@ -1474,7 +1513,7 @@ Item {
                                             Badge { visible: !!(oneNav.r && oneNav.r.replies > 0); label: oneNav.r ? root.plural(oneNav.r.replies, "reply", "replies") + " sent" : ""; fg: root.wbPrimary; bg: root.wbPrimarySubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.edits > 0); label: "edited"; fg: root.wbAccent; bg: root.wbWarningSubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.confirmed); label: "Receipt sent" }
-                                            WbButton { visible: !!(oneNav.r && !oneNav.r.confirmed); implicitHeight: 28; label: "Send receipt"; onClicked: root.confirmResponse(oneNav.r.respondent) }
+                                            WbButton { visible: !!(oneNav.r && !oneNav.r.confirmed); implicitHeight: 28; label: "Send receipt"; onClicked: root.confirmOne(oneNav.r) }
                                         }
                                         Repeater {
                                             model: root.sel ? root.sel.questions : []
@@ -2229,7 +2268,23 @@ Item {
                         border.color: root.draftAllowEdits ? root.wbPrimary : root.wbBorder; border.width: 1
                         Text { id: aeT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftAllowEdits ? root.wbPrimary : root.wbTextSec
                             text: (root.draftAllowEdits ? "\u2713 " : "") + "Let people edit their answer for 15 minutes (until you send a receipt)" }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftAllowEdits = !root.draftAllowEdits }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.draftAllowEdits = !root.draftAllowEdits; if (root.draftAllowEdits) root.draftMulti = false; } }
+                    }
+                    RowLayout {
+                        spacing: 10
+                        Rectangle {
+                            implicitWidth: muT.implicitWidth + 22; implicitHeight: 30; radius: 15
+                            color: root.draftMulti ? root.wbPrimarySubtle : "transparent"
+                            border.color: root.draftMulti ? root.wbPrimary : root.wbBorder; border.width: 1
+                            Text { id: muT; textFormat: Text.PlainText; anchors.centerIn: parent; font.pixelSize: 12; color: root.draftMulti ? root.wbPrimary : root.wbTextSec
+                                text: (root.draftMulti ? "\u2713 " : "") + "Let each person send several answers (feedback, bug reports, ideas)" }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.draftMulti = !root.draftMulti; if (root.draftMulti) root.draftAllowEdits = false; } }
+                        }
+                        Text { visible: root.draftMulti; textFormat: Text.PlainText; text: "up to"; font.pixelSize: 12; color: root.wbTextTert }
+                        InputBox { visible: root.draftMulti; implicitWidth: 90; implicitHeight: 30
+                            TextField { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; color: root.wbText; placeholderTextColor: root.wbTextTert
+                                font.pixelSize: 12; background: null; placeholderText: "no limit"; validator: IntValidator { bottom: 2 }
+                                text: root.draftPerPerson; onTextChanged: root.draftPerPerson = text } }
                     }
                     Rectangle {
                         implicitWidth: anT.implicitWidth + 22; implicitHeight: 30; radius: 15

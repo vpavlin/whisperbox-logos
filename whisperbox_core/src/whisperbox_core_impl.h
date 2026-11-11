@@ -50,6 +50,8 @@ public:
     std::string createForm(std::string defJson);
     std::string closeForm(std::string formId);
     std::string confirmResponse(std::string formId, std::string respondentAddr);
+    // Receipt for one answer by its receipt id (several answers per person, ADR 0022)
+    std::string confirmAnswer(std::string formId, std::string confirmationId);
 
     // --- respond ---
     std::string submitResponse(std::string formId, std::string answersJson);
@@ -115,6 +117,7 @@ private:
 
     // --- identity / persistence ---
     void setupDataDir();
+    std::vector<std::string> myCidsFor(const std::string& fid);
     void loadIdentity();
     void saveIdentity();
     void loadLog();

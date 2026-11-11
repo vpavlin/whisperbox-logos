@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0 desktop core + studio + respond (2026-11-11) - several answers per person (ADR 0022)
+
+- **Protocol:** a form can take several answers from one person: `maxPerRespondent` = N, or 0 for no
+  limit (default 1, unchanged). Each answer is its own entry with its own receipt (keyed by the sealed
+  receipt id), numbered per person; the per-person cap comes before the form's. Signed answers only;
+  not combinable with edits. Both engines (C++ + JS) reproduce a new golden scenario.
+- **Studio:** "Let each person send several answers (up to N)" in the form settings; receipts per
+  answer; "their answer #N"; a line with how many answers each person sent and how many you received
+  (for rewards: count received answers).
+- **Respond / answering view:** after sending, an empty form for the next answer; "you've sent N
+  answers (M received)"; My forms shows it per form.
+- Older WhisperBox versions see only a person's first answer to such a form: publish these once
+  people run 0.7.0. Android follows.
+
 ## 0.6.1 core (2026-11-11) - one WhisperBox per Basecamp profile
 
 - **The identity follows `--user-dir`.** Two Basecamp instances under one OS user shared one identity

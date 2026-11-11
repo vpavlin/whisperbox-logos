@@ -122,13 +122,15 @@ id, creator (address), publicKey (form key pub33 hex), createdAt (ms),
   showResponseCount: bool       thankYou: string        shuffleQuestions: bool
   anonymous: bool               quizKey: hex | null
   allowEdits: bool              editWindowMinutes: positive integer (15 when allowEdits) | null
+  maxPerRespondent: 1 (default, omitted) | N | 0 = no limit        (ADR 0022)
 ```
 Writers SHOULD omit fields at their default. Readers normalise with `editableFields(p)`:
 wrong-typed or missing values become the defaults shown above. `form.update.form` carries
 the same editable fields (the full new set, not a patch).
 
 Constraints enforced by writers (core and client refuse to publish):
-`anonymous` and `whitelist.type = "addresses"` are mutually exclusive.
+`anonymous` and `whitelist.type = "addresses"` are mutually exclusive; so are `allowEdits` and
+`maxPerRespondent != 1`. The folded form view carries `maxPerRespondent` only when it isn't 1.
 
 ### 4.4 Questions
 ```
@@ -395,6 +397,12 @@ view is the HLC-only fold (identical on every replica; the golden vectors). For 
    edits). Every 0.5.0 client signs; unsigned answers come from older clients or forgers.
 4. `respondent` required (`no-respondent`); whitelisted forms: respondent must be listed
    (`not-whitelisted`).
+   **Several answers per respondent** (`maxPerRespondent != 1`, ADR 0022) replace steps 5-6: unsigned
+   answers are dropped in step 3 (`sig-invalid`); no valid `confirmationId` -> `no-answer-id`; a
+   (respondent, confirmationId) seen before -> `duplicate-answer`; the respondent already has
+   `maxPerRespondent` accepted answers (N > 0) -> `over-respondent-limit`; then the form cap
+   (`over-limit`, counting answers). Accept as in step 7 without `edits`, plus `answerNo` (1-based
+   per respondent).
 5. Same respondent seen before for this form:
    - not `allowEdits` -> `duplicate-respondent`;
    - stamped more than `editWindowMinutes` after the first answer -> `edit-too-late`;

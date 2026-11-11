@@ -21,6 +21,8 @@ ColumnLayout {
     property bool preview: false        // the studio's preview of a draft: answers are never sent
     // host: act(method, args, okMsg, cb), callVia(method, args, cb), busy(method), toast(msg)
     property var host: null
+    // the form takes several answers per person (ADR 0022)
+    readonly property bool multi: !!(fr.form && fr.form.maxPerRespondent !== undefined && fr.form.maxPerRespondent !== 1)
 
     // ── palette (WbPalette.js, the same colours as the studio) ──
     readonly property color wbPrimary: P.wbPrimary
@@ -158,6 +160,12 @@ ColumnLayout {
             if (f.maxResponses) parts.push("limited to " + f.maxResponses);
             if (f.expiresAt) parts.push((f.status === "closed" ? "closed " : "closes ") + fr.fmtTime(f.expiresAt));
             if (fr.draftRestored && !f.mySubmitted) parts.push("your unsent answers were restored");
+            if (fr.multi && !f.mine) {
+                var n = f.myAnswerCount || 0, cap = f.maxPerRespondent;
+                parts.push(n ? "you've sent " + fr.plural(n, "answer", "answers") + (f.myReceipts ? " (" + f.myReceipts + " received)" : "")
+                               + (f.canRespond ? " - send another below" : "")
+                             : (cap > 1 ? "you can send up to " + cap + " answers" : "you can send as many answers as you like"));
+            }
             if (f.anonymous) parts.push("anonymous: you answer under a one-off identity for this form - the creator can't link it to your address");
             return parts.join("  ·  ");
         }
@@ -186,6 +194,8 @@ ColumnLayout {
                 if (f.linkMismatch) return "This form's creator (" + fr.shortAddr(f.creator) + ") is not the one in the link you opened (" + fr.shortAddr(f.pinnedCreator) + "). WhisperBox won't send your answers to it. If that link was wrong, Remove the form, then open the right one.";
                 if (f.needsLink) return "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it, and WhisperBox only sends answers to the creator a link names.";
                 if (f.contested && f.pinnedCreator !== f.creator) return "Two different people published a form with this id. Open it from the creator's own link to answer - answers are only ever sealed to the creator that link names.";
+                if (f.mySubmitted && fr.multi) return (f.thankYou ? f.thankYou + "\n\n" : "") + "You've sent " + fr.plural(f.myAnswerCount || 0, "answer", "answers")
+                    + ", the most this form takes from one person" + (f.myReceipts ? " - the creator received " + f.myReceipts + " of them." : ".");
                 if (f.mySubmitted) return (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed
                     ? "Your answers were received - the creator sent you a receipt."
                     : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.");
@@ -228,11 +238,12 @@ ColumnLayout {
     // What I answered (a private local copy - the sent answers are sealed to the creator)
     ColumnLayout {
         Layout.fillWidth: true
-        visible: !!(fr.form && !fr.form.mine && fr.form.mySubmitted && !fr.editing)
+        // several-answer forms: hidden while the next answer is being written (it's a fresh form)
+        visible: !!(fr.form && !fr.form.mine && fr.form.mySubmitted && !fr.editing && !(fr.multi && fr.form.canRespond))
         spacing: 10
         RowLayout {
             Layout.fillWidth: true
-            SectionLabel { Layout.fillWidth: true; text: "YOUR ANSWERS" }
+            SectionLabel { Layout.fillWidth: true; text: fr.multi ? "YOUR LATEST ANSWER" : "YOUR ANSWERS" }
             WbButton {
                 visible: !!(fr.form && fr.form.canEdit)
                 label: "Edit answers (" + fr.minutesLeft(fr.form ? fr.form.editUntil : 0) + " min left)"

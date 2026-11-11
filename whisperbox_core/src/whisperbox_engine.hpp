@@ -202,6 +202,13 @@ struct Clock {
 // opts.verify   — authenticity hook for SIGNED gated events; null = permissive
 //                 (transition semantics — strict-drop silently hid redelivered
 //                 copies of your own submissions).
+// Answers one respondent may send: 1 (default), N, or 0 = unlimited (ADR 0022; mirror engine.mjs).
+template <class J>
+inline long long maxPerRespondentOf(const J& f) {
+    if (!f.is_object() || !f.contains("maxPerRespondent") || !f["maxPerRespondent"].is_number()) return 1;
+    const double d = f["maxPerRespondent"].template get<double>();
+    return (d >= 0 && d <= 1e6 && d == std::floor(d)) ? (long long)d : 1;
+}
 // The fields a creator may change with form.update - normalized the same way on publish
 // and on update (mirror engine.mjs editableFields).
 inline void applyEditableFields(OrderedJson& f, const json& p) {
@@ -231,6 +238,9 @@ inline void applyEditableFields(OrderedJson& f, const json& p) {
     json win = nullptr;
     if (ae) { win = 15; if (p.contains("editWindowMinutes") && p["editWindowMinutes"].is_number_integer() && p["editWindowMinutes"].get<long long>() > 0) win = p["editWindowMinutes"]; }
     f["editWindowMinutes"] = win;
+    // answers per respondent (ADR 0022): 1 = default, omitted (older vectors stay byte-identical)
+    const long long per = maxPerRespondentOf(p);
+    if (per != 1) f["maxPerRespondent"] = per; else if (f.contains("maxPerRespondent")) f.erase("maxPerRespondent");
 }
 
 // Append a key known to be new to an ordered object, without the linear lookup operator[] does
@@ -601,6 +611,8 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
 
     struct EditMeta { long long firstWall = 0; std::string cid; long long index = -1; };
     std::map<std::string, std::map<std::string, EditMeta>> seenRespondent; // formId → respondent → first answer
+    struct MultiMeta { long long n = 0; std::set<std::string> cids; };
+    std::map<std::string, std::map<std::string, MultiMeta>> seenMulti;      // ADR 0022: formId → respondent → answers
 
     struct When { long long wall = 0; bool net = false; };
     auto whenOf = [&](const auto& blob) {
@@ -698,7 +710,7 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
                 pseudo["pub"] = dec.contains("pub") ? dec["pub"] : nullptr;
                 pseudo["sig"] = dec["signature"];
                 if (!verifyResponse(pseudo)) { drop(dropped, "sig-invalid"); continue; }
-            } else if (wlType != "none" || allowEdits) { drop(dropped, "sig-invalid"); continue; }
+            } else if (wlType != "none" || allowEdits || maxPerRespondentOf(f) != 1) { drop(dropped, "sig-invalid"); continue; }
             else {
                 // still the creator's to read and export (older clients didn't sign), but it proves
                 // nothing: no respondent slot, no cap, no edits (mirror engine.mjs)
@@ -724,6 +736,34 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
             if (std::find(allowed.begin(), allowed.end(), respondent) == allowed.end()) {
                 drop(dropped, "not-whitelisted"); continue;
             }
+        }
+        // Several answers per respondent (ADR 0022, mirror engine.mjs): keyed by the sealed receipt id;
+        // a repeat of a seen id is a copy; the respondent's cap before the form's; no edits.
+        const long long perResp = maxPerRespondentOf(f);
+        if (perResp != 1) {
+            if (!(dec.contains("confirmationId") && validConfirmationId(dec["confirmationId"]))) { drop(dropped, "no-answer-id"); continue; }
+            const std::string cid = dec["confirmationId"].get<std::string>();
+            auto& mm = seenMulti[formId][respondent];
+            if (mm.cids.count(cid)) { drop(dropped, "duplicate-answer"); continue; }
+            mm.cids.insert(cid);
+            if (perResp > 0 && mm.n >= perResp) { drop(dropped, "over-respondent-limit"); continue; }
+            if (f.contains("maxResponses") && f["maxResponses"].is_number()
+                && counted[formId] >= f["maxResponses"].template get<long long>()) { drop(dropped, "over-limit"); continue; }
+            mm.n += 1;
+            OrderedJson r = OrderedJson::object();
+            r["respondent"] = respondent;
+            r["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : nullptr;
+            r["answers"] = sanitizeAnswers(dec.contains("answers") ? dec["answers"] : json());
+            r["signature"] = dec.contains("signature") ? dec["signature"] : nullptr;
+            r["confirmationId"] = cid;
+            r["hlc"] = blob["hlc"];
+            r["answerNo"] = mm.n;
+            if (isReplyPub(dec)) r["replyPub"] = lc(dec["replyPub"].get<std::string>());
+            if (verifyResponse) r["verified"] = true;
+            timeFields(r);
+            answers.push_back(r);
+            counted[formId]++;
+            continue;
         }
         auto& seen = seenRespondent[formId];
         auto prevIt = seen.find(respondent);
@@ -1011,7 +1051,8 @@ inline bool wellFormedFormFields(const json& f) {
     }
     if (!jOptStr(f, "title") || !jOptStr(f, "description") || !jOptStr(f, "thankYou") || !jOptStr(f, "quizKey", 4096)) return false;
     if (!jOptNumIn(f, "expiresAt", 0, kMaxTimeMs) || !jOptNumIn(f, "maxResponses", 0, 1e6)
-        || !jOptNumIn(f, "editWindowMinutes", 0, 525600) || !jOptNumIn(f, "createdAt", 0, kMaxTimeMs)) return false;
+        || !jOptNumIn(f, "editWindowMinutes", 0, 525600) || !jOptNumIn(f, "createdAt", 0, kMaxTimeMs)
+        || !jOptNumIn(f, "maxPerRespondent", 0, 1e6)) return false;
     for (const char* b : {"showResponseCount", "shuffleQuestions", "anonymous", "allowEdits"}) if (!jOptBool(f, b)) return false;
     if (f.contains("whitelist") && !f["whitelist"].is_null()) {
         const json& w = f["whitelist"];

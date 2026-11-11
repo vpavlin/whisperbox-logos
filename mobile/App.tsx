@@ -296,7 +296,8 @@ function Home({ snap, push, openLink }: Ctx) {
           <Text style={st.rowS} numberOfLines={1}>{sub}</Text>
         </View>
         {f && f.mine && f.newResponses > 0 ? <Badge label={`${f.newResponses} new`} fg="#fff" bg={C.primary} /> : null}
-        {f && !f.mine && f.mySubmitted ? <Badge label={f.myConfirmed ? "Receipt" : "Sent"} fg={f.myConfirmed ? C.ok : C.text2} bg={f.myConfirmed ? C.okSubtle : C.raised} /> : null}
+        {f && !f.mine && f.mySubmitted && f.myAnswerCount !== undefined ? <Badge label={`${f.myAnswerCount} sent`} fg={f.myReceipts ? C.ok : C.text2} bg={f.myReceipts ? C.okSubtle : C.raised} /> : null}
+        {f && !f.mine && f.mySubmitted && f.myAnswerCount === undefined ? <Badge label={f.myConfirmed ? "Receipt" : "Sent"} fg={f.myConfirmed ? C.ok : C.text2} bg={f.myConfirmed ? C.okSubtle : C.raised} /> : null}
         {f?.contested ? <Badge label="Check link" fg={C.warn} bg={C.warnSubtle} /> : null}
       </Pressable>
     );
@@ -555,7 +556,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   // unsent answers saved while typing come back (crash, restart, leaving the screen)
   // Read the draft from the client itself: the snapshot this screen got may predate the last
   // save (saving a draft doesn't re-render the app), which made re-opened forms come back empty.
-  const savedDraft = (): any[] | null => (f && !f.mySubmitted ? client.answerDrafts?.[String(id).toLowerCase()] || null : null);
+  const savedDraft = (): any[] | null => (f && (!f.mySubmitted || f.canRespond) ? client.answerDrafts?.[String(id).toLowerCase()] || null : null);
   const [answers, setAnswers] = useState<Record<string, any>>(() => {
     const a: Record<string, any> = {};
     for (const x of savedDraft() || []) a[x.questionId] = x.value;
@@ -579,7 +580,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   const typed = useRef(false);
   const latest = useRef(answers); latest.current = answers;
   const saveNow = () => {
-    if (preview || !typed.current || !f || f.mine || f.mySubmitted) return;
+    if (preview || !typed.current || !f || f.mine || (f.mySubmitted && !f.canRespond)) return;
     client.saveAnswerDraft(id, Object.entries(latest.current).map(([questionId, value]) => ({ questionId, value })));
   };
   useEffect(() => {
@@ -642,18 +643,25 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
   const at = Math.max(0, Math.min(idx, list.length - 1));
   const cur = list[at];
   const atCap = !!(f.maxResponses && responses.length >= f.maxResponses);
+  const multi = f.maxPerRespondent !== undefined && f.maxPerRespondent !== 1;
   const ended = !!(f.expiresAt && Date.now() > f.expiresAt);
   const info = [
     f.showResponseCount ? plural((f.confirmations || []).length, "response", "responses") + (f.mine ? " visible to respondents" : " received so far") : null,
     f.maxResponses ? (f.mine ? "closes automatically at " : "limited to ") + f.maxResponses : null,
     f.expiresAt ? (f.status === "closed" || ended ? "closed " : "closes ") + fmtTime(f.expiresAt) : null,
     restored && !f.mine && !f.mySubmitted ? "your unsent answers were restored" : null,
+    // several answers per person (ADR 0022)
+    multi && !f.mine ? (f.myAnswerCount ? `you've sent ${plural(f.myAnswerCount, "answer", "answers")}${f.myReceipts ? ` (${f.myReceipts} received)` : ""}${f.canRespond ? " - send another below" : ""}`
+      : f.maxPerRespondent > 1 ? `you can send up to ${f.maxPerRespondent} answers` : "you can send as many answers as you like") : null,
+    multi && f.mine ? (f.maxPerRespondent > 1 ? `up to ${f.maxPerRespondent} answers per person` : "any number of answers per person") : null,
     f.anonymous && !f.mine ? "anonymous: you answer under a one-off identity for this form - the creator can't link it to your address" : null,
   ].filter(Boolean).join("  ·  ");
   const banner = (() => {
     if (f.linkMismatch) return { tone: "err", text: `This form's creator (${shortAddr(f.creator)}) is not the one in the link you opened (${shortAddr(f.pinnedCreator)}). WhisperBox won't send your answers to it. If that link was wrong, Remove the form, then open the right one.` } as const;
     if (f.needsLink) return { tone: "warn", text: "To answer, open this form from its creator's link or QR code. A bare form id doesn't say who made it, so anyone could publish a form under it." } as const;
     if (f.contested && !f.mine && f.pinnedCreator !== f.creator) return { tone: "warn", text: "Two different people published a form with this id. Open it from the creator's own link to answer - your answers are only ever sealed to the creator that link names." } as const;
+    if (f.mySubmitted && multi && f.canRespond) return null;   // the form below takes the next answer
+    if (f.mySubmitted && multi) return { tone: "ok", text: (f.thankYou ? f.thankYou + "\n\n" : "") + `You've sent ${plural(f.myAnswerCount || 0, "answer", "answers")}, the most this form takes from one person${f.myReceipts ? ` - the creator received ${f.myReceipts} of them.` : "."}` } as const;
     if (f.mySubmitted) return { tone: "ok", text: (f.thankYou ? f.thankYou + "\n\n" : "") + (f.myConfirmed ? "Your answers were received - the creator sent you a receipt." : "Your answers are sealed and sent. You'll see a receipt here once the creator opens them.") } as const;
     if (f.status === "closed") return { tone: "info", text: "This form is closed and no longer accepts answers." } as const;
     if (!f.allowed) return { tone: "info", text: `This form only accepts answers from specific addresses, and yours (${shortAddr(snap.identity.address)}) isn't on the list.` } as const;
@@ -844,14 +852,14 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                   ) : null}
                   <View style={st.card}>
                     <View style={st.cardHead}>
-                      <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}</Text></Pressable>
+                      <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}{cur.answerNo ? `  #${cur.answerNo}` : ""}</Text></Pressable>
                       <Text style={[st.time, cur.timeSkew && { color: C.warn }]}>{answerTime(cur)}</Text>
                       <View style={{ flex: 1 }} />
                       {cur.outOf !== undefined ? <Badge label={scoreText(cur)} fg={C.ok} bg={C.okSubtle} /> : null}
                       {cur.replies > 0 ? <Badge label={`${plural(cur.replies, "reply", "replies")}`} fg={C.primary} bg={C.primarySubtle} /> : null}
                       {cur.edits > 0 ? <Badge label="edited" fg={C.accent} bg={C.warnSubtle} /> : null}
                       {cur.verified === false ? <Badge label="unverified" fg={C.warn} bg={C.warnSubtle} /> : null}
-                      {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
+                      {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = multi && cur.confirmationId ? client.confirmAnswer(id, cur.confirmationId) : client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
                     </View>
                     {cur.verified === false ? <Text style={[st.time, { color: C.warn, marginTop: 6 }]}>Not signed: this answer could be from anyone, so it doesn't count towards the limit.</Text> : null}
                     {(f.questions || []).map((q: any, qi: number) => {
@@ -997,7 +1005,7 @@ function parseLocal(t: string) {
   return m ? new Date(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 23, m[5] ? +m[5] : 59).getTime() : NaN;
 }
 const fmtInput = (ms: number) => { const d = new Date(ms); const z = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; };
-type Builder = { title: string; description: string; questions: Draft[]; restrict: boolean; allowList: string; max: string; closeAt: string; showCount: boolean; thankYou?: string; shuffle?: boolean };
+type Builder = { title: string; description: string; questions: Draft[]; restrict: boolean; allowList: string; max: string; closeAt: string; showCount: boolean; thankYou?: string; shuffle?: boolean; multi?: boolean; perPerson?: string };
 function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId }: Ctx & { draftId?: string; fromForm?: string; editFormId?: string }) {
   // Start from: a saved draft, a form to duplicate, or empty.
   const init = useMemo<Builder>(() => {
@@ -1011,6 +1019,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
       questions: (f.questions || []).map((q: any) => { const { id: qid, options: _o, ...rest } = q; return quizIntoDraft({ ...rest, ...(editFormId ? { id: qid } : {}), type: normType(q.type), text: q.text || "", required: !!q.required, optionsText: (q.options || []).join("\n"),
         ...(q.type === "number" ? { numMin: q.min !== undefined ? String(q.min) : "", numMax: q.max !== undefined ? String(q.max) : "" } : {}) }, f.quiz?.[q.id]); }),
       thankYou: f.thankYou || "", shuffle: !!f.shuffleQuestions, allowEdits: !!f.allowEdits, anonymous: !!f.anonymous, quiz: !!f.quiz,
+      multi: f.maxPerRespondent !== undefined && f.maxPerRespondent !== 1, perPerson: f.maxPerRespondent > 1 ? String(f.maxPerRespondent) : "",
       restrict: f.whitelist?.type === "addresses", allowList: String(f.whitelist?.value || "").split(",").join("\n"),
       max: f.maxResponses ? String(f.maxResponses) : "", closeAt: editFormId && f.expiresAt ? fmtInput(f.expiresAt) : "", showCount: !!f.showResponseCount,
     };
@@ -1027,6 +1036,8 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   const [thankYou, setThankYou] = useState(init.thankYou || "");
   const [shuffle, setShuffle] = useState(!!init.shuffle);
   const [allowEdits, setAllowEdits] = useState(!!(init as any).allowEdits);
+  const [multi, setMulti] = useState(!!(init as any).multi);              // several answers per person (ADR 0022)
+  const [perPerson, setPerPerson] = useState(String((init as any).perPerson || ""));
   const [anonymous, setAnonymous] = useState(!!(init as any).anonymous);
   const [quiz, setQuiz] = useState(!!(init as any).quiz);
   const useTemplate = (b: any) => { setTitle(b.title); setDesc(b.description || ""); setQs(JSON.parse(JSON.stringify(b.questions))); setThankYou(b.thankYou || ""); };
@@ -1039,7 +1050,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
   useEffect(() => { getKeycardPrefs().then((p) => setUseCard(p.useForNewForms)).catch(() => {}); }, []);
   const upd = (i: number, p: Partial<Draft>) => setQs((a) => a.map((q, j) => (j === i ? { ...q, ...p } : q)));
   const move = (i: number, d: number) => setQs((a) => { const j = i + d; if (j < 0 || j >= a.length) return a; const b = a.slice(); [b[i], b[j]] = [b[j], b[i]]; return b; });
-  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz } as any;
+  const builder: Builder = { title, description: desc, questions: qs, restrict, allowList: allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz, multi, perPerson } as any;
   const empty = !title.trim() && !desc.trim() && !qs.some((q) => q.text.trim());
 
   // -> {ok, def} | {ok:false, error}. strict=false never fails (autosave of a half-done form).
@@ -1091,6 +1102,12 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (thankYou.trim()) def.thankYou = thankYou.trim();
     if (shuffle) def.shuffleQuestions = true;
     if (allowEdits) { def.allowEdits = true; def.editWindowMinutes = 15; }
+    if (multi) {
+      const pp = perPerson.trim(), np = pp ? parseInt(pp, 10) : 0;
+      if (strict && pp && (!(np > 1) || String(np) !== pp)) return fail("Answers per person: a whole number above 1, or leave it empty for no limit");
+      def.maxPerRespondent = np > 1 ? np : 0;
+      if (strict && allowEdits) return fail("A form that takes several answers per person can't also allow edits");
+    }
     if (quiz) {
       if (strict && !Object.keys(answerKey).length) return fail("Quiz: mark the right answer for at least one question");
       if (Object.keys(answerKey).length) def.quiz = answerKey;
@@ -1111,7 +1128,7 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
     if (empty || editFormId) return;   // editing a published form: saved with "Save", no draft
     const t = setTimeout(() => saveDraft(scheduling ? parseLocal(publishAt) || null : null), 1500);
     return () => clearTimeout(t);
-  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz]);
+  }, [title, desc, qs, restrict, allow, max, closeAt, showCount, thankYou, shuffle, allowEdits, anonymous, quiz, multi, perPerson]);
   const leave = () => {
     if (editFormId) { pop(); return; }
     if (!empty && dirty.current) { saveDraft(scheduling && !isNaN(parseLocal(publishAt)) ? parseLocal(publishAt) : null); toast("Saved as a draft"); }
@@ -1286,9 +1303,13 @@ function CreateScreen({ replace, pop, push, toast, draftId, fromForm, editFormId
           <Pressable onPress={() => setShuffle((x) => !x)} style={[st.chip, { marginTop: 18, alignSelf: "flex-start" }, shuffle && st.chipOn]}>
             <Text style={[st.chipT, shuffle && { color: C.primary }]}>{shuffle ? "✓ " : ""}Shuffle question order for each respondent</Text>
           </Pressable>
-          <Pressable onPress={() => setAllowEdits((x) => !x)} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, allowEdits && st.chipOn]}>
+          <Pressable onPress={() => { setAllowEdits((x) => !x); if (!allowEdits) setMulti(false); }} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, allowEdits && st.chipOn]}>
             <Text style={[st.chipT, allowEdits && { color: C.primary }]}>{allowEdits ? "✓ " : ""}Let people edit their answer for 15 minutes (until you send a receipt)</Text>
           </Pressable>
+          <Pressable onPress={() => { setMulti((x) => !x); if (!multi) setAllowEdits(false); }} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, multi && st.chipOn]}>
+            <Text style={[st.chipT, multi && { color: C.primary }]}>{multi ? "✓ " : ""}Let each person send several answers (feedback, bug reports, ideas)</Text>
+          </Pressable>
+          {multi ? <TextInput value={perPerson} onChangeText={setPerPerson} keyboardType="number-pad" placeholder="Up to how many per person? (empty = no limit)" placeholderTextColor={C.text3} style={[st.input, { marginTop: 8 }]} /> : null}
           <Pressable onPress={() => { setAnonymous((x) => !x); if (!anonymous) setRestrict(false); }} style={[st.chip, { marginTop: 8, alignSelf: "flex-start" }, anonymous && st.chipOn]}>
             <Text style={[st.chipT, anonymous && { color: C.primary }]}>{anonymous ? "✓ " : ""}Anonymous answers (you can't link them to anyone's address)</Text>
           </Pressable>

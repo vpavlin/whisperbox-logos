@@ -41,6 +41,9 @@ Item {
     function listStatus(f) {
         if (!f) return "Waiting for the form to arrive from its creator";
         if (f.mine) return "Your own form";
+        if (f.maxPerRespondent !== undefined && f.maxPerRespondent !== 1 && f.mySubmitted)   // several answers (ADR 0022)
+            return "Sent " + (f.myAnswerCount || 1) + (f.myAnswerCount === 1 ? " answer" : " answers") + (f.myReceipts ? " - " + f.myReceipts + " received" : "")
+                 + (f.canRespond ? " - you can send another" : "");
         if (f.mySubmitted) return f.myConfirmed ? "Answered - received by the creator" : "Answered - waiting for a receipt";
         if (f.status === "closed") return "Closed";
         if (f.hasAnswerDraft) return "Not sent yet - answers saved";

@@ -1443,13 +1443,22 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["hasAnswerDraft"] = m_answerDrafts.count(fid) > 0;
         f["hasMyAnswers"] = m_myAnswers.count(fid) > 0;
         if (submitted && m_myConfirmIds.count(fid) && f.contains("replies") && !f["replies"].empty()) {
-            const std::string cid = m_myConfirmIds[fid];
-            long long n = 0; for (const auto& r : f["replies"]) if (r.value("to", "") == cid) n++;
+            const std::vector<std::string> cids = myCidsFor(fid);
+            long long n = 0; for (const auto& r : f["replies"]) if (std::find(cids.begin(), cids.end(), r.value("to", "")) != cids.end()) n++;
             f["myReplyCount"] = n;   // the replies themselves: formDetail
         }
         f["myConfirmed"] = confirmed;
         f["allowed"] = allowed;
-        f["canRespond"] = trusted && !mine && !submitted && allowed && f["status"].get<std::string>() == "open"
+        // ADR 0022: a several-answer form stays answerable until this person's cap (0 = none)
+        const long long perResp = whisperbox::maxPerRespondentOf(f);
+        const long long myCount = submitted ? (long long)myCidsFor(fid).size() : 0;
+        const bool room = perResp == 1 ? !submitted : (perResp == 0 || myCount < perResp);
+        if (perResp != 1) {
+            f["myAnswerCount"] = myCount;
+            long long rc = 0; for (const auto& c : myCidsFor(fid)) if (containsStr(f["confirmations"], c)) rc++;
+            f["myReceipts"] = rc;
+        }
+        f["canRespond"] = trusted && !mine && room && allowed && f["status"].get<std::string>() == "open"
                           && f["publicKey"].is_string() && !f["publicKey"].get<std::string>().empty();
     }
 
@@ -1791,7 +1800,17 @@ static OrderedJson editableFromDef(const json& def, const std::string& sealPub =
         p["allowEdits"] = true;
         p["editWindowMinutes"] = def.contains("editWindowMinutes") && def["editWindowMinutes"].is_number_integer() && def["editWindowMinutes"].get<long long>() > 0 ? def["editWindowMinutes"] : json(15);
     }
+    // answers per respondent (ADR 0022): omitted at the default 1; 0 = unlimited
+    if (whisperbox::maxPerRespondentOf(def) != 1) p["maxPerRespondent"] = whisperbox::maxPerRespondentOf(def);
     return p;
+}
+// Combinations the protocol doesn't define: writers refuse them (same as the JS client).
+static std::string defConflict(const json& def) {
+    if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none")
+        return "an anonymous form can't be members-only (that needs real addresses)";
+    if (def.value("allowEdits", false) == true && whisperbox::maxPerRespondentOf(def) != 1)
+        return "a form that takes several answers per person can't also allow edits (each answer is final)";
+    return "";
 }
 
 // Edit a published form (creator). The full new definition replaces the old one on every
@@ -1806,8 +1825,7 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     try { def = parseUntrusted(trim(defJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
     if (def.contains("questions") && !def["questions"].is_array()) { out["ok"] = false; out["error"] = "questions must be an array"; return out.dump(); }
-    if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
-        out["ok"] = false; out["error"] = "an anonymous form can't be members-only (that needs real addresses)"; return out.dump(); }
+    { const std::string c = defConflict(def); if (!c.empty()) { out["ok"] = false; out["error"] = c; return out.dump(); } }
     OrderedJson state = foldedState();
     if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
     if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address) { out["ok"] = false; out["error"] = "not the creator"; return out.dump(); }
@@ -1833,8 +1851,7 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) try {
     json def;
     try { def = parseUntrusted(trim(defJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "bad defJson"; return out.dump(); }
     if (!def.is_object()) { out["ok"] = false; out["error"] = "def must be an object"; return out.dump(); }
-    if (def.value("anonymous", false) == true && def.contains("whitelist") && def["whitelist"].is_object() && def["whitelist"].value("type", "none") != "none") {
-        out["ok"] = false; out["error"] = "an anonymous form can't be members-only (that needs real addresses)"; return out.dump(); }
+    { const std::string c = defConflict(def); if (!c.empty()) { out["ok"] = false; out["error"] = c; return out.dump(); } }
     std::string formId = lc(def.value("id", ""));
     if (formId.empty()) formId = "form-" + randomHex(4);
     // the id must fit the share link: "x&y" was published, but its link opened form "x" (FR-11)
@@ -1927,6 +1944,50 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
 }
 
+// Every receipt id this device answered a form with: the latest, then earlier ones (ADR 0022).
+std::vector<std::string> WhisperboxCoreImpl::myCidsFor(const std::string& fid) {
+    std::vector<std::string> out;
+    if (m_myConfirmIds.count(fid) && !m_myConfirmIds[fid].empty()) out.push_back(m_myConfirmIds[fid]);
+    auto it = m_myAnswers.find(fid);
+    if (it != m_myAnswers.end() && it->second.contains("earlier") && it->second["earlier"].is_array())
+        for (const auto& e : it->second["earlier"])
+            if (e.is_object() && e.contains("confirmationId") && e["confirmationId"].is_string() && !e["confirmationId"].get<std::string>().empty())
+                out.push_back(e["confirmationId"].get<std::string>());
+    return out;
+}
+
+// Receipt for ONE answer by its receipt id: several-answer forms have one per answer (ADR 0022).
+std::string WhisperboxCoreImpl::confirmAnswer(std::string formId, std::string confirmationId) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    if (!m_signId.valid) { out["ok"] = false; out["error"] = "no identity"; return out.dump(); }
+    formId = lc(formId);
+    OrderedJson state = foldedState();
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    if (state["forms"][formId]["creator"].get<std::string>() != m_signId.address && !isCoOwner(state["forms"][formId])) { out["ok"] = false; out["error"] = "not the creator or a co-owner"; return out.dump(); }
+    OrderedJson cv = decryptView(state);
+    bool found = false, unverified = false;
+    if (cv["responses"].contains(formId))
+        for (const auto& r : cv["responses"][formId]) {
+            if (confirmIdOf(json::parse(r.dump()), formId) != confirmationId) continue;
+            if (r.contains("verified") && r["verified"].is_boolean() && !r["verified"].get<bool>()) { unverified = true; continue; }
+            found = true; break;
+        }
+    if (!found) { out["ok"] = false; out["error"] = unverified ? "that answer isn't signed by the address it names, so it can't get a receipt" : "no decrypted answer with that receipt id"; return out.dump(); }
+    OrderedJson p = OrderedJson::object();
+    p["formId"] = formId;
+    p["confirmationId"] = confirmationId;
+    p["author"] = m_signId.address;
+    json e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmId(formId, confirmationId), p, /*sign=*/true);
+    adoptLocal(e);
+    broadcastEvent(e);
+    publishState();
+    out["ok"] = true; out["formId"] = formId; out["confirmationId"] = confirmationId;
+    return out.dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
+}
+
 // ── respond ──────────────────────────────────────────────────────────────────────
 std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string answersJson) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -1948,7 +2009,13 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     const bool allowEdits = f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>();
     bool isEdit = false;
     long long firstAt = 0;
-    if (m_mySubmissions.count(formId)) {
+    // ADR 0022: several answers per respondent, each final, up to the form's per-person cap (0 = none)
+    const long long perResp = whisperbox::maxPerRespondentOf(f);
+    const long long myCount = m_mySubmissions.count(formId)
+        ? 1 + (long long)(m_myAnswers.count(formId) && m_myAnswers[formId].contains("earlier") && m_myAnswers[formId]["earlier"].is_array() ? m_myAnswers[formId]["earlier"].size() : 0) : 0;
+    if (perResp != 1 && myCount > 0) {
+        if (perResp > 0 && myCount >= perResp) { out["ok"] = false; out["error"] = "this form takes at most " + std::to_string(perResp) + " answers from one person"; return out.dump(); }
+    } else if (m_mySubmissions.count(formId)) {
         if (!allowEdits) { out["ok"] = false; out["error"] = "you already answered this form"; return out.dump(); }
         firstAt = m_myAnswers.count(formId) ? m_myAnswers[formId].value("firstSubmittedAt", m_myAnswers[formId].value("submittedAt", 0LL)) : 0;
         const long long win = std::min<long long>(f["editWindowMinutes"].is_number() ? whisperbox::toLL(f["editWindowMinutes"].get<double>()) : 15, 525600) * 60000LL;
@@ -2031,10 +2098,19 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         adoptLocal(e);
         broadcastEvent(e);
         publishState();
+        const std::string prevCid = m_myConfirmIds.count(formId) ? m_myConfirmIds[formId] : std::string();
         m_mySubmissions.insert(formId);   // local, private: "I already answered this"
         m_myConfirmIds[formId] = confirmationId;
         saveMySubmissions();
-        m_myAnswers[formId] = json({{"answers", answers}, {"submittedAt", submittedAt}, {"firstSubmittedAt", isEdit ? firstAt : submittedAt}});
+        json entry = json({{"answers", answers}, {"submittedAt", submittedAt}, {"firstSubmittedAt", isEdit ? firstAt : submittedAt}});
+        if (perResp != 1 && myCount > 0 && m_myAnswers.count(formId)) {   // keep the answers sent before, newest last
+            const json& prevA = m_myAnswers[formId];
+            json earlier = prevA.contains("earlier") && prevA["earlier"].is_array() ? prevA["earlier"] : json::array();
+            earlier.push_back(json({{"answers", prevA.value("answers", json::array())}, {"submittedAt", prevA.value("submittedAt", 0LL)},
+                                    {"confirmationId", prevCid.empty() ? json(nullptr) : json(prevCid)}}));
+            entry["earlier"] = earlier;
+        }
+        m_myAnswers[formId] = entry;
         saveMyAnswers();
         if (m_answerDrafts.erase(formId)) saveDrafts();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
@@ -2093,21 +2169,24 @@ std::string WhisperboxCoreImpl::formDetail(std::string formId) try {
     if (m_answerDrafts.count(fid)) out["answerDraft"] = m_answerDrafts[fid];
     if (m_myAnswers.count(fid)) out["myAnswers"] = m_myAnswers[fid];
     if (m_mySubmissions.count(fid) && m_myConfirmIds.count(fid) && f.contains("replies") && !f["replies"].empty()) {
-        // private replies / scores addressed to my answer
-        const std::string cid = m_myConfirmIds[fid];
+        // private replies / scores addressed to my answers (several on ADR 0022 forms: tagged with `to`)
+        const std::vector<std::string> cids = myCidsFor(fid);
         json mine2 = json::array();
-        whisperbox::SignId rk;
+        std::map<std::string, whisperbox::SignId> rks;
         for (const auto& r : f["replies"]) {
-            if (r.value("to", "") != cid) continue;
+            const std::string to = r.value("to", "");
+            if (std::find(cids.begin(), cids.end(), to) == cids.end()) continue;
+            const std::string cid = to;
             const std::string sealed = r.value("sealed", "");
             auto c = m_replyCache.find(sealed);
             if (c == m_replyCache.end()) {
+                auto& rk = rks[cid];
                 if (!rk.valid) rk = whisperbox::deriveReplyKey(m_signId, fid, cid);
                 json body;
                 try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
                 c = m_replyCache.emplace(sealed, body.is_object() ? body : json()).first;
             }
-            if (c->second.is_object()) mine2.push_back(c->second);
+            if (c->second.is_object()) { json b = c->second; if (cids.size() > 1) b["to"] = to; mine2.push_back(b); }
         }
         if (!mine2.empty()) out["myReplies"] = mine2;
     }

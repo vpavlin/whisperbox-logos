@@ -688,6 +688,42 @@ int main(int argc, char** argv) {
             CHECK(!bad.value("ok", true), "updated validation applies (9 > max 5)");
         }
 
+        // Several answers per person (ADR 0022): each its own entry + receipt, per-person cap, no edits.
+        {
+            CHECK(!A->call(A->core->createForm(json({{"title", "x"}, {"maxPerRespondent", 2}, {"allowEdits", true}}).dump())).value("ok", true),
+                  "several answers per person + edits is refused");
+            std::string mf = A->call(A->core->createForm(json({{"title", "Feedback"}, {"questions", qs}, {"maxPerRespondent", 2}}).dump())).value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, mf); }, 3000) && formOf(*B, mf).value("maxPerRespondent", 0) == 2, "maxPerRespondent travels with the form");
+            openLink(*B, mf);
+            CHECK(B->call(B->core->submitResponse(mf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "B sends a first answer");
+            CHECK(formOf(*B, mf).value("canRespond", false) && formOf(*B, mf).value("myAnswerCount", 0) == 1, "B may send another (1 of 2)");
+            CHECK(B->call(B->core->submitResponse(mf, json::array({{{"questionId", "q1"}, {"value", false}}}).dump())).value("ok", false), "B sends a second answer");
+            CHECK(!formOf(*B, mf).value("canRespond", true) && formOf(*B, mf).value("myAnswerCount", 0) == 2, "B has used both answers");
+            json third = B->call(B->core->submitResponse(mf, json::array({{{"questionId", "q1"}, {"value", true}}}).dump()));
+            CHECK(!third.value("ok", true) && third.value("error", "").find("at most 2") != std::string::npos, "a third answer is refused");
+            CHECK(waitUntil([&] { return responsesOf(*A, mf).size() == 2; }, 3000), "creator has TWO answers from B");
+            auto rs = responsesOf(*A, mf);
+            CHECK(rs[0]["respondent"] == rs[1]["respondent"] && rs[0].value("answerNo", 0) == 1 && rs[1].value("answerNo", 0) == 2
+                  && rs[0]["answers"][0]["value"] == true && rs[1]["answers"][0]["value"] == false, "same respondent, numbered, both kept");
+            const std::string cid2 = rs[1].value("confirmationId", "");
+            CHECK(!cid2.empty() && cid2 != rs[0].value("confirmationId", ""), "each answer has its own receipt id");
+            CHECK(A->call(A->core->confirmAnswer(mf, cid2)).value("ok", false), "creator confirms the second answer only");
+            CHECK(waitUntil([&] { return formOf(*B, mf).value("myReceipts", 0) == 1; }, 3000), "B sees one of its two answers received");
+            CHECK(!A->call(A->core->confirmAnswer(mf, "nope")).value("ok", true), "confirming an unknown receipt id is refused");
+            json d = B->call(B->core->formDetail(mf));
+            CHECK(d["myAnswers"].contains("earlier") && d["myAnswers"]["earlier"].size() == 1 && d["myAnswers"]["earlier"][0]["answers"][0]["value"] == true,
+                  "B keeps its earlier answer privately");
+            B->stop(); B->start();
+            CHECK(formOf(*B, mf).value("myAnswerCount", 0) == 2 && !formOf(*B, mf).value("canRespond", true), "the count survives a restart");
+            std::string uf = A->call(A->core->createForm(json({{"title", "Ideas"}, {"questions", qs}, {"maxPerRespondent", 0}}).dump())).value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, uf); }, 3000), "unlimited form syncs");
+            openLink(*B, uf);
+            bool all = true;
+            for (int i = 0; i < 4; i++) all = all && B->call(B->core->submitResponse(uf, json::array({{{"questionId", "q1"}, {"value", i % 2 == 0}}}).dump())).value("ok", false);
+            CHECK(all && formOf(*B, uf).value("canRespond", false), "unlimited: B sends 4 and may send more");
+            CHECK(waitUntil([&] { return responsesOf(*A, uf).size() == 4; }, 3000), "creator has all 4");
+        }
+
         // Anonymous forms: per-form respondent identity; device tag per form on the wire.
         {
             CHECK(!A->call(A->core->createForm(json({{"title", "x"}, {"anonymous", true}, {"whitelist", {{"type", "addresses"}, {"value", addrB}}}}).dump())).value("ok", true),
