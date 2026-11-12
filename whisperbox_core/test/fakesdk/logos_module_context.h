@@ -46,6 +46,7 @@ struct FakeDelivery {
     void sendAsync(const std::string& topic, const LogosMap& payload, Res cb);
     void getNodeInfoAsync(const std::string& what, Res cb);
     void getConnectionStatusAsync(Res cb);
+    void storeQueryAsync(const std::string& q, const std::string& peer, long long timeoutMs, Res cb);
 };
 struct FakeModules { FakeLoamCore loam_core; FakeDelivery delivery_module; };
 

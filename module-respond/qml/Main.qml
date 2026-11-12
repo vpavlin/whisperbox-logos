@@ -234,7 +234,7 @@ Item {
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.closeForm(false) }
             }
             Text { visible: root.selectedId !== "" && !root.sel; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: P.wbTextSec; font.pixelSize: 14; textFormat: Text.PlainText
-                   text: "Waiting for the form to arrive from its creator... It opens here as soon as someone who has it is online." }
+                   text: "Asking the form's creator for it... It opens here as soon as the creator's WhisperBox is online." }
 
             // home: paste a link, then the forms opened before
             ColumnLayout {

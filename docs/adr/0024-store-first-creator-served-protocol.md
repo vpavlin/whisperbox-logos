@@ -70,7 +70,7 @@ These override the proposal below where they differ.
   - logos-delivery has `storeQueryToAny`, and `NodeInfoId.StoreNodes` on master, but neither is
     exposed to apps;
   - delivery_module v0.3.0 has neither;
-  - an issue was filed in logos-delivery-module.
+  - an issue was filed: [logos-co/logos-delivery-module#187](https://github.com/logos-co/logos-delivery-module/issues/187).
   - Until it's fixed, use `getNodeInfo("StoreNodes")` when the node has it, else the preset
     fleet's Store nodes, trying several.
 - **Creator hub (open question 3):** later, via Rumor, once it's stable.

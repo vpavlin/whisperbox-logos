@@ -137,7 +137,18 @@ static bool waitUntil(std::function<bool()> pred, int ms) {
 }
 // the peer's fold: every form it knows from the topic, shown or not
 static json foldOf(Peer& p) { std::lock_guard<std::recursive_mutex> lk(p.core->m_mtx); return json::parse(p.core->foldedState().dump()); }
+// Wire v2 (ADR 0024): a node only receives forms it opened. The older scenarios below were written
+// when every node got every form; waiting for a form on a peer now opens it there first (as a user
+// opening the link would: joinForm watches without pinning, so the pin/contest tests keep meaning).
+static std::set<std::string> g_followed;
+// a frame "from the network" on every bucket topic: whichever buckets a node joined, it gets it
+static const std::string kAnyWire = "/whisperbox/2/form-0/proto";
+static void relayAll(FakeNode* from, const std::string& raw) {
+    for (const char* h : {"0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"})
+        FakeBus::get().relay(from, std::string("/whisperbox/2/form-") + h + "/proto", raw);
+}
 static bool hasForm(Peer& p, const std::string& fid) {
+    if (g_followed.insert(p.name + "|" + fid).second && p.core) p.core->joinForm(fid);
     json f = foldOf(p)["forms"]; return f.contains(fid) && !f[fid]["questions"].empty();
 }
 // the form as the view sees it (with this device's flags) if it's shown, else as the fold has it;
@@ -177,6 +188,9 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     char tmpl[] = "/tmp/wb-e2e-XXXXXX";
     g_base = mkdtemp(tmpl);
+    // the older scenarios send far more than a real RLN epoch allows: no budget, except in the
+    // ADR 0024 section that tests it
+    setenv("WHISPERBOX_MSGS_PER_EPOCH", "1000000", 1);
     std::printf("data: %s\n", g_base.c_str());
 
     std::printf("boot:\n");
@@ -198,10 +212,11 @@ int main(int argc, char** argv) {
         CHECK(waitUntil([&] { return L->snap()["nodeReady"] == true && D->snap()["nodeReady"] == true; }, 30000), "a loam_core peer and a direct peer both come up");
         CHECK(transportOf(*L) == "loam_core", "with loam_core installed the core uses it, as before (" + transportOf(*L) + ")");
         CHECK(transportOf(*D) == "delivery_module", "without loam_core the core goes to delivery_module directly (" + transportOf(*D) + ")");
-        CHECK(D->node->starts == 1 && D->node->subscribed, "the direct peer created, started and subscribed its node");
+        CHECK(D->node->starts == 1, "the direct peer created and started its node");
         json q = {{"title", "Direct"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Hi?"}, {"required", true}}})}};
         // direct -> loam
         std::string f1 = D->call(D->core->createForm(q.dump())).value("formId", "");
+        CHECK(D->node->subscribed && D->node->joined.count(WhisperboxCoreImpl::wireTopicFor(f1)), "...and subscribes to its form's bucket once it has one (ADR 0024)");
         CHECK(!f1.empty() && waitUntil([&] { return hasForm(*L, f1); }, 15000), "a form made on the direct peer reaches the loam_core peer");
         openLink(*L, f1);
         CHECK(L->call(L->core->submitResponse(f1, json::array({{{"questionId", "q1"}, {"value", "from loam"}}}).dump())).value("ok", false), "the loam_core peer answers it");
@@ -223,6 +238,86 @@ int main(int argc, char** argv) {
     }
 
 
+    // ── ADR 0024: wire v2 - Store first, creator served, RLN budget ──────────────────────
+    std::printf("ADR 0024 (wire v2):\n");
+    {
+        setenv("WHISPERBOX_MINUTE_MS", "1200", 1);   // a "minute" is 1.2 s here: retries at 12 s, ASKs at 0.4 / 12 s
+        auto Cr = mkPeer("v2-creator"), Rs = mkPeer("v2-respondent"), By = mkPeer("v2-bystander");
+        CHECK(waitUntil([&] { return Cr->snap().value("nodeReady", false) && Rs->snap().value("nodeReady", false) && By->snap().value("nodeReady", false); }, 10000), "three nodes up");
+        const json q = {{"title", "v2"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}, {"required", true}}})}};
+        auto txOf = [](Peer& p) { return p.node->tx; };
+        {
+            const long t0 = txOf(*Rs) + txOf(*By); pump(3000);
+            CHECK(txOf(*Rs) + txOf(*By) == t0, "idle nodes send nothing (no catch-up rounds)");
+        }
+        // the creator publishes; a respondent opens the link and gets the form from Store
+        std::string f1 = Cr->call(Cr->core->createForm(q.dump())).value("formId", "");
+        std::string link1 = Cr->call(Cr->core->shareUri(f1)).value("uri", "");
+        pump(300);
+        CHECK(Rs->call(Rs->core->importForm(link1)).value("ok", false), "the respondent opens the link");
+        CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f1) && !f[f1]["questions"].empty(); }, 5000), "...and gets the form from Store");
+        CHECK(Rs->node->joined.count(WhisperboxCoreImpl::wireTopicFor(f1)) && !By->node->joined.count(WhisperboxCoreImpl::wireTopicFor(f1)) || !foldOf(*By)["forms"].contains(f1),
+              "a bystander that never opened it holds nothing of it");
+        // the creator re-publishes on a schedule (here every 3 s instead of an hour)
+        {
+            setenv("WHISPERBOX_REPUBLISH_MS", "3000", 1);
+            const std::string tp = WhisperboxCoreImpl::wireTopicFor(f1);
+            auto stored = [&] { int n = 0; for (auto& m : FakeBus::get().store) if (m.topic == tp) n++; return n; };
+            const int s0 = stored(); pump(8000);
+            CHECK(stored() >= s0 + 2, "the creator re-publishes its open form on a schedule (" + std::to_string(stored() - s0) + " in 8 s)");
+            unsetenv("WHISPERBOX_REPUBLISH_MS");
+        }
+        // a form Store no longer has: the respondent ASKs, only the creator side answers
+        {
+            FakeBus::get().storeRetentionMs = 1;   // Store forgets at once
+            std::string f2 = Cr->call(Cr->core->createForm(q.dump())).value("formId", "");
+            std::string link2 = Cr->call(Cr->core->shareUri(f2)).value("uri", "");
+            pump(500);
+            const long crTx = txOf(*Cr), rsTx = txOf(*Rs);
+            Rs->call(Rs->core->importForm(link2));
+            CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f2) && !f[f2]["questions"].empty(); }, 8000), "a form missing from Store arrives after an ASK");
+            CHECK(txOf(*Rs) > rsTx && txOf(*Cr) > crTx, "...the respondent asked, the creator answered");
+            FakeBus::get().storeRetentionMs = 2LL * 3600 * 1000;
+        }
+        // an answer the creator missed (offline, and Store forgot it) is sent again until the receipt
+        {
+            FakeBus::get().storeRetentionMs = 1;
+            Cr->node->online = false;
+            openLink(*Rs, f1);
+            CHECK(Rs->call(Rs->core->submitResponse(f1, json::array({{{"questionId", "q1"}, {"value", "late"}}}).dump())).value("ok", false), "the respondent answers while the creator is away");
+            pump(1500);
+            CHECK(responsesOf(*Cr, f1).empty(), "the creator didn't get it");
+            Cr->node->online = true;
+            CHECK(waitUntil([&] { return responsesOf(*Cr, f1).size() == 1; }, 30000), "the respondent's retry delivers it (10 'minutes' later)");
+            CHECK(Cr->call(Cr->core->confirmAll(f1)).value("ok", false), "the creator sends the receipt");
+            CHECK(waitUntil([&] { return formOf(*Rs, f1).value("myConfirmed", false); }, 8000), "the respondent sees the receipt");
+            const long t1 = txOf(*Rs); pump(14000);
+            CHECK(txOf(*Rs) == t1, "...and stops sending its answer");
+            FakeBus::get().storeRetentionMs = 2LL * 3600 * 1000;
+        }
+        // the RLN budget: at most N messages per 600 s epoch, the most urgent first
+        {
+            setenv("WHISPERBOX_MSGS_PER_EPOCH", "3", 1);
+            auto Bd = mkPeer("v2-budget");
+            CHECK(waitUntil([&] { return Bd->snap().value("nodeReady", false); }, 10000), "a node with 3 messages per epoch");
+            for (int i = 0; i < 6; i++) Bd->core->createForm(q.dump());
+            pump(800);
+            CHECK(txOf(*Bd) <= 3, "6 new forms: only 3 go out this epoch (" + std::to_string(txOf(*Bd)) + ")");
+            Bd->call(Bd->core->importForm(link1)); pump(1500); openLink(*Bd, f1);
+            Bd->call(Bd->core->submitResponse(f1, json::array({{{"questionId", "q1"}, {"value", "urgent"}}}).dump()));
+            {
+                std::lock_guard<std::recursive_mutex> lk(Bd->core->m_mtx);
+                auto& qq = Bd->core->m_outQ;
+                auto best = std::min_element(qq.begin(), qq.end(), [](const auto& a, const auto& b) { return a.prio != b.prio ? a.prio < b.prio : a.seq < b.seq; });
+                CHECK(!qq.empty() && best->prio == 1, "the waiting answer goes out before the waiting forms");
+            }
+            Bd->stop();
+            setenv("WHISPERBOX_MSGS_PER_EPOCH", "1000000", 1);
+        }
+        unsetenv("WHISPERBOX_MINUTE_MS");
+        Cr->stop(); Rs->stop(); By->stop();
+    }
+
     std::printf("scenario A (create → respond → decrypt → confirm → CSV):\n");
     json def = {{"title", "Lunch poll"}, {"description", "Friday team lunch"},
         {"questions", json::array({
@@ -235,9 +330,11 @@ int main(int argc, char** argv) {
     CHECK(waitUntil([&] { return hasForm(*B, fid) && hasForm(*C, fid); }, 3000), "form reaches B and C");
     json feedB = foldOf(*B)["feed"];   // the fold's feed; the snapshot lists only the forms B shows (FR-7)
     CHECK(std::find(feedB.begin(), feedB.end(), fid) != feedB.end(), "form is in B's public feed");
-    {   // the snapshot carries only the forms this device shows: C never opened fid
-        json sc = C->snap()["state"];
-        CHECK(!sc["forms"].contains(fid) && std::find(sc["feed"].begin(), sc["feed"].end(), fid) == sc["feed"].end(), "a form C never opened isn't in C's snapshot (FR-7)");
+    {   // wire v2 (ADR 0024): a node that never opened fid doesn't receive it at all (stronger than FR-7)
+        auto N = mkPeer("N-never-opened"); pump(600);
+        json sc = foldOf(*N);
+        CHECK(!sc["forms"].contains(fid), "a node that never opened the form never receives it (ADR 0024)");
+        N->stop();
     }
 
     // Wire format of every client: choice answers are option INDICES.
@@ -348,7 +445,7 @@ int main(int argc, char** argv) {
         json ev = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealed)}, {"type", "response.submit"},
                    {"hlc", {{"wall", 2}, {"ctr", 0}, {"dev", "evil"}}}, {"dev", "evil"}, {"payload", {{"encryptedPayload", sealed}}}};
         std::string b64 = whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev)));
-        FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, b64);
+        FakeBus::get().relay(C->node.get(), WhisperboxCoreImpl::wireTopicFor(wfid), b64);
         pump(500);
         json wr2 = responsesOf(*A, wfid);
         CHECK(wr2.size() == 1 && wr2[0].value("respondent", "") == addrB, "forged signed response from unlisted C is dropped by the creator");
@@ -368,7 +465,7 @@ int main(int argc, char** argv) {
         std::string sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(formOf(*A, lfid)["publicKey"].get<std::string>()), whisperbox::Bytes(pt.begin(), pt.end())));
         json ev = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealed)}, {"type", "response.submit"},
                    {"hlc", {{"wall", 3}, {"ctr", 0}, {"dev", "old"}}}, {"dev", "old"}, {"payload", {{"encryptedPayload", sealed}}}};
-        FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev))));
+        FakeBus::get().relay(C->node.get(), WhisperboxCoreImpl::wireTopicFor(lfid), whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev))));
         C->stop();
         { std::ofstream o(C->dir + "/my_submissions.json", std::ios::trunc); o << json::array({lfid}).dump(); }   // 0.1.x format
         C->start();
@@ -396,35 +493,30 @@ int main(int argc, char** argv) {
     auto D = mkPeer("D");
     QElapsedTimer t; t.start();
     bool caught = waitUntil([&] { return hasForm(*D, fid) && hasForm(*D, wfid); }, 15000);
-    CHECK(caught, "late node D catches up on all forms");
-    CHECK(t.elapsed() < 8000, "catch-up is driven by SYNC_REQ, not the 60s seed (" + std::to_string(t.elapsed()) + " ms)");
-    CHECK(waitUntil([&] { return D->snap()["state"].value("responseCount", 0) == A->snap()["state"].value("responseCount", 0); }, 5000), "D has the full response pool");
+    CHECK(caught, "late node D catches up on the forms it opened (from Store, ADR 0024)");
+    CHECK(t.elapsed() < 8000, "from Store at once, not on a schedule (" + std::to_string(t.elapsed()) + " ms)");
+    CHECK(waitUntil([&] { return D->snap()["state"].value("responseCount", 0) > 0; }, 5000), "D gets the sealed answers on those buckets from Store too");
     {
         long rb = D->snap()["diagnostics"].value("rbsrRx", 0L);
         long legacy = A->snap()["diagnostics"].value("legacyReseeds", 0L) + B->snap()["diagnostics"].value("legacyReseeds", 0L)
                     + C->snap()["diagnostics"].value("legacyReseeds", 0L);
-        CHECK(rb > 0, "D reconciled via RBSR (" + std::to_string(rb) + " control frames)");
-        CHECK(legacy == 0, "no whole-log reseeds between 0.2 peers");
+        CHECK(rb == 0 && legacy == 0, "no catch-up rounds and no reseeds: nobody serves anybody (ADR 0024)");
+        CHECK(D->snap()["diagnostics"].value("txTotal", 0L) == 0, "D sent nothing to catch up");
     }
 
-    std::printf("legacy 0.1.x peer:\n");
+    std::printf("v1 peer (ADR 0024: a clean break):\n");
     {
-        // A node that only speaks the old protocol: sends an UNFLAGGED SYNC_REQ and expects
-        // the whole log back as EVENT envelopes.
-        FakeNode old; old.name = "legacy"; old.up = true; old.subscribed = true; old.senderId = "legacy"; old.joined.insert(whisperbox::TOPIC);
-        std::set<std::string> got;
-        old.onRx = [&](const std::string&, const std::string&, const std::string& payloadB64, int64_t) {
-            std::string once = whisperbox::b64decode(payloadB64);
-            for (const std::string& t : {whisperbox::b64decode(once), once}) {
-                json env = whisperbox::parseEnvelope(t);
-                if (env.is_object() && env.value("type", "") == "EVENT") { got.insert(env["event"].value("id", "")); break; }
-            }
-        };
+        // A v1 node asks for everything on the old global topic, and on a v2 bucket: nobody answers.
+        FakeNode old; old.name = "legacy"; old.up = true; old.subscribed = true; old.senderId = "legacy";
+        old.joined.insert(whisperbox::TOPIC); old.joined.insert(WhisperboxCoreImpl::wireTopicFor(fid));
+        int got = 0;
+        old.onRx = [&](const std::string&, const std::string&, const std::string&, int64_t) { got++; };
         FakeBus::get().nodes.push_back(&old);
         json req = {{"v", 1}, {"type", "SYNC_REQ"}, {"from", "legacy"}};
         FakeBus::get().relay(&old, whisperbox::TOPIC, whisperbox::b64encode(req.dump()));
-        size_t want = 0; { json a = readLog(A->dir); want = a.size(); }
-        CHECK(waitUntil([&] { return got.size() >= want; }, 5000), "legacy peer receives the whole log (" + std::to_string(got.size()) + "/" + std::to_string(want) + ")");
+        FakeBus::get().relay(&old, WhisperboxCoreImpl::wireTopicFor(fid), whisperbox::b64encode(req.dump()));
+        pump(1500);
+        CHECK(got == 0, "a v1 SYNC_REQ gets no answer, on either topic (" + std::to_string(got) + " frames)");
         auto& v = FakeBus::get().nodes; v.erase(std::remove(v.begin(), v.end(), &old), v.end());
     }
 
@@ -475,7 +567,7 @@ int main(int argc, char** argv) {
                   {"whitelist", {{"type", "none"}, {"value", ""}}}};
         json ev = {{"v", 1}, {"id", "form:" + sfid}, {"type", "form.publish"}, {"hlc", {{"wall", 1}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", p}};
         whisperbox::signEventJson(ev, xid);
-        FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev))));
+        FakeBus::get().relay(C->node.get(), WhisperboxCoreImpl::wireTopicFor(sfid), whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev))));
         CHECK(waitUntil([&] { return formOf(*A, sfid).value("contested", false); }, 3000), "the squat reaches A and flags the id contested");
         CHECK(formOf(*A, sfid).value("creator", "") == addrA && formOf(*A, sfid).value("mine", false), "A still sees and owns its genuine form");
         std::string link = A->call(A->core->shareUri(sfid)).value("uri", "");
@@ -538,7 +630,7 @@ int main(int argc, char** argv) {
     // ── per-form keys ────────────────────────────────────────────────────────────
     std::printf("per-form keys:\n");
     {
-        auto relayEv = [&](const json& ev) { FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev)))); };
+        auto relayEv = [&](const json& ev) { relayAll(C->node.get(), whisperbox::b64encode(whisperbox::eventToJsonText(whisperbox::envEvent(ev)))); };
         auto sealTo = [&](const std::string& pubHex, const whisperbox::OrderedJson& resp, int wall) {
             std::string pt = resp.dump();
             std::string sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pubHex), whisperbox::Bytes(pt.begin(), pt.end())));
@@ -615,7 +707,8 @@ int main(int argc, char** argv) {
         S->core->fakeStart();
         CHECK(waitUntil([&] { return S->snap().value("nodeReady", false); }, 3000), "WhisperBox joins a node another app already started");
         CHECK(S->node->starts == 0, "and does not start it a second time");
-        CHECK(S->node->subscribed && S->node->channel, "subscribes its topic + channel on the shared node");
+        std::string sf = S->call(S->core->createForm(json({{"title", "On a shared node"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "?"}}})}}).dump())).value("formId", "");
+        CHECK(S->node->subscribed && S->node->channel && S->node->joined.count(WhisperboxCoreImpl::wireTopicFor(sf)), "subscribes its forms' buckets on the shared node (ADR 0024)");
         CHECK(waitUntil([&] { return hasForm(*S, fid); }, 6000), "and syncs (catch-up) like a normal start");
     }
 
@@ -676,7 +769,7 @@ int main(int argc, char** argv) {
             json q2 = json::array({{{"id", "q1"}, {"type", "boolean"}, {"text", "Coming? (reworded)"}, {"required", true}},
                                    {{"id", "q2"}, {"type", "number"}, {"text", "Guests"}, {"required", false}, {"min", 0}, {"max", 5}}});
             CHECK(A->call(A->core->updateForm(ef, json({{"title", "Editable v2"}, {"questions", q2}, {"allowEdits", true}}).dump())).value("ok", false), "creator updates the form");
-            CHECK(waitUntil([&] { return formOf(*G, ef).value("title", "") == "Editable v2" && formOf(*G, ef).value("version", 0) == 2; }, 3000), "peers see the new version");
+            CHECK(waitUntil([&] { return hasForm(*G, ef) && formOf(*G, ef).value("title", "") == "Editable v2" && formOf(*G, ef).value("version", 0) == 2; }, 3000), "peers see the new version");
             CHECK(formOf(*G, ef)["questions"].size() == 2, "with the added question");
             CHECK(!G->call(G->core->updateForm(ef, json({{"title", "hijack"}}).dump())).value("ok", true), "a non-creator can't update");
             openLink(*G, ef);
@@ -858,7 +951,12 @@ int main(int argc, char** argv) {
         A->stop(); A->start();
         CHECK(A->snap()["drafts"].size() >= 1, "drafts survive a restart");
         // (keep the snapshot in a variable: iterating a temporary's sub-object is use-after-free)
-        auto titled = [&](Peer& p, const std::string& t) { json ps = foldOf(p); for (auto& kv : ps["forms"].items()) if (kv.value().value("title", "") == t) return true; return false; };
+        // wire v2: G opens the form (its id from A, as a shared link would carry it), then has it
+        auto titled = [&](Peer& p, const std::string& t) {
+            json as = foldOf(*A); std::string id;
+            for (auto& kv : as["forms"].items()) if (kv.value().value("title", "") == t) id = kv.key();
+            if (id.empty() || !hasForm(p, id)) return false;
+            json ps = foldOf(p); return ps["forms"].contains(id) && ps["forms"][id].value("title", "") == t; };
         CHECK(A->call(A->core->publishDraft(d1.value("draftId", ""))).value("ok", false), "publish a draft now");
         CHECK(waitUntil([&] { return titled(*G, "Draft now"); }, 3000), "published draft reaches peers");
         CHECK(waitUntil([&] { return titled(*G, "Draft scheduled"); }, 9000), "scheduled draft publishes itself when due");
@@ -1018,7 +1116,10 @@ int main(int argc, char** argv) {
     // ── review 2026-10-22: a hostile peer on the topic (auditor's WB-1/3/5/9/10/11 vectors) ──
     std::printf("hostile peer:\n");
     {
-        auto send = [&](const std::string& envText) { FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(envText)); };
+        // one bucket A listens on (a frame on several would count several times)
+        auto send = [&](const std::string& envText) {
+            std::string t = kAnyWire; for (const auto& j : A->node->joined) if (j.rfind("/whisperbox/2/", 0) == 0) { t = j; break; }
+            FakeBus::get().relay(C->node.get(), t, whisperbox::b64encode(envText)); };
         auto diag = [&](Peer& p, const char* k) { return p.snap()["diagnostics"].value(k, 0L); };
         long shape0 = diag(*A, "admDropShape"), bad0 = diag(*A, "rxBad"), fut0 = diag(*A, "admDropFuture");
         const std::vector<std::string> frames = {
@@ -1037,7 +1138,7 @@ int main(int argc, char** argv) {
         pump(400);
         CHECK(true, "A and B survive every malformed frame");   // an abort would have ended the run
         CHECK(diag(*A, "admDropShape") > shape0, "malformed events are dropped at admission (" + std::to_string(diag(*A, "admDropShape") - shape0) + ")");
-        CHECK(diag(*A, "rxBad") > bad0, "malformed catch-up / SYNC_REQ frames are counted, not processed");
+        CHECK(diag(*A, "rbsrRx") == 0 && diag(*A, "legacyReseeds") == 0, "v1 catch-up / SYNC_REQ frames are ignored (ADR 0024)"); (void)bad0;
         std::string onDisk; for (const char* fn : {"/events.json", "/events.journal"}) { std::ifstream f(A->dir + fn); onDisk.append(std::istreambuf_iterator<char>(f), {}); }
         CHECK(onDisk.find("resp:bad") == std::string::npos && onDisk.find("form:bad") == std::string::npos && onDisk.find("resp:shadow") == std::string::npos,
               "nothing malformed reaches events.json (no poisoned restart)");
@@ -1168,7 +1269,8 @@ int main(int argc, char** argv) {
                         {"hlc", {{"wall", now + 60000}, {"ctr", std::numeric_limits<long long>::max()}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", sealed}}}};
             const long shape1 = diag(*A, "admDropShape");
             send(json({{"v", 1}, {"type", "EVENT"}, {"event", big}}).dump()); pump(200);
-            CHECK(diag(*A, "admDropShape") == shape1 + 1, "an HLC counter of LLONG_MAX is refused at admission (FR-2)");
+            // >= 1: A may meet the same bad frame again in a Store pull (ADR 0024) - refused every time
+            CHECK(diag(*A, "admDropShape") > shape1 && sealedPool(*A).dump().find(big.value("id", "")) == std::string::npos, "an HLC counter of LLONG_MAX is refused at admission (FR-2)");
             json fc = A->call(A->core->createForm(json({{"title", "after ctr"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
             CHECK(fc.value("ok", false) && waitUntil([&] { return hasForm(*B, fc.value("formId", "")); }, 3000), "...and A's next event is valid and reaches B");
             // FR-3: twenty 40-byte "ids" frames serve each event at most once
@@ -1176,7 +1278,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 20; i++) send(R"({"v":2,"t":"ids","from":"evil","ids":[]})");
             pump(500);
             const long served = diag(*A, "txTotal") - tx0;
-            CHECK(served > 0 && diag(*A, "serveSkipped") > 0, "a repeated empty ids frame is answered once, then skipped (FR-3)");
+            CHECK(served == 0, "v1 ids frames make A send nothing: nobody serves anybody (ADR 0024)"); (void)logN;
             std::printf("    (served %ld events for 20 frames; %zu forms in the log)\n", served, logN);
             // FR-4: a signed form whose publicKey isn't a curve point is refused
             whisperbox::SignId x = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'f', 'r', '4'}));
@@ -1335,7 +1437,7 @@ int main(int argc, char** argv) {
             std::string up = sealTo(hpub, pt6); for (auto& c : up) c = (char)std::toupper((unsigned char)c);
             long shapeB = diag(*A, "admDropShape");
             send(json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(up)}}).dump()); pump(300);
-            CHECK(diag(*A, "admDropShape") == shapeB + 1, "an upper-case hex answer is refused at admission (FR-10)");
+            CHECK(diag(*A, "admDropShape") > shapeB, "an upper-case hex answer is refused at admission (FR-10)");
 
             // FR-11: a device id is bounded
             CHECK(!A->call(A->core->setDeviceId(std::string(100, 'x'))).value("ok", true) && !A->call(A->core->setDeviceId("bad id!")).value("ok", true), "setDeviceId refuses long or odd ids (FR-11)");
@@ -1352,7 +1454,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 900; i++) {   // the budget is a burst of 600 plus 10 a second
                 const std::string pti = R"({"formId":")" + hid + R"(","n":)" + std::to_string(i) + "}";
                 const std::string env = json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(hpub, pti))}}).dump();
-                B->node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(env)), 0);   // to B only
+                B->node->onRx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(env)), 0);   // to B only
             }
             CHECK(waitUntil([&] { return diag(*B, "admDropBudget") > bud0; }, 30000), "a flood of 900 answers runs out of the answer budget (FR-3)");
 
@@ -1422,7 +1524,7 @@ int main(int argc, char** argv) {
                 const std::string fp = R"({"v":2,"t":"fp","from":"flood","bounds":[],"fps":["00000000000000000000000000000000"]})";
                 for (int i = 0; i < 300; i++) send(fp);
                 pump(1500);
-                CHECK(diag(*A, "ctlDropBudget") > c0, "300 catch-up frames run out of the frame budget (FR-4)");
+                CHECK(diag(*A, "ctlDropBudget") == c0 && diag(*A, "rbsrRx") == 0, "300 v1 catch-up frames are ignored, not even budgeted (ADR 0024)");
             }
 
             // FR-6: one answer replayed 1,000 times costs budget, not a rewrite per copy
@@ -1431,7 +1533,7 @@ int main(int argc, char** argv) {
                 const std::string hid = h.value("formId", "");
                 const std::string ev = json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(formOf(*A, hid).value("publicKey", ""), R"({"formId":")" + hid + R"("})"))}}).dump();
                 long d0 = diag(*B, "rxDup"), b0 = diag(*B, "admDropBudget");
-                for (int i = 0; i < 1000; i++) B->node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(ev)), (now - i) * 1000000LL);
+                for (int i = 0; i < 1000; i++) B->node->onRx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(ev)), (now - i) * 1000000LL);
                 pump(1500);
                 CHECK(diag(*B, "rxDup") > d0 && diag(*B, "admDropBudget") > b0, "a replayed answer counts against the budget (FR-6)");
             }
@@ -1501,7 +1603,7 @@ int main(int argc, char** argv) {
                 CHECK(waitUntil([&] { return Q->snap().value("nodeReady", false); }, 5000), "Q is up");
                 auto rx = Q->node->onRx; auto stc = Q->node->onStatus;
                 Q->core.reset();   // the module unloads; the shared node keeps its callbacks
-                if (rx) rx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(R"({"v":1,"type":"SYNC_REQ","from":"x"})")), 0);
+                if (rx) rx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(R"({"v":1,"type":"SYNC_REQ","from":"x"})")), 0);
                 if (stc) stc("Connected");
                 pump(200);
                 CHECK(true, "a retained onReceived / onStatusChanged after unload doesn't touch the freed module (FR-8; ASan run in BUILD.md)");
@@ -1529,7 +1631,7 @@ int main(int argc, char** argv) {
             auto respEvAt = [&](const std::string& hex, long long wall) {
                 return json({{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", wall}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}});
             };
-            auto toPeer = [&](Peer& p, const json& ev, long long tsNs = 0) { p.node->onRx(whisperbox::TOPIC, "net", FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())), tsNs); };
+            auto toPeer = [&](Peer& p, const json& ev, long long tsNs = 0) { p.node->onRx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())), tsNs); };
             whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'r', '5'}));
             auto mkForm = [&](const std::string& title) {
                 return A->call(A->core->createForm(json({{"title", title}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump())).value("formId", "");
@@ -1546,6 +1648,7 @@ int main(int argc, char** argv) {
                 toPeer(*B, small); pump(100); toPeer(*B, big); pump(400);
                 size_t sum = 0; bool hasBig = false;
                 { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); for (const auto& e : B->core->m_log) { sum += e.dump().size(); if (e.dump().size() > 100000) hasBig = true; } }
+                if (!(hasBig && B->core->m_logBytes == sum)) std::printf("  info FR-1: hasBig=%d logBytes=%zu sum=%zu budgetDrops=%ld\n", (int)hasBig, (size_t)B->core->m_logBytes, sum, B->snap()["diagnostics"].value("admDropBudget", 0L));
                 CHECK(hasBig && B->core->m_logBytes == sum, "a small signed event replaced by a large earlier copy is charged its full size (FR-1)");
             }
 

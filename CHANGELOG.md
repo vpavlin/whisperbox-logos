@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.0 desktop core + studio + respond (2026-11-12) - wire v2: Store first, creator served (ADR 0024)
+
+A clean break with 0.x on the wire (events, the fold and local data carry over). On 2026-11-12 one fresh
+node made every WhisperBox on `logos.test` re-send everything at once (v1's global topic + catch-up rounds
++ peers serving each other); with RLN enforced that would also eat every node's message budget.
+
+- **Bucket topics:** each form lives on one of 16 topics (`/whisperbox/2/form-<b>/proto`); a node joins
+  only its forms' buckets - strangers' forms and answers never reach it.
+- **Store, not peers:** a node pulls its buckets from Store on start, on reconnect, when it opens a form
+  and every 15 min. No catch-up rounds, no SYNC_REQ, nobody serves anybody. An idle node sends nothing.
+- **Creator served:** the creator re-publishes each open form's whole state (definition, edits, receipts,
+  replies) every hour, and answers an ASK when a respondent can't find a form in Store. Respondents
+  never answer ASKs.
+- **Answers until the receipt:** sent once, then every 10 min for an hour, hourly for 4 h, every 6 h, for
+  14 days - so a creator offline longer than Store keeps things still gets them.
+- **RLN budget:** at most 10 messages per 600 s epoch (of the node's 100), the most urgent first (answer,
+  receipt, form change, ASK, re-publish, retry).
+- **Edge:** without Loam the core runs delivery as a light node (no relaying).
+- Store peers: `StoreNodes` node info when Delivery has it, else the fleet - upstream ask
+  logos-co/logos-delivery-module#187. Store retention measured ~48 h; designed for 1-2 h.
+- Tests: e2e 417 (incl. a v2 section: idle silence, Store pull, hourly re-publish, ASK, retries until the
+  receipt, budget priorities); JS wire-v2 tests; JS phone <-> C++ desktop interop on v2 incl. a fresh
+  phone getting forms by ASK from a C++ and a JS creator.
+
 ## 0.8.0 desktop core + studio + respond (2026-11-12) - form files, feedback from other apps (ADR 0023)
 
 - **Export** (studio, your forms): saves `whisperbox-form-<id>.json` to Downloads - the creator-signed

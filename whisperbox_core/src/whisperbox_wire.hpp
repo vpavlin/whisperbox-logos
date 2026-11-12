@@ -94,6 +94,9 @@ inline json parseEnvelope(const std::string& text) {
         const std::string t = o["type"].get<std::string>();
         if (t == "EVENT" && o.contains("event") && o["event"].is_object()) return o;
         if (t == "SYNC_REQ") return o;
+        // wire v2 (ADR 0024): a form's state / an answer as a bundle of events, and a request for a form
+        if (t == "EVENTS" && o.contains("events") && o["events"].is_array()) return o;
+        if (t == "ASK" && o.contains("formId") && o["formId"].is_string()) return o;
         return json();
     } catch (...) { return json(); }
 }

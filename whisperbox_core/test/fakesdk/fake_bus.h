@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QTimer>
 #include <map>
+#include <chrono>
 #include <set>
 #include <memory>
 #include <openssl/evp.h>
@@ -49,6 +50,8 @@ struct FakeBus {
     // receiver's own senderId). relay() is what tests use to inject a frame "from the network".
     void deliver(FakeNode* from, const std::string& topic, const std::string& raw, bool selfToo) {
         if (from && !from->online) { dropped++; return; }
+        // Store keeps what was published (by wall clock, as a fleet Store node stamps arrivals)
+        store.push_back(Stored{topic, raw, (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count()});
         std::string sid = from ? from->senderId : std::string("net");
         for (FakeNode* n : nodes) {
             if ((n == from && !selfToo) || !n->up || !n->online || (!n->onRx && n->raw.empty()) || !n->joined.count(topic)) continue;
@@ -67,6 +70,12 @@ struct FakeBus {
         }
     }
     void relay(FakeNode* from, const std::string& topic, const std::string& raw) { deliver(from, topic, raw, false); }
+    // Store (ADR 0024): every frame sent on a topic is kept with its time; queries page through it.
+    struct Stored { std::string topic, raw; long long tsNs; };
+    std::vector<Stored> store;
+    long long storeRetentionMs = 2LL * 3600 * 1000;   // tests may shorten it
+    bool storeDown = false;
+    long long storeQueries = 0;
     void channel(FakeNode* from, const std::string& topic, const std::string& raw) { deliver(from, topic, raw, false); }
 };
 
@@ -136,8 +145,34 @@ inline void FakeDelivery::sendAsync(const std::string& topic, const LogosMap& pa
     FakeBus::later([cb] { cb(fakeOk()); });
 }
 inline void FakeDelivery::getNodeInfoAsync(const std::string&, Res cb) {
+    if (!node) { StdLogosResult r; r.success = false; r.error = "no node"; FakeBus::later([cb, r] { cb(r); }); return; }
     long sid = node->serial;
     FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid); cb(fakeOk(n && n->up ? "libp2p_peers 5\n" : "libp2p_peers 0\n")); });
+}
+// Store query (ADR 0024): the bus's store, filtered like a fleet Store node; pages of paginationLimit.
+inline void FakeDelivery::storeQueryAsync(const std::string& q, const std::string& peer, long long, Res cb) {
+    auto& bus = FakeBus::get();
+    bus.storeQueries++;
+    if (bus.storeDown || peer.empty() || (node && !node->online)) { StdLogosResult r; r.success = false; r.error = "store peer unreachable"; FakeBus::later([cb, r] { cb(r); }); return; }
+    nlohmann::json j = nlohmann::json::parse(q, nullptr, false);
+    const long long nowNs = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const long long keepFrom = nowNs - bus.storeRetentionMs * 1000000LL;
+    std::set<std::string> topics; if (j.contains("contentTopics")) for (const auto& t : j["contentTopics"]) topics.insert(t.get<std::string>());
+    const long long from = j.value("timeStart", 0LL), to = j.value("timeEnd", (long long)9e18);
+    const size_t limit = j.value("paginationLimit", 100), start = j.contains("paginationCursor") ? std::stoul(j["paginationCursor"].get<std::string>()) : 0;
+    nlohmann::json msgs = nlohmann::json::array(); size_t idx = 0, next = 0;
+    for (size_t i = 0; i < bus.store.size(); i++) {
+        const auto& m = bus.store[i];
+        if (!topics.count(m.topic) || m.tsNs < keepFrom || m.tsNs < from || m.tsNs >= to) continue;
+        if (idx++ < start) continue;
+        if (msgs.size() >= limit) { next = idx - 1; break; }
+        msgs.push_back({{"messageHash", "0x" + std::to_string(i)}, {"pubsubTopic", j.value("pubsubTopic", "")},
+                        {"message", {{"payload", FakeBus::b64(FakeBus::b64(m.raw))}, {"contentTopic", m.topic}, {"timestamp", (double)m.tsNs}}}});
+    }
+    nlohmann::json v = {{"requestId", j.value("requestId", "")}, {"statusCode", 200}, {"statusDesc", "OK"}, {"messages", msgs}};
+    if (next) v["paginationCursor"] = std::to_string(next);
+    StdLogosResult r = fakeOk(v.dump());
+    FakeBus::later([cb, r] { cb(r); });
 }
 inline void FakeDelivery::getConnectionStatusAsync(Res cb) {
     long sid = node->serial;

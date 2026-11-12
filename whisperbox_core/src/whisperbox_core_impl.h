@@ -91,6 +91,8 @@ public:
     std::string exportForm(std::string formId);
     // Open a form from such a file: every event is checked like one from the network, the creator pinned
     std::string importFormFile(std::string fileJson);
+    // The bucket topic a form lives on (wire v2, ADR 0024)
+    static std::string wireTopicFor(const std::string& formId);
     std::string resync();
 
 protected:
@@ -150,6 +152,36 @@ private:
     void requestSync();
     void catchupRound();
     void sendControl(const whisperbox::json& msg);
+    // ── wire v2 (ADR 0024): per-form bucket topics, Store pull, creator re-publish, RLN budget ──
+    std::set<std::string> m_joinedTopics;                    // bucket topics joined on the transport
+    struct OutMsg { int prio; long long seq; std::string topic; std::string text; std::string key; };
+    std::vector<OutMsg> m_outQ;                              // waits for the RLN budget, by priority
+    long long m_outSeq = 0;
+    double m_rlnTokens = 0; int64_t m_rlnRefillMs = 0;       // messages per 600 s epoch (default 10)
+    std::map<std::string, long long> m_formSentMs;           // formId -> last FORM publish (creator / co-owner)
+    std::map<std::string, int> m_formClosedSends;            // a closed form is published 3 times, then left
+    std::map<std::string, long long> m_askSentMs;            // formId -> last ASK (respondent)
+    std::map<std::string, int> m_askCount;
+    std::map<std::string, long long> m_askAnsweredMs;    // formId -> last time we answered an ASK (creator side)
+    std::map<std::string, long long> m_lastPullMs;           // bucket topic -> Store pulled up to (persisted)
+    long long m_lastPullRoundMs = 0;
+    std::set<std::string> m_pullInFlight, m_pullAgain;
+    std::vector<std::string> m_storePeers;                   // multiaddrs; from StoreNodes, else the preset fleet
+    size_t m_storePeerIx = 0;
+    bool m_storePeersAsked = false;
+    std::set<std::string> relevantForms();
+    void syncTopics();
+    void enqueueSend(int prio, const std::string& topic, const whisperbox::json& env, const std::string& key);
+    void drainSendQueue();
+    void sendEvents(const std::string& formId, const whisperbox::json& events, int prio, const std::string& key);
+    void publishFormState(const std::string& formId, int prio);
+    void wireSchedule();
+    void storePull(const std::string& topic);
+    void storePullAll();
+    void onAsk(const whisperbox::json& env);
+    void loadPulls();
+    void savePulls();
+    bool ingestOne(whisperbox::json e, long long netMs, bool live, bool bundled);
 
     // --- state ---
     std::vector<whisperbox::json> m_log;              // merged, HLC-ordered (single shared log)

@@ -1,6 +1,6 @@
 {
  "name": "whisperbox_core",
- "version": "0.8.0",
+ "version": "1.0.0",
  "type": "core",
  "interface": "universal",
  "category": "social",

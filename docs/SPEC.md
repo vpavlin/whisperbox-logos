@@ -173,29 +173,65 @@ forms); `confirmationId` = 8 random bytes hex chosen by the respondent, reused o
 `replyPub` = the reply key's pub33; `signature`/`pub` = inner signature (section 3.3), present
 when the form has a whitelist or allows edits, else `null`.
 
-## 6. Transport and sync
+## 6. Transport and sync (wire v2, ADR 0024)
 
-- One content topic for everything: **`/whisperbox/1/all/proto`**.
-- Wire message: base64 of the UTF-8 JSON control envelope. Receivers MUST accept single and
-  double base64.
-  - `{"type": "EVENT", "event": <event>}`
-  - `{"type": "RBSR", ...}`: loam-sync range-based set reconciliation over event **keys**
-    (section 7). A node runs a round 3 s, 10 s and 25 s after its node comes up and after
-    joining a form, answering peers' rounds by serving the missing events.
-  - `{"type": "SYNC_REQ", "from": deviceId, "rbsr": true?}`: legacy 0.1.x catch-up. Flagged
-    requests are ignored; unflagged ones trigger at most one full re-broadcast per 3 s.
-- Desktop (0.4.x): through `loam_core`, the shared transport module, started with
-  `{mode: "Core", preset: "logos.test", useChannels: false}`: a plain relay publish on the topic.
-  Delivery 0.3's reliable channels are off on purpose: they held back every message whose causal
-  history the node hadn't seen, so a desktop received nothing from a phone with history. The
-  RBSR catch-up above provides the reliability. `$WHISPERBOX_DELIVERY_CFG` (JSON) replaces the
-  config. If another app already started the shared node, joining it is enough.
-- Phone: via loam-transport (the Loam shared node or its own node). loam_core unwraps the
-  phones' channel frames on the relay path, and phones accept plain relay frames.
-- Transport status: the view shows loam_core's status as it changes, including after the first
-  connect (e.g. "Transport stalled: ..."); a return to "Connected" runs a catch-up round.
-- Events are broadcast only while the node is up; local events wait in the log and go out
-  through catch-up.
+Store first, creator served. There is no global topic, no catch-up chatter, and nobody serves
+anybody.
+
+- **Topics.** Each form lives on one of 16 bucket topics:
+  `/whisperbox/2/form-<b>/proto`, where `b` is the first hex digit of
+  `SHA-256("whisperbox.bucket.v2" || formId)`. All of them are on relay shard
+  `/waku/2/rs/2/1` (autosharding of `whisperbox` + `2`).
+  - A node joins only the buckets of forms it created, co-owns, opened from a link, answered or
+    has an answer draft for. A node that never opened a form never receives it.
+- **Wire message:** base64 of the UTF-8 JSON envelope. Receivers MUST accept one, two or three
+  base64 layers; three is a Store payload of a Loam-sent message.
+  - `{"v": 2, "type": "EVENTS", "events": [...]}`: a form's state (the creator's publish and
+    edits, close/re-open, co-owner grants, receipts, replies), or one answer. At most 2,000 events;
+    split at ~120 KB to stay under Delivery's ~150 KB message cap. Every event is admitted as in
+    6.1.
+  - `{"v": 2, "type": "ASK", "formId": id}`: a respondent can't find a form in Store.
+  - `{"type": "EVENT", "event": e}`: one event; still accepted.
+  - v1 `RBSR` and `SYNC_REQ` frames are ignored.
+- **Store.**
+  - A node pulls a bucket from Store when it joins it, on start, on reconnect, and every 15 min.
+  - The window is from its last pull (persisted per bucket, `pulls.json`) minus 5 min, at most
+    6 h back. At most 20 pages of 100 messages.
+  - Store peers: `getNodeInfo("StoreNodes")` where Delivery has it, else the `logos.test` fleet
+    (`$WHISPERBOX_STORE_PEERS` overrides). See logos-co/logos-delivery-module#187.
+  - Assume Store keeps 1-2 h (measured ~48 h on `logos.test`, 2026-11-12).
+- **Creator side.**
+  - Sends the form's state on every change.
+  - Re-publishes each open form every 60 min (±10% per form); a closed form 3 times, then never.
+  - Answers an `ASK` for a form it creates or co-owns by publishing its state, at most once per
+    form per 10 min. Respondents never answer ASKs.
+  - Receipts and replies travel inside the form's state, so the hourly re-publish carries them.
+- **Respondent side.**
+  - Sends an answer once, then again until its receipt: every 10 min for an hour, hourly for 4 h,
+    then every 6 h, for 14 days.
+  - A form opened from a link that isn't in Store: `ASK` after 20 s, 10 min and 30 min, then
+    hourly (at most 26 times).
+- **RLN budget.**
+  - Everything sent goes through one queue: at most 10 messages per 600 s epoch by default
+    (`$WHISPERBOX_MSGS_PER_EPOCH`), of the node's 100.
+  - Priority:
+    1. answer
+    2. receipt / reply
+    3. form change / ASK answer
+    4. ASK
+    5. scheduled re-publish
+    6. answer retry
+  - A message queued again under the same key replaces the waiting one.
+- **Admission budgets (6.1).**
+  - Live frames have the flood budget.
+  - A bundle frame costs one frame token, and events in it that are already held cost nothing.
+  - Store pulls are bounded by their paging and have no budget.
+- **Transport.**
+  - Desktop through `loam_core` when it answers (unchanged config), else `delivery_module`
+    directly in **Edge** mode (Filter for the buckets, Lightpush to send, no relaying).
+  - Phone through loam-transport: `join(topics)`, `storeSync`, `publishSealed(topic, ...)`.
+- **Offline.** Local events wait in the log. When the node comes up, the creator's scheduled
+  re-publish and the respondent's unsent answers (`sent: false`) go out.
 
 ### 6.1 Admission (receive)
 Before merging a received event:
@@ -585,6 +621,9 @@ An implementation conforms if it reproduces every fixture (layers 1-4 and 7 of
 
 ## 16. Compatibility
 
+- **Wire v2 (1.0, ADR 0024) is a clean break:** v2 nodes neither listen on `/whisperbox/1/all/proto`
+  nor answer v1 catch-up, and v1 nodes don't know the bucket topics. Events and the fold are
+  unchanged, so a log carries over; the creator re-publishes its open forms on v2.
 - Readers ignore unknown payload fields and fold unknown event types into `dropped`.
 - New optional form fields default to off (`editableFields`); older apps simply don't
   enforce them.

@@ -38,6 +38,27 @@ using whisperbox::json;
 using whisperbox::OrderedJson;
 using whisperbox::lc;
 using whisperbox::TOPIC;
+
+// ── wire v2 helpers (ADR 0024) ──
+static const char* kWireShard = "/waku/2/rs/2/1";
+static std::string formTopic(const std::string& formId) {
+    const std::string in = "whisperbox.bucket.v2" + formId;
+    whisperbox::Bytes h = whisperbox::sha256(whisperbox::Bytes(in.begin(), in.end()));
+    return std::string("/whisperbox/2/form-") + "0123456789abcdef"[h[0] >> 4] + "/proto";
+}
+static bool isWireTopic(const std::string& t) { return t.rfind("/whisperbox/2/form-", 0) == 0; }
+static long long envLL(const char* name, long long def) {
+    if (const char* v = std::getenv(name)) { char* end = nullptr; long long x = std::strtoll(v, &end, 10); if (end && *end == 0 && x > 0) return x; }
+    return def;
+}
+// the form an event belongs to (an answer's form is sealed: its sender knows it, nobody else)
+static std::string formIdOf(const json& e) {
+    if (!e.contains("payload") || !e["payload"].is_object()) return "";
+    const json& p = e["payload"];
+    if (e.value("type", "") == whisperbox::FORM_PUBLISH) return lc(p.value("id", ""));
+    return lc(p.value("formId", ""));
+}
+
 using whisperbox::FORM_PUBLISH;
 using whisperbox::RESPONSE_SUBMIT;
 using whisperbox::RESPONSE_CONFIRM;
@@ -252,6 +273,7 @@ void WhisperboxCoreImpl::onContextReady() {
     loadMySubmissions();
     loadLocalPrefs();
     loadPins();
+    loadPulls();
     // Basecamp 0.3 rejects calls to other modules made inside onContextReady(): the hub tick
     // below starts the transport a second later.
     // Hub tick: retry node start until ready, then a rate-limited periodic seed so
@@ -270,17 +292,9 @@ void WhisperboxCoreImpl::onContextReady() {
                 try { modules().loam_core.statusAsync([life](std::string st) { withSelf(life, [st](WhisperboxCoreImpl* self) { self->onTransportStatus(st); }); }); } catch (...) {}
             }
         } else {
-            // Catch-up schedule: an RBSR round at 3s, 10s, 25s after node-up (the first
-            // answer may come from a peer holding only part of the log), then every 60s.
-            // A round is ONE bounded fingerprint message; peers reply with the exact delta
-            // (never the whole log). The first rounds also carry a SYNC_REQ for 0.1.x peers.
-            static const long long kBackoffMs[] = {3000, 10000, 25000};
-            long long delay = m_syncReqTries <= 3 ? kBackoffMs[m_syncReqTries - 1] : 60000;
-            if (nowMs() - m_lastSyncReqMs >= delay) {
-                if (m_syncReqTries <= 3) requestSync(); else { m_lastSyncReqMs = nowMs(); m_syncReqTries++; }
-                catchupRound();
-            }
-            if (nowMs() - m_lastHousekeepMs >= 5000) { m_lastHousekeepMs = nowMs(); housekeeping(); }
+            // wire v2 (ADR 0024): no catch-up rounds; the queue drains within the RLN budget
+            drainSendQueue();
+            if (nowMs() - m_lastHousekeepMs >= std::min<long long>(5000, envLL("WHISPERBOX_MINUTE_MS", 60000) / 12)) { m_lastHousekeepMs = nowMs(); housekeeping(); wireSchedule(); }
             // Distributed-debugging: counters on stderr every 30s ("watch counters").
             if (nowMs() - m_lastStatMs >= 30000) {
                 m_lastStatMs = nowMs();
@@ -759,7 +773,7 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
         // wait out the IPC timeout): hand the work to this module's thread. They may also arrive
         // after we're gone: through m_life only (FR-8).
         modules().loam_core.onReceived([life](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t ts) {
-            if (topic != TOPIC) return;
+            if (!isWireTopic(topic)) return;
             // ts: the message's network timestamp in ns (loam_core >= 0.8.0: 0 = none, and an
             // earlier-stamped duplicate is delivered again). Older loam_core passes the WakuMessage
             // time on this relay path too. Any of them bounds when the answer existed (ADR 0019).
@@ -905,7 +919,8 @@ void WhisperboxCoreImpl::bootstrapDirect() {
     };
     DT::Config cfg;
     // the same network as the loam_core path: logos.test without RLN (nodeConfig spells it out)
-    json app = {{"mode", "Core"}, {"preset", "logos.test"}};
+    // Edge (ADR 0024): a light node - Filter for our buckets, Lightpush to send, no relaying
+    json app = {{"mode", "Edge"}, {"preset", "logos.test"}};
     if (const char* ov = std::getenv("WHISPERBOX_DELIVERY_CFG")) {
         auto j = json::parse(ov, nullptr, false);
         if (j.is_object()) { app = j; for (const char* k : {"useChannels", "hubMode", "useBle", "useMesh", "useDelivery", "rln"}) app.erase(k); }
@@ -915,7 +930,7 @@ void WhisperboxCoreImpl::bootstrapDirect() {
     cfg.senderId = m_deviceId;
     d->t = std::make_unique<DT>(std::move(ops), std::move(cfg));
     d->t->onFrame = [this](const loam::delivery::Frame& f) {
-        if (f.topic != TOPIC) return;
+        if (!isWireTopic(f.topic)) return;
         // f.bytes = what was sent: the base64 envelope text (the ingest peels one or two layers)
         ingestEnvelopeText(f.bytes, /*channelPath=*/true, netMsOf(f.ts, nowMs()));
     };
@@ -949,9 +964,8 @@ void WhisperboxCoreImpl::onTransportStatus(const std::string& st) {
     if (st == "Connected" && !m_nodeReady) {
         m_nodeReady = true;
         m_startFailures = 0;
-        joinTransport();
-        requestSync();     // legacy (0.1.x) peers answer with their log
-        catchupRound();    // RBSR peers reconcile the exact delta both ways
+        m_joinedTopics.clear();
+        syncTopics();      // join our forms' buckets and pull what Store has for them
         setStatus("Connected");
         publishState();
     } else if (!m_nodeReady) {
@@ -962,7 +976,7 @@ void WhisperboxCoreImpl::onTransportStatus(const std::string& st) {
         // keep saying "Connected" (review 2026-10-22). Back to Connected: catch up what was missed.
         const bool recovered = st == "Connected";
         setStatus(st);
-        if (recovered) catchupRound();
+        if (recovered) { storePullAll(); drainSendQueue(); }
         publishState();
     }
 }
@@ -988,7 +1002,7 @@ void WhisperboxCoreImpl::onLoop(std::function<void()> fn) {
 
 void WhisperboxCoreImpl::joinTransport() {
     if (!m_nodeReady || m_subscribed) return;
-    if (m_via == Via::Direct) { if (m_direct && m_direct->t) { m_direct->t->join(TOPIC); m_subscribed = true; } return; }
+    syncTopics(); return;   // wire v2: per-form buckets (ADR 0024); the code below is v1, unreachable
     auto life = m_life;
     modules().loam_core.joinAsync(TOPIC, [life](std::string r) {
         // a failed join is tried again on the next status change / catch-up round (FR-14)
@@ -1101,13 +1115,296 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
     }
 }
 
+// ── wire v2 (ADR 0024) ───────────────────────────────────────────────────────────
+// Every form lives on one of 16 bucket topics; a node joins only the buckets of forms it made,
+// co-owns or opened, pulls them from Store, and sends little: the creator re-publishes a form's
+// state hourly (and when asked), a respondent its answer until the receipt. No catch-up rounds,
+// no serving. All /whisperbox/2 topics map to relay shard 1 of cluster 2 (autosharding).
+std::string WhisperboxCoreImpl::wireTopicFor(const std::string& formId) { return formTopic(lc(formId)); }
+
 void WhisperboxCoreImpl::broadcastEvent(const json& e) {
-    // Before the transport is up the event stays in the local log; catch-up delivers it later.
-    if (!m_nodeReady) return;
+    // Form-state events (publish, update, close, re-open, co-owner, receipt, reply) go out as the
+    // whole form state in one message; it is also what the hourly re-publish sends.
     if (!whisperbox::wellFormedEvent(e)) return;   // FR-9/10: never send what peers refuse
-    std::string text = whisperbox::eventToJsonText(whisperbox::envEvent(e));
-    // loam_core fans out to every bearer (relay + channel on Waku, BLE mesh) and dedups
-    if (deliverySend(TOPIC, whisperbox::b64encode(text))) m_txTotal++;
+    const std::string t = e.value("type", "");
+    const std::string fid = formIdOf(e);
+    if (fid.empty()) return;
+    const int prio = (t == RESPONSE_CONFIRM || t == whisperbox::RESPONSE_REPLY) ? 2 : 3;
+    publishFormState(fid, prio);
+}
+
+std::set<std::string> WhisperboxCoreImpl::relevantForms() {
+    std::set<std::string> out(m_watched.begin(), m_watched.end());
+    for (const auto& f : m_mySubmissions) out.insert(f);
+    for (const auto& kv : m_pinned) out.insert(kv.first);
+    for (const auto& kv : m_answerDrafts) out.insert(kv.first);
+    for (const auto& kv : m_myAnswers) out.insert(kv.first);
+    if (m_signId.valid) {
+        OrderedJson st = foldedState();
+        for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it)
+            if (it.value().value("creator", "") == m_signId.address || isCoOwner(it.value())) out.insert(it.key());
+    }
+    return out;
+}
+
+void WhisperboxCoreImpl::syncTopics() {
+    if (!m_nodeReady) return;
+    std::set<std::string> want;
+    for (const auto& f : relevantForms()) want.insert(formTopic(f));
+    for (const auto& t : want) {
+        if (m_joinedTopics.count(t)) continue;
+        if (m_via == Via::Direct) { if (!m_direct || !m_direct->t) continue; m_direct->t->join(t); }
+        else {
+            auto life = m_life;
+            modules().loam_core.joinAsync(t, [life, t](std::string r) {
+                if (r.find("\"ok\":false") == std::string::npos && r.find("error") == std::string::npos) return;
+                withSelf(life, [t](WhisperboxCoreImpl* self) { std::lock_guard<std::recursive_mutex> lk(self->m_mtx); self->m_joinedTopics.erase(t); });
+            });
+        }
+        m_joinedTopics.insert(t);
+        storePull(t);   // a bucket we hadn't held: what's there from before we listened
+    }
+    m_subscribed = !m_joinedTopics.empty();
+}
+
+// One queue for everything sent, drained within the node's RLN budget: WhisperBox takes at most
+// WHISPERBOX_MSGS_PER_EPOCH (default 10) of the 100 messages a node may send per 600 s epoch.
+// Lower prio = sooner: 1 answer, 2 receipt/reply, 3 form change / answering an ASK, 4 ASK,
+// 5 scheduled re-publish, 6 answer retry. A message queued again under the same key replaces
+// the queued one (newest content, most urgent priority).
+void WhisperboxCoreImpl::enqueueSend(int prio, const std::string& topic, const json& env, const std::string& key) {
+    std::string text = whisperbox::eventToJsonText(env);
+    for (auto& m : m_outQ) if (!key.empty() && m.key == key) { m.text = std::move(text); m.topic = topic; m.prio = std::min(m.prio, prio); return; }
+    m_outQ.push_back(OutMsg{prio, m_outSeq++, topic, std::move(text), key});
+    drainSendQueue();
+}
+void WhisperboxCoreImpl::drainSendQueue() {
+    if (!m_nodeReady || m_outQ.empty()) return;
+    const double perEpoch = (double)envLL("WHISPERBOX_MSGS_PER_EPOCH", 10);
+    const int64_t now = nowMs();
+    if (m_rlnRefillMs == 0) { m_rlnRefillMs = now; m_rlnTokens = perEpoch; }
+    m_rlnTokens = std::min(perEpoch, m_rlnTokens + double(now - m_rlnRefillMs) * perEpoch / 600000.0);
+    m_rlnRefillMs = now;
+    while (m_rlnTokens >= 1 && !m_outQ.empty()) {
+        auto best = std::min_element(m_outQ.begin(), m_outQ.end(), [](const OutMsg& a, const OutMsg& b) { return a.prio != b.prio ? a.prio < b.prio : a.seq < b.seq; });
+        OutMsg m = std::move(*best);
+        m_outQ.erase(best);
+        if (deliverySend(m.topic, whisperbox::b64encode(m.text))) { m_txTotal++; m_rlnTokens -= 1; }
+        else { m_outQ.push_back(std::move(m)); break; }   // transport not taking it: try on the next tick
+    }
+}
+// events -> EVENTS frames on the form's topic, split to stay under Delivery's ~150 KB message cap
+void WhisperboxCoreImpl::sendEvents(const std::string& formId, const json& events, int prio, const std::string& key) {
+    static constexpr size_t kMaxBundle = 120000;
+    json chunk = json::array(); size_t bytes = 0; int part = 0;
+    auto flush = [&] {
+        if (chunk.empty()) return;
+        enqueueSend(prio, formTopic(formId), json({{"v", 2}, {"type", "EVENTS"}, {"events", chunk}}), part == 0 ? key : key + "#" + std::to_string(part));
+        part++; chunk = json::array(); bytes = 0;
+    };
+    for (const auto& e : events) {
+        const size_t n = e.dump().size();
+        if (bytes + n > kMaxBundle) flush();
+        chunk.push_back(e); bytes += n;
+    }
+    flush();
+}
+// The form's whole state as its creator side knows it: the creator's publish and edits, close and
+// re-open, co-owner grants, receipts and replies. Peers check each event as from the network.
+void WhisperboxCoreImpl::publishFormState(const std::string& formId, int prio) {
+    OrderedJson st = foldedState();
+    if (!st["forms"].contains(formId)) return;
+    const auto& f = st["forms"][formId];
+    const std::string creator = f.value("creator", "");
+    std::set<std::string> authors = {creator};
+    if (f.contains("coOwners") && f["coOwners"].is_array()) for (const auto& c : f["coOwners"]) if (c.is_object()) authors.insert(lc(c.value("address", "")));
+    json events = json::array();
+    for (const auto& e : m_log) {
+        const std::string t = e.value("type", "");
+        if (t == RESPONSE_SUBMIT || formIdOf(e) != formId || !e.contains("payload")) continue;
+        const std::string author = lc(t == FORM_PUBLISH ? e["payload"].value("creator", "") : e["payload"].value("author", ""));
+        if (t == FORM_PUBLISH ? author != creator : !authors.count(author)) continue;
+        if (t == FORM_PUBLISH) events.insert(events.begin(), e); else events.push_back(e);
+    }
+    if (events.empty()) return;
+    syncTopics();   // the creator side listens on the form's bucket from its first publish (answers)
+    m_formSentMs[formId] = nowMs();
+    sendEvents(formId, events, prio, "form:" + formId);
+}
+
+void WhisperboxCoreImpl::onAsk(const json& env) {
+    const std::string fid = env.contains("formId") && env["formId"].is_string() ? lc(env["formId"].get<std::string>()) : std::string();
+    if (fid.empty() || fid.size() > 128) return;
+    OrderedJson st = foldedState();
+    if (!st["forms"].contains(fid)) return;
+    const auto& f = st["forms"][fid];
+    // only the creator side answers, at most once per form per 10 min whoever asked
+    if (!(m_signId.valid && f.value("creator", "") == m_signId.address) && !isCoOwner(f)) return;
+    // its own limit: an ASK right after a publish still gets an answer (Store may have missed it)
+    if (m_askAnsweredMs.count(fid) && nowMs() - m_askAnsweredMs[fid] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
+    m_askAnsweredMs[fid] = nowMs();
+    publishFormState(fid, 3);
+}
+
+void WhisperboxCoreImpl::loadPulls() {
+    m_lastPullMs.clear();
+    std::ifstream f(m_dataDir + "/pulls.json");
+    if (!f) return;
+    try { json j = json::parse(f); if (j.is_object()) for (auto it = j.begin(); it != j.end(); ++it) if (it.value().is_number_integer()) m_lastPullMs[it.key()] = it.value().get<long long>(); } catch (...) {}
+}
+void WhisperboxCoreImpl::savePulls() {
+    json j = json::object(); for (const auto& kv : m_lastPullMs) j[kv.first] = kv.second;
+    writeAtomic(m_dataDir + "/pulls.json", j.dump());
+}
+
+// Store: what was published on a bucket since we last looked (at most 6 h back; Store keeps 1-2 h
+// for sure). Queries cost no RLN. Peers: getNodeInfo("StoreNodes") where Delivery has it, else
+// the preset's fleet (logos-co/logos-delivery-module#187 asks for a query-any-peer call).
+void WhisperboxCoreImpl::storePull(const std::string& topic) {
+    if (!m_nodeReady) return;
+    if (m_pullInFlight.count(topic)) { m_pullAgain.insert(topic); return; }   // runs again when this one ends
+    auto life = m_life;
+    if (m_storePeers.empty()) {
+        m_storePeers = {
+            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+            "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+            "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
+            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7"};
+        if (const char* ov = std::getenv("WHISPERBOX_STORE_PEERS")) {
+            m_storePeers.clear(); std::stringstream ss(ov); std::string a;
+            while (std::getline(ss, a, ',')) if (!trim(a).empty()) m_storePeers.push_back(trim(a));
+        }
+        if (!m_storePeersAsked) {
+            m_storePeersAsked = true;
+            try {
+                modules().delivery_module.getNodeInfoAsync("StoreNodes", [life](StdLogosResult r) {
+                    if (!r.success) return;
+                    const std::string v = r.value.is_string() ? r.value.get<std::string>() : r.value.dump();
+                    json arr = json::parse(v, nullptr, false);
+                    if (!arr.is_array() || arr.empty()) return;
+                    withSelf(life, [arr](WhisperboxCoreImpl* self) {
+                        std::lock_guard<std::recursive_mutex> lk(self->m_mtx);
+                        std::vector<std::string> peers; for (const auto& a : arr) if (a.is_string()) peers.push_back(a.get<std::string>());
+                        if (!peers.empty()) { self->m_storePeers = peers; self->m_storePeerIx = 0; }
+                    });
+                });
+            } catch (...) {}
+        }
+    }
+    const long long now = nowMs();
+    const long long since = std::max(now - 6LL * 3600000LL, (m_lastPullMs.count(topic) ? m_lastPullMs[topic] : 0LL) - 5LL * 60000LL);
+    m_pullInFlight.insert(topic);
+    const std::string peer = m_storePeers[m_storePeerIx % m_storePeers.size()];
+    fprintf(stderr, "WHISPERBOX store pull %s from %lld s ago\n", topic.c_str(), (now - since) / 1000);
+    // pages follow one another; at most 20 pages (2,000 messages) per pull
+    auto page = std::make_shared<std::function<void(std::string, int)>>();
+    *page = [this, life, topic, since, now, peer, page](std::string cursor, int n) {
+        json q = {{"requestId", "wb-" + randomHex(4)}, {"includeData", true}, {"paginationForward", true}, {"pubsubTopic", kWireShard},
+                  {"contentTopics", json::array({topic})}, {"timeStart", since * 1000000LL}, {"timeEnd", (now + 60000LL) * 1000000LL}, {"paginationLimit", 100}};
+        if (!cursor.empty()) q["paginationCursor"] = cursor;
+        try {
+            modules().delivery_module.storeQueryAsync(q.dump(), peer, 15000, [life, topic, now, page, n](StdLogosResult r) {
+                withSelf(life, [r, topic, now, page, n](WhisperboxCoreImpl* self) {
+                    std::lock_guard<std::recursive_mutex> lk(self->m_mtx);
+                    json v;
+                    if (r.success) { v = r.value.is_string() ? json::parse(r.value.get<std::string>(), nullptr, false) : json::parse(r.value.dump(), nullptr, false); }
+                    if (!r.success || !v.is_object() || v.value("statusCode", 0) != 200) {
+                        self->m_pullInFlight.erase(topic);
+                        self->m_storePeerIx++;   // another peer next time
+                        if (self->m_pullAgain.erase(topic)) self->onLoop([self, topic] { std::lock_guard<std::recursive_mutex> lk2(self->m_mtx); self->storePull(topic); });
+                        fprintf(stderr, "WHISPERBOX store pull %s failed: %s\n", topic.c_str(), r.success ? v.dump().substr(0, 160).c_str() : r.error.c_str());
+                        return;
+                    }
+                    if (v.contains("messages") && v["messages"].is_array())
+                        for (const auto& m : v["messages"]) {
+                            if (!m.is_object() || !m.contains("message") || !m["message"].is_object()) continue;
+                            const json& wm = m["message"];
+                            if (!wm.contains("payload") || !wm["payload"].is_string()) continue;
+                            long long ts = wm.contains("timestamp") && wm["timestamp"].is_number() ? (long long)wm["timestamp"].get<double>() : 0;
+                            self->ingestEnvelopeText(wm["payload"].get<std::string>(), false, netMsOf(ts, nowMs()));
+                        }
+                    const std::string next = v.contains("paginationCursor") && v["paginationCursor"].is_string() ? v["paginationCursor"].get<std::string>() : std::string();
+                    if (!next.empty() && n < 20) { (*page)(next, n + 1); return; }
+                    self->m_pullInFlight.erase(topic);
+                    fprintf(stderr, "WHISPERBOX store pull %s done (%d pages)\n", topic.c_str(), n + 1);
+                    self->m_lastPullMs[topic] = now;
+                    self->savePulls();
+                    if (self->m_pullAgain.erase(topic)) self->storePull(topic);
+                    self->flushLog();
+                    self->publishState();
+                });
+            });
+        } catch (...) { m_pullInFlight.erase(topic); }
+    };
+    (*page)("", 0);
+}
+void WhisperboxCoreImpl::storePullAll() {
+    m_lastPullRoundMs = nowMs();
+    for (const auto& t : m_joinedTopics) storePull(t);
+}
+
+// The wire's schedule, every few seconds while the node is up (ADR 0024, "Schedules").
+void WhisperboxCoreImpl::wireSchedule() {
+    if (!m_nodeReady) return;
+    syncTopics();
+    const long long now = nowMs();
+    const long long minute = envLL("WHISPERBOX_MINUTE_MS", 60000LL);   // tests shrink time
+    const long long hour = envLL("WHISPERBOX_REPUBLISH_MS", 60 * minute);
+    OrderedJson st = foldedState();
+    // creator: re-publish open forms hourly (±10% per form), a closed one 3 times
+    for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it) {
+        const std::string fid = it.key();
+        const auto& f = it.value();
+        if (!(m_signId.valid && f.value("creator", "") == m_signId.address)) continue;
+        const int jitter = (int)(std::hash<std::string>{}(fid) % 21) - 10;   // -10..+10 %
+        const long long every = hour + hour * jitter / 100;
+        const bool closed = f.value("status", "open") != "open";
+        if (closed && m_formClosedSends[fid] >= 3) continue;
+        if (now - m_formSentMs[fid] < every) continue;
+        if (closed) m_formClosedSends[fid]++;
+        publishFormState(fid, 5);
+    }
+    // respondent: a form opened from a link that hasn't arrived - ASK after 20 s, 10 min, 30 min,
+    // then hourly (for a day)
+    for (const auto& fid : m_watched) {
+        if (st["forms"].contains(fid)) { m_askCount.erase(fid); continue; }
+        if (!m_askSentMs.count(fid)) m_askSentMs[fid] = now;   // first seen: give Store a moment (20 s)
+        const int n = m_askCount[fid];
+        const long long gap = n == 0 ? minute / 3 : n == 1 ? 10 * minute : n == 2 ? 20 * minute : 60 * minute;
+        if (n >= 26 || now - m_askSentMs[fid] < gap) continue;
+        m_askSentMs[fid] = now; m_askCount[fid] = n + 1;
+        enqueueSend(4, formTopic(fid), json({{"v", 2}, {"type", "ASK"}, {"formId", fid}}), "ask:" + fid);
+    }
+    // respondent: each answer again until its receipt - every 10 min for an hour, hourly for 4 h,
+    // then every 6 h, for 14 days
+    static const long long kRetryAt[] = {10, 20, 30, 40, 50, 110, 170, 230, 290};   // minutes after sending
+    bool dirty = false;
+    for (auto& kv : m_myAnswers) {
+        const std::string fid = kv.first;
+        if (!st["forms"].contains(fid)) continue;
+        const auto& conf = st["forms"][fid]["confirmations"];
+        auto handle = [&](json& a) {
+            const std::string eid = a.value("eventId", ""), cid = a.value("confirmationId", "");
+            if (eid.empty() || cid.empty() || containsStr(conf, cid)) return;
+            const long long first = a.value("submittedAt", 0LL);
+            if (first <= 0 || now - first > 14LL * 24 * 60 * minute) return;
+            const int n = a.value("retries", 0);
+            const long long dueAt = !a.value("sent", false) ? 0 : first + minute * (n < 9 ? kRetryAt[n] : 290 + 360LL * (n - 8));
+            if (now < dueAt) return;
+            for (const auto& e : m_log) if (e.value("id", "") == eid) {
+                sendEvents(fid, json::array({e}), a.value("sent", false) ? 6 : 1, "ans:" + eid);
+                if (a.value("sent", false)) a["retries"] = n + 1; else a["sent"] = true;
+                dirty = true;
+                break;
+            }
+        };
+        handle(kv.second);
+        if (kv.second.contains("earlier") && kv.second["earlier"].is_array()) for (auto& e : kv.second["earlier"]) if (e.is_object()) handle(e);
+    }
+    if (dirty) saveMyAnswers();
+    // Store: every 15 min (and on start / reconnect)
+    if (now - m_lastPullRoundMs >= envLL("WHISPERBOX_PULL_MS", 15 * minute)) storePullAll();
+    drainSendQueue();
 }
 
 // Send an event on behalf of a peer that lacks it. Serving has a budget, and an event served a
@@ -1145,52 +1442,13 @@ bool WhisperboxCoreImpl::serveEvent(const json& e) {
     return true;
 }
 
-// ── ingest (receive path) ────────────────────────────────────────────────────────
-void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath, long long netMs) try {
-    std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    m_rxRaw++;
-    if (channelPath) m_rxSeen++;
-    // a frame past the size cap is refused before any decoding (base64, maybe twice: 16/9 of the bytes)
-    if (text.size() > whisperbox::kMaxFrameBytes * 2) { m_rxBad++; return; }
-    // The wire payload is base64 text; a peer may single- OR double-encode. Try the
-    // double-peel first, then a single peel (qaku convention).
-    auto tryText = [this, netMs](const std::string& t) -> bool {
-        json env = whisperbox::parseEnvelope(t);
-        if (!env.is_object() || !env.contains("type") || !env["type"].is_string()) return false;
-        const std::string type = env["type"].get<std::string>();
-        if (type == "RBSR") {
-            if (!whisperbox::wellFormedCatchup(env)) { m_rxBad++; return true; }
-            // A small frame used to cost a full re-sort and scan of the id set per range and up to 64
-            // replies, with no limit on frames (open-review 2026-11-02, FR-4): frames have a budget,
-            // the id set is an index, and replies and serving are capped.
-            if (!takeToken(m_ctlTokens, m_ctlRefillMs, 120)) { m_ctlDropBudget++; return true; }
-            env.erase("type");
-            rbsrRespond(env);
-            m_rbsrRx++;
-            return true;
-        }
-        if (type == "SYNC_REQ") {
-            // Flagged rbsr = a peer that reconciles via RBSR; re-serving the whole log too
-            // would be pure flood. Unflagged = a 0.1.x peer that only knows SYNC_REQ.
-            if (env.contains("rbsr")) return true;
-            if (!env.contains("from") || !env["from"].is_string()) { m_rxBad++; return true; }
-            // a device id, and the whole-log reseed at most once a minute: only 0.1.x peers need it,
-            // and a tiny request still pulls a stream of stored data (open-review 2026-10-30, FR-4)
-            static const std::regex devId("^[A-Za-z0-9_-]{1,64}$");
-            if (!std::regex_match(env["from"].get<std::string>(), devId)) { m_rxBad++; return true; }
-            if (env.value("from", "") != m_deviceId && nowMs() - m_lastSyncReserveMs >= 60000) {
-                m_lastSyncReserveMs = nowMs();
-                m_legacyReseeds++;
-                seedBroadcast();   // re-serve the whole log (idempotent — peers dedup)
-            }
-            return true;
-        }
-        if (type == "EVENT" && env.contains("event")) {
-            json e = env["event"];
+// One event from the network (a live frame, a Store page or a bundle): the cheap checks, the budget,
+// the signature, then the merge. True when it was new.
+bool WhisperboxCoreImpl::ingestOne(json e, long long netMs, bool live, bool bundled) {
             // The cheap checks, then the budget, then the signature: a forged signature used to cost a
             // full verification before any budget was taken (open-review 2026-11-03, FR-6).
-            if (!whisperbox::wellFormedEvent(e)) { m_admDropShape++; return true; }
-            if (e["hlc"]["wall"].get<long long>() > nowMs() + whisperbox::kMaxClockLeadMs) { m_admDropFuture++; return true; }
+            if (!whisperbox::wellFormedEvent(e)) { m_admDropShape++; return false; }
+            if (e["hlc"]["wall"].get<long long>() > nowMs() + whisperbox::kMaxClockLeadMs) { m_admDropFuture++; return false; }
             // Unsigned answers: anyone can send any number of them, so answers have a node-wide
             // budget and the log a cap (open-review 2026-11-01, FR-3). Every copy costs, a replayed one
             // too (2026-11-02, FR-6), and signed events have their own budget (2026-11-02, FR-2). A peer
@@ -1202,13 +1460,15 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             // copy reordered answers (2026-11-03, FR-3). A signed event may be replaced by an
             // earlier-HLC copy (the merge rule), and is charged for its size (FR-1).
             const bool dup = held != m_heldHlc.end() && (isResp || whisperbox::compareHlc(e["hlc"], held->second) >= 0);
-            if (!(isResp ? takeToken(m_respTokens, m_respRefillMs, 600) : takeToken(m_sigTokens, m_sigRefillMs, 600))) { m_admDropBudget++; return true; }
+            // The flood budget is for live frames; a Store pull is bounded by our own paging (ADR 0024).
+            // In a bundle (a form's hourly state) a copy we hold costs nothing - the frame paid once.
+            if (live && !(bundled && dup) && !(isResp ? takeToken(m_respTokens, m_respRefillMs, 600) : takeToken(m_sigTokens, m_sigRefillMs, 600))) { m_admDropBudget++; return false; }
             if (dup) {   // known without a scan of the log, and without verifying it again
                 m_rxDup++;
                 if (noteNetTime(e, netMs)) { m_publishDirty = true; scheduleFlush(); }
-                return true;
+                return false;
             }
-            if (!admitEvent(e)) return true;   // the signature (counted)
+            if (!admitEvent(e)) return false;   // the signature (counted)
             const bool replaced = held != m_heldHlc.end();
             const size_t eBytes = e.dump().size();
             const size_t oldBytes = replaced && m_heldBytes.count(key) ? m_heldBytes[key] : 0;
@@ -1216,9 +1476,9 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             // the caps apply to a replacement too: a small event replaced by a large one used to grow
             // the log without bound (FR-1)
             if (isResp ? (m_logResponses >= kMaxLogResponses || m_logBytes + grow > kMaxLogBytes)
-                       : (grow > 0 && m_logBytes + grow > kMaxLogBytes + kLogReserveBytes)) { m_admDropFull++; return true; }
+                       : (grow > 0 && m_logBytes + grow > kMaxLogBytes + kLogReserveBytes)) { m_admDropFull++; return false; }
             noteNetTime(e, netMs);
-            if (!whisperbox::mergeOne(m_log, e)) { m_rxDup++; return true; }
+            if (!whisperbox::mergeOne(m_log, e)) { m_rxDup++; return false; }
             m_heldHlc[key] = e["hlc"];
             m_heldBytes[key] = eBytes;
             m_logBytes = m_logBytes + eBytes - oldBytes;
@@ -1230,11 +1490,38 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             m_journalPending.push_back(e);
             m_logDirty = true; m_publishDirty = true; scheduleFlush();
             return true;
+        
+}
+
+// ── ingest (receive path) ────────────────────────────────────────────────────────
+void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath, long long netMs) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_rxRaw++;
+    if (channelPath) m_rxSeen++;
+    // a frame past the size cap is refused before any decoding (base64, maybe twice: 16/9 of the bytes)
+    if (text.size() > whisperbox::kMaxFrameBytes * 2) { m_rxBad++; return; }
+    // The wire payload is base64 text; a peer may single- OR double-encode. Try the
+    // double-peel first, then a single peel (qaku convention).
+    auto tryText = [this, netMs, channelPath](const std::string& t) -> bool {
+        json env = whisperbox::parseEnvelope(t);
+        if (!env.is_object() || !env.contains("type") || !env["type"].is_string()) return false;
+        const std::string type = env["type"].get<std::string>();
+        // v1 catch-up (RBSR, SYNC_REQ): not answered any more - nobody serves anybody (ADR 0024)
+        if (type == "RBSR" || type == "SYNC_REQ") return true;
+        if (type == "EVENT" && env.contains("event")) { ingestOne(env["event"], netMs, channelPath, false); return true; }
+        // wire v2 (ADR 0024): a form's state or an answer as one frame of events
+        if (type == "EVENTS" && env.contains("events") && env["events"].is_array()) {
+            if (env["events"].size() > 2000) { m_rxBad++; return true; }
+            if (channelPath && !takeToken(m_ctlTokens, m_ctlRefillMs, 120)) { m_ctlDropBudget++; return true; }   // a frame budget
+            for (const auto& e : env["events"]) { try { ingestOne(e, netMs, channelPath, true); } catch (...) { m_rxBad++; } }
+            return true;
         }
+        if (type == "ASK") { onAsk(env); return true; }
         return false;
     };
     std::string once = whisperbox::b64decode(text);
     if (tryText(whisperbox::b64decode(once))) return;   // double peel
+    if (tryText(whisperbox::b64decode(whisperbox::b64decode(once)))) return;   // Store payload of a Loam send
     if (tryText(once)) return;                           // single peel
     if (channelPath) fprintf(stderr, "WHISPERBOXRX ingest OPENFAIL plen=%zu\n", text.size());
 } catch (const std::exception& ex) {
@@ -2088,6 +2375,7 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         std::string sealedHex = whisperbox::toHex(sealed);
         json p = {{"encryptedPayload", sealedHex}};
         json e = buildEvent(RESPONSE_SUBMIT, whisperbox::responseSubmitId(sealedHex), p, /*sign=*/false);
+        const std::string eventId = e.value("id", "");
         // A fresh random tag per answer on the wire. It used to be sha256(deviceId|formId), but every
         // signed event carries the device id in clear, so anyone could compute a user's tag for any
         // form and link an anonymous answer to their device (review 2026-10-22, WB-5).
@@ -2096,21 +2384,31 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         // peers refuse an event over 256 KiB: say so instead of keeping an answer nobody gets (FR-10)
         if (!adoptChecked(e)) { out["ok"] = false; out["error"] = "these answers are too long to send - shorten the longest ones"; return out.dump(); }
         adoptLocal(e);
-        broadcastEvent(e);
         publishState();
         const std::string prevCid = m_myConfirmIds.count(formId) ? m_myConfirmIds[formId] : std::string();
         m_mySubmissions.insert(formId);   // local, private: "I already answered this"
         m_myConfirmIds[formId] = confirmationId;
         saveMySubmissions();
-        json entry = json({{"answers", answers}, {"submittedAt", submittedAt}, {"firstSubmittedAt", isEdit ? firstAt : submittedAt}});
+        // eventId + confirmationId: the answer is sent again until its receipt (ADR 0024)
+        json entry = json({{"answers", answers}, {"submittedAt", submittedAt}, {"firstSubmittedAt", isEdit ? firstAt : submittedAt},
+                           {"eventId", eventId}, {"confirmationId", confirmationId}, {"sent", false}, {"retries", 0}});
         if (perResp != 1 && myCount > 0 && m_myAnswers.count(formId)) {   // keep the answers sent before, newest last
             const json& prevA = m_myAnswers[formId];
             json earlier = prevA.contains("earlier") && prevA["earlier"].is_array() ? prevA["earlier"] : json::array();
-            earlier.push_back(json({{"answers", prevA.value("answers", json::array())}, {"submittedAt", prevA.value("submittedAt", 0LL)},
-                                    {"confirmationId", prevCid.empty() ? json(nullptr) : json(prevCid)}}));
+            json prevEntry = json({{"answers", prevA.value("answers", json::array())}, {"submittedAt", prevA.value("submittedAt", 0LL)},
+                                    {"confirmationId", prevCid.empty() ? json(nullptr) : json(prevCid)}});
+            for (const char* k : {"eventId", "sent", "retries"}) if (prevA.contains(k)) prevEntry[k] = prevA[k];
+            earlier.push_back(prevEntry);
             entry["earlier"] = earlier;
         }
+        if (isEdit && m_myAnswers.count(formId)) {   // an edit replaces the answer: stop retrying the old one
+            entry["retries"] = 0;
+        }
         m_myAnswers[formId] = entry;
+        if (m_nodeReady) {
+            sendEvents(formId, json::array({e}), 1, "ans:" + eventId);
+            m_myAnswers[formId]["sent"] = true;
+        }
         saveMyAnswers();
         if (m_answerDrafts.erase(formId)) saveDrafts();
         out["ok"] = true; out["eventId"] = e["id"].get<std::string>();
@@ -2214,6 +2512,7 @@ std::string WhisperboxCoreImpl::joinForm(std::string formId) try {
     if (!m_watched.count(formId) && m_watched.size() >= kMaxWatched) return json({{"ok", false}, {"error", "too many opened forms - remove some"}}).dump();   // FR-14
     m_watched.insert(formId);
     saveWatched();
+    if (m_nodeReady) { syncTopics(); storePull(formTopic(formId)); }   // wire v2: its bucket, from Store
     publishState();
     json out = {{"ok", true}, {"formId", formId}};
     return out.dump();
@@ -2726,7 +3025,7 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
     if (!m_watched.count(formId) && m_watched.size() >= kMaxWatched) { out["ok"] = false; out["error"] = "too many opened forms - remove some"; return out.dump(); }   // FR-14
     OrderedJson state = foldedState();
     const bool have = state["forms"].contains(formId);
-    if (!have && m_nodeReady) { requestSync(); catchupRound(); }
+    if (!have && m_nodeReady) { m_watched.insert(formId); syncTopics(); storePull(formTopic(formId)); }
     m_watched.insert(formId);
     saveWatched();
     // Answers are only ever sealed to a form whose (signed) creator matches the pin.
@@ -2906,9 +3205,10 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) try {
 std::string WhisperboxCoreImpl::resync() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!m_nodeReady) { json o = {{"ok", false}, {"error", "node not ready"}}; return o.dump(); }
-    // Ask peers for state AND re-serve ours (idempotent both ways).
-    requestSync();
-    catchupRound();
+    // wire v2: pull our buckets from Store again, and ASK at once for forms that haven't arrived
+    syncTopics();
+    storePullAll();
+    for (const auto& fid : m_watched) m_askSentMs[fid] = 0;
     publishState();
     json out = {{"ok", true}, {"logSize", (int)m_log.size()}};
     return out.dump();

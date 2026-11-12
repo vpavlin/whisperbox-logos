@@ -73,11 +73,13 @@ static json callCore(WhisperboxCoreImpl* c, const std::string& m, const json& a)
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
+    setenv("WHISPERBOX_MSGS_PER_EPOCH", "1000000", 1);   // the interop run sends far more than an RLN epoch allows
     char tmpl[] = "/tmp/wb-bridge-XXXXXX"; base = mkdtemp(tmpl);
 
     // The phone: a node on the bus that hands everything it receives to stdout.
     FakeNode phone; phone.name = "phone"; phone.up = true; phone.subscribed = true; phone.channel = true; phone.senderId = "phone";
-    phone.joined.insert(whisperbox::TOPIC);
+    // wire v2 (ADR 0024): the phones listen on every bucket (each JS client takes what it needs)
+    for (const char* h : {"0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"}) phone.joined.insert(std::string("/whisperbox/2/form-") + h + "/proto");
     // what the phone's transport sees: base64 of the bytes on the topic
     phone.onRx = [](const std::string&, const std::string&, const std::string& payloadB64, int64_t) { out(json{{"rx", payloadB64}}); };
     FakeBus::get().nodes.push_back(&phone);
@@ -94,7 +96,7 @@ int main(int argc, char** argv) {
             // the desktop core sends). layers=0 = raw envelope bytes, which the core accepts too.
             std::string env = whisperbox::b64decode(cmd["tx"].get<std::string>());
             std::string wire = cmd.value("layers", 1) == 0 ? env : whisperbox::b64encode(env);
-            FakeBus::get().relay(&phone, whisperbox::TOPIC, wire);
+            FakeBus::get().relay(&phone, cmd.value("topic", std::string("/whisperbox/2/form-0/proto")), wire);
         } else if (cmd.contains("call")) {
             Peer& p = peers[cmd.value("peer", "A")];
             out(json{{"id", cmd.value("id", 0)}, {"result", callCore(p.core.get(), cmd["call"], cmd.value("args", json::array()))}});
