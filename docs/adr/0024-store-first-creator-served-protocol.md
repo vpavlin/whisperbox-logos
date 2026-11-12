@@ -1,6 +1,6 @@
 # 0024 - Store first, creator served: WhisperBox protocol v2
 
-Status: **proposed**, 2026-11-12 (for Václav's decision; nothing built)
+Status: **accepted**, 2026-11-12. Václav's decisions are folded in below ("Decisions, 2026-11-12").
 
 ## Context
 
@@ -47,7 +47,50 @@ is shared by all its apps), an idle WhisperBox must not chatter.*
   layer on Logos Delivery: signed records, 64 hashed content-topic buckets, Store catch-up per
   bucket, a publish gate on RLN state, and batching as the RLN lever. Its findings carry over.
 
-## Decision (proposed)
+## Decisions, 2026-11-12 (Václav)
+
+These override the proposal below where they differ.
+
+- **Store retention:** don't rely on 48 h. More traffic means more churn; **assume 1-2 h**.
+- **Buckets:** yes.
+- **Pull from Store:** yes.
+- **Re-publishing:** keep doing it regularly.
+  - The creator re-publishes each open form **at least once an hour**. 24 h is too long.
+  - Respondents re-publish their answer **until they get a receipt**.
+- **Retry backoff with no receipt:**
+  - every 10 min for an hour (5 times);
+  - then once an hour for a few hours;
+  - then less often.
+- **Edge mode:** yes.
+- **Clean break:** v2 doesn't talk to v1.
+- **RLN for Edge (open question 1):** Lightpush does spend the service node's quota. That's a
+  general Delivery-vs-RLN problem, not WhisperBox's.
+- **Store peer discovery (open question 2):** check upstream; file an issue, or send a PR if we need
+  one. No issue existed:
+  - logos-delivery has `storeQueryToAny`, and `NodeInfoId.StoreNodes` on master, but neither is
+    exposed to apps;
+  - delivery_module v0.3.0 has neither;
+  - an issue was filed in logos-delivery-module.
+  - Until it's fixed, use `getNodeInfo("StoreNodes")` when the node has it, else the preset
+    fleet's Store nodes, trying several.
+- **Creator hub (open question 3):** later, via Rumor, once it's stable.
+- **Rumor:** build this design. Then do a **Rumor branch of WhisperBox** that Václav can show
+  to Jarrad.
+
+### Schedules (concrete)
+
+| what | when |
+|---|---|
+| creator: re-publish an open form's `FORM` | on change, then every 60 min (jitter ±10%); a closed form 3 times over 3 h, then stop |
+| creator: answer an `ASK` | re-publish `FORM`, at most once per form per 10 min |
+| creator: pull its buckets from Store | on start, on reconnect, and every 15 min (queries cost no RLN) |
+| respondent: `ASK` when the form isn't in Store | after 0, 10 and 30 min, then hourly while the form is open on screen |
+| respondent: `ANSWER` until a receipt | at 0, then every 10 min ×5, then hourly ×4, then every 6 h, stopping after 14 days |
+| respondent: pull buckets of answers still waiting for a receipt | on start, on reconnect, every 15 min |
+| creator: `RECEIPTS` | when confirming (manual or automatic); a receipt that was already sent is re-sent when the same answer arrives again, at most once per answer per 10 min |
+| Store query window | from the last pull (persisted per bucket), at most 6 h back |
+
+## Proposal (as written; see the decisions above)
 
 ### 1. Form topics, no global topic
 
