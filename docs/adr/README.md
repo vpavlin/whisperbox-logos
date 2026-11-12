@@ -24,5 +24,6 @@
 | [0021](0021-studio-respond-split-swappable-transport.md) | A respond module for the official catalog; Loam becomes optional | accepted, 0.6.0 |
 | [0022](0022-several-answers-per-respondent.md) | Several answers per respondent (feedback channel) | accepted, 0.7.0 |
 | [0023](0023-form-files-and-the-respond-intent.md) | Form files; other Basecamp apps ask WhisperBox for feedback by intent | accepted, 0.8.0 |
+| [0024](0024-store-first-creator-served-protocol.md) | Store first, creator served: protocol v2 (no global topic, no chatter, RLN budget) | proposed |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.
