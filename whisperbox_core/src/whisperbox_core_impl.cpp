@@ -1261,15 +1261,30 @@ void WhisperboxCoreImpl::savePulls() {
 // for sure). Queries cost no RLN. Peers: getNodeInfo("StoreNodes") where Delivery has it, else
 // the preset's fleet (logos-co/logos-delivery-module#187 asks for a query-any-peer call).
 void WhisperboxCoreImpl::storePull(const std::string& topic) {
-    if (!m_nodeReady) return;
-    if (m_pullInFlight.count(topic)) { m_pullAgain.insert(topic); return; }   // runs again when this one ends
+    m_pullWant.insert(topic);
+    kickPull();
+}
+void WhisperboxCoreImpl::storePullAll() {
+    m_lastPullRoundMs = nowMs();
+    m_pullRetryAt = 0;   // start, reconnect or resync: don't wait for a failed pull's retry
+    for (const auto& t : m_joinedTopics) m_pullWant.insert(t);
+    kickPull();
+}
+// One Store query at a time, for every bucket that wants one (Store takes a list of content topics):
+// nine parallel queries overran the module's IPC timeout and one flaky Store peer failed them all
+// (live test 2026-11-12). A failed query moves to the next Store peer and is tried again in 20 s.
+void WhisperboxCoreImpl::kickPull() {
+    if (!m_nodeReady || m_pullBusy || m_pullWant.empty()) return;
+    if (m_pullRetryAt && nowMs() < m_pullRetryAt) return;
     auto life = m_life;
     if (m_storePeers.empty()) {
         m_storePeers = {
-            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
             "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
             "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
-            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7"};
+            "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
+            "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV"};
         if (const char* ov = std::getenv("WHISPERBOX_STORE_PEERS")) {
             m_storePeers.clear(); std::stringstream ss(ov); std::string a;
             while (std::getline(ss, a, ',')) if (!trim(a).empty()) m_storePeers.push_back(trim(a));
@@ -1292,27 +1307,40 @@ void WhisperboxCoreImpl::storePull(const std::string& topic) {
         }
     }
     const long long now = nowMs();
-    const long long since = std::max(now - 6LL * 3600000LL, (m_lastPullMs.count(topic) ? m_lastPullMs[topic] : 0LL) - 5LL * 60000LL);
-    m_pullInFlight.insert(topic);
+    std::vector<std::string> topics(m_pullWant.begin(), m_pullWant.end());
+    m_pullWant.clear();
+    long long since = now - 6LL * 3600000LL;
+    {   // from the least recently pulled of them (5 min overlap), at most 6 h back
+        long long oldest = now;
+        for (const auto& t : topics) oldest = std::min(oldest, m_lastPullMs.count(t) ? m_lastPullMs[t] : 0LL);
+        since = std::max(since, oldest - 5LL * 60000LL);
+    }
+    m_pullBusy = true;
+    m_pullStartedMs = now;
     const std::string peer = m_storePeers[m_storePeerIx % m_storePeers.size()];
-    fprintf(stderr, "WHISPERBOX store pull %s from %lld s ago\n", topic.c_str(), (now - since) / 1000);
-    // pages follow one another; at most 20 pages (2,000 messages) per pull
+    fprintf(stderr, "WHISPERBOX store pull %zu bucket(s) from %lld s ago\n", topics.size(), (now - since) / 1000);
     auto page = std::make_shared<std::function<void(std::string, int)>>();
-    *page = [this, life, topic, since, now, peer, page](std::string cursor, int n) {
+    *page = [this, life, topics, since, now, peer, page](std::string cursor, int n) {
         json q = {{"requestId", "wb-" + randomHex(4)}, {"includeData", true}, {"paginationForward", true}, {"pubsubTopic", kWireShard},
-                  {"contentTopics", json::array({topic})}, {"timeStart", since * 1000000LL}, {"timeEnd", (now + 60000LL) * 1000000LL}, {"paginationLimit", 100}};
+                  {"contentTopics", topics}, {"timeStart", since * 1000000LL}, {"timeEnd", (now + 60000LL) * 1000000LL}, {"paginationLimit", 100}};
         if (!cursor.empty()) q["paginationCursor"] = cursor;
         try {
-            modules().delivery_module.storeQueryAsync(q.dump(), peer, 15000, [life, topic, now, page, n](StdLogosResult r) {
-                withSelf(life, [r, topic, now, page, n](WhisperboxCoreImpl* self) {
+            modules().delivery_module.storeQueryAsync(q.dump(), peer, 15000, [life, topics, now, page, n](StdLogosResult r) {
+                withSelf(life, [r, topics, now, page, n](WhisperboxCoreImpl* self) {
                     std::lock_guard<std::recursive_mutex> lk(self->m_mtx);
                     json v;
                     if (r.success) { v = r.value.is_string() ? json::parse(r.value.get<std::string>(), nullptr, false) : json::parse(r.value.dump(), nullptr, false); }
                     if (!r.success || !v.is_object() || v.value("statusCode", 0) != 200) {
-                        self->m_pullInFlight.erase(topic);
-                        self->m_storePeerIx++;   // another peer next time
-                        if (self->m_pullAgain.erase(topic)) self->onLoop([self, topic] { std::lock_guard<std::recursive_mutex> lk2(self->m_mtx); self->storePull(topic); });
-                        fprintf(stderr, "WHISPERBOX store pull %s failed: %s\n", topic.c_str(), r.success ? v.dump().substr(0, 160).c_str() : r.error.c_str());
+                        self->m_pullBusy = false;
+                        self->m_storePeerIx++;   // another Store peer, in 20 s
+                        for (const auto& t : topics) self->m_pullWant.insert(t);
+                        self->m_pullFailures++;
+                        // a full pull asked for while this one ran (reconnect, resync): go again at once
+                        const bool asked = self->m_lastPullRoundMs >= self->m_pullStartedMs;
+                        self->m_pullRetryAt = asked || self->m_pullFailures >= 6 ? 0 : nowMs() + 20000;
+                        if (!asked && self->m_pullFailures >= 6) { self->m_pullFailures = 0; self->m_pullWant.clear(); }   // the 15-min round tries again
+                        if (asked) self->onLoop([self] { std::lock_guard<std::recursive_mutex> lk2(self->m_mtx); self->kickPull(); });
+                        fprintf(stderr, "WHISPERBOX store pull failed: %s\n", r.success ? v.dump().substr(0, 160).c_str() : r.error.c_str());
                         return;
                     }
                     if (v.contains("messages") && v["messages"].is_array())
@@ -1325,22 +1353,19 @@ void WhisperboxCoreImpl::storePull(const std::string& topic) {
                         }
                     const std::string next = v.contains("paginationCursor") && v["paginationCursor"].is_string() ? v["paginationCursor"].get<std::string>() : std::string();
                     if (!next.empty() && n < 20) { (*page)(next, n + 1); return; }
-                    self->m_pullInFlight.erase(topic);
-                    fprintf(stderr, "WHISPERBOX store pull %s done (%d pages)\n", topic.c_str(), n + 1);
-                    self->m_lastPullMs[topic] = now;
+                    self->m_pullBusy = false;
+                    self->m_pullFailures = 0; self->m_pullRetryAt = 0;
+                    fprintf(stderr, "WHISPERBOX store pull done (%zu bucket(s), %d page(s))\n", topics.size(), n + 1);
+                    for (const auto& t : topics) self->m_lastPullMs[t] = now;
                     self->savePulls();
-                    if (self->m_pullAgain.erase(topic)) self->storePull(topic);
                     self->flushLog();
                     self->publishState();
+                    self->kickPull();   // buckets that wanted a pull meanwhile
                 });
             });
-        } catch (...) { m_pullInFlight.erase(topic); }
+        } catch (...) { m_pullBusy = false; for (const auto& t : topics) m_pullWant.insert(t); }
     };
     (*page)("", 0);
-}
-void WhisperboxCoreImpl::storePullAll() {
-    m_lastPullRoundMs = nowMs();
-    for (const auto& t : m_joinedTopics) storePull(t);
 }
 
 // The wire's schedule, every few seconds while the node is up (ADR 0024, "Schedules").
@@ -1404,6 +1429,7 @@ void WhisperboxCoreImpl::wireSchedule() {
     if (dirty) saveMyAnswers();
     // Store: every 15 min (and on start / reconnect)
     if (now - m_lastPullRoundMs >= envLL("WHISPERBOX_PULL_MS", 15 * minute)) storePullAll();
+    kickPull();   // a pull waiting for its retry
     drainSendQueue();
 }
 

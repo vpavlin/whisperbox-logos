@@ -165,7 +165,8 @@ private:
     std::map<std::string, long long> m_askAnsweredMs;    // formId -> last time we answered an ASK (creator side)
     std::map<std::string, long long> m_lastPullMs;           // bucket topic -> Store pulled up to (persisted)
     long long m_lastPullRoundMs = 0;
-    std::set<std::string> m_pullInFlight, m_pullAgain;
+    std::set<std::string> m_pullWant;                        // buckets waiting for a Store pull
+    bool m_pullBusy = false; long long m_pullRetryAt = 0, m_pullStartedMs = 0; int m_pullFailures = 0;
     std::vector<std::string> m_storePeers;                   // multiaddrs; from StoreNodes, else the preset fleet
     size_t m_storePeerIx = 0;
     bool m_storePeersAsked = false;
@@ -178,6 +179,7 @@ private:
     void wireSchedule();
     void storePull(const std::string& topic);
     void storePullAll();
+    void kickPull();
     void onAsk(const whisperbox::json& env);
     void loadPulls();
     void savePulls();
