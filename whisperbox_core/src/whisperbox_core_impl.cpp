@@ -1307,8 +1307,10 @@ void WhisperboxCoreImpl::kickPull() {
         }
     }
     const long long now = nowMs();
-    std::vector<std::string> topics(m_pullWant.begin(), m_pullWant.end());
-    m_pullWant.clear();
+    // at most 10 content topics per query: Delivery's Store refuses more (Rumor specs, batch_topics);
+    // the rest wait in m_pullWant for the next query
+    std::vector<std::string> topics;
+    for (auto it = m_pullWant.begin(); it != m_pullWant.end() && topics.size() < 10;) { topics.push_back(*it); it = m_pullWant.erase(it); }
     long long since = now - 6LL * 3600000LL;
     {   // from the least recently pulled of them (5 min overlap), at most 6 h back
         long long oldest = now;
