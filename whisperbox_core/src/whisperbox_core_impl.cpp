@@ -2740,6 +2740,79 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
     return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
 }
 
+// ── form files (ADR 0023) ─────────────────────────────────────────────────────────
+// {"whisperbox":"form","v":1,"formId","creator","title","link","events":[form.publish, form.update...]}
+// Only the creator's signed events: public anyway, no keys. Another app ships it and hands it to the
+// whisperbox.respond intent, so the form needn't be found on the network.
+std::string WhisperboxCoreImpl::exportForm(std::string formId) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    formId = lc(trim(formId));
+    OrderedJson state = foldedState();
+    if (!state["forms"].contains(formId)) { out["ok"] = false; out["error"] = "unknown form"; return out.dump(); }
+    const auto& f = state["forms"][formId];
+    const std::string creator = f["creator"].get<std::string>();
+    json events = json::array();
+    for (const auto& e : m_log) {
+        const std::string t = e.value("type", "");
+        if (t == FORM_PUBLISH && e.value("id", "") == "form:" + formId && e.contains("payload") && lc(e["payload"].value("creator", "")) == creator)
+            events.insert(events.begin(), e);
+        else if (t == whisperbox::FORM_UPDATE && e.contains("payload") && lc(e["payload"].value("formId", "")) == formId && lc(e["payload"].value("author", "")) == creator)
+            events.push_back(e);
+    }
+    if (events.empty() || events[0].value("type", "") != FORM_PUBLISH) { out["ok"] = false; out["error"] = "this device doesn't hold the form's signed definition yet"; return out.dump(); }
+    json file = {{"whisperbox", "form"}, {"v", 1}, {"formId", formId}, {"creator", creator}, {"title", f.value("title", "")},
+                 {"link", "whisperbox://form?id=" + formId + "&by=" + creator}, {"events", events}};
+    const std::string text = file.dump(2);
+    // saved where people look for downloads; the text is returned too (copy / embed)
+    std::string dir = realHome().empty() ? m_dataDir : realHome() + "/Downloads";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) dir = m_dataDir;
+    const std::string path = dir + "/whisperbox-" + formId + ".json";   // ids start with "form-"
+    bool saved = false;
+    { std::ofstream o(path, std::ios::trunc); if (o) { o << text; saved = (bool)o; } }
+    out["ok"] = true; out["formId"] = formId; out["file"] = text;
+    out["path"] = saved ? json(path) : json(nullptr);
+    return out.dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("failed: ") + ex.what()}}).dump();
+}
+
+std::string WhisperboxCoreImpl::importFormFile(std::string fileJson) try {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json out;
+    json file;
+    try { file = parseUntrusted(trim(fileJson), kMaxLocalJson); } catch (...) { out["ok"] = false; out["error"] = "that isn't a WhisperBox form file"; return out.dump(); }
+    if (!file.is_object() || file.value("whisperbox", "") != "form" || !file.contains("events") || !file["events"].is_array()
+        || file["events"].empty() || file["events"].size() > 64) { out["ok"] = false; out["error"] = "that isn't a WhisperBox form file"; return out.dump(); }
+    if (!file.contains("v") || !file["v"].is_number_integer() || file["v"].get<long long>() != 1) { out["ok"] = false; out["error"] = "this form file is from a newer WhisperBox - update it"; return out.dump(); }
+    // The publish decides the form and its creator; everything else must be that creator's update of it.
+    const json& pub = file["events"][0];
+    if (!whisperbox::wellFormedEvent(pub) || pub.value("type", "") != FORM_PUBLISH || !whisperbox::verifyEventJson(pub)) { out["ok"] = false; out["error"] = "the form in this file isn't signed by its creator"; return out.dump(); }
+    const std::string formId = lc(pub["payload"].value("id", ""));
+    const std::string creator = lc(pub["payload"].value("creator", ""));
+    if (!plausibleFormId(formId) || !plausibleAddress(creator) || pub.value("id", "") != "form:" + formId) { out["ok"] = false; out["error"] = "the form in this file is malformed"; return out.dump(); }
+    for (size_t i = 1; i < file["events"].size(); i++) {
+        const json& e = file["events"][i];
+        if (!whisperbox::wellFormedEvent(e) || e.value("type", "") != whisperbox::FORM_UPDATE || lc(e["payload"].value("formId", "")) != formId
+            || lc(e["payload"].value("author", "")) != creator || !whisperbox::verifyEventJson(e)) { out["ok"] = false; out["error"] = "this file carries something other than its creator's form - refusing it"; return out.dump(); }
+    }
+    // pin + watch first (refuses a file whose creator differs from a link opened before)
+    json r = json::parse(importForm("whisperbox://form?id=" + formId + "&by=" + creator));
+    if (!r.value("ok", false)) return r.dump();
+    // then every event through the network's admission path (shape, budget, signature, caps)
+    for (const auto& e : file["events"]) ingestEnvelopeText(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", e}}).dump()), false, 0);
+    flushLog();
+    OrderedJson state = foldedState();
+    const bool have = state["forms"].contains(formId) && state["forms"][formId].value("creator", "") == creator;
+    publishState();
+    out["ok"] = true; out["formId"] = formId; out["creator"] = creator; out["pending"] = !have;
+    return out.dump();
+} catch (const std::exception& ex) {
+    return json({{"ok", false}, {"error", std::string("bad request: ") + ex.what()}}).dump();
+}
+
 std::string WhisperboxCoreImpl::exportCsv(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json out;

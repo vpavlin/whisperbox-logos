@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 desktop core + studio + respond (2026-11-12) - form files, feedback from other apps (ADR 0023)
+
+- **Export** (studio, your forms): saves `whisperbox-form-<id>.json` to Downloads - the creator-signed
+  form, no keys.
+- **Other Basecamp apps** ship that file and call
+  `logos.request("whisperbox.respond", {form: fileText}, cb)`: WhisperBox checks the signature, shows
+  the form, sends the answer, and replies `submitted: true` when an answer was sent, `false` when the
+  person left. Links work as before; the reply now waits for the answer instead of coming on open.
+  Basecamp offers to install WhisperBox when an app asks and it isn't there.
+- Core `exportForm` / `importFormFile` (+ the JS client for Android): a file is checked event by event
+  like the network's; a tampered file or one carrying anything but the creator's form is refused.
+- `examples/feedback-demo`: a minimal app with a Send feedback button.
+
 ## 0.7.0 desktop core + studio + respond (2026-11-11) - several answers per person (ADR 0022)
 
 - **Protocol:** a form can take several answers from one person: `maxPerRespondent` = N, or 0 for no

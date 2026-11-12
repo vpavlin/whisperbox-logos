@@ -451,6 +451,16 @@ Item {
             });
         });
     }
+    // ADR 0023: the form as a file another Basecamp app can ship and open with the whisperbox.respond intent
+    function exportFormFile() {
+        callVia("exportForm", [root.selectedId], function (raw) {
+            var r = parse(raw);
+            if (!r || !r.ok) { toast(r && r.error ? r.error : "Export failed"); return; }
+            toast(r.path ? "Form file saved: " + r.path + " - ship it in your app and pass it to the whisperbox.respond intent"
+                         : "Couldn't save the file - its contents are in the clipboard");
+            if (!r.path) root.copyText(r.file, "Form file");
+        });
+    }
     function openCsv() {
         callVia("exportCsv", [root.selectedId], function (raw) {
             var r = parse(raw);
@@ -1094,6 +1104,7 @@ Item {
                         WbButton { visible: !!(root.sel && root.sel.mine) && !root.previewDef; label: "Edit"; onClicked: root.openEditForm() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Duplicate"; onClicked: root.duplicateSelected() }
                         WbButton { visible: !!root.sel && !root.previewDef; label: "Share"; onClicked: root.openShare() }
+                        WbButton { visible: !!(root.sel && (root.sel.mine || root.sel.coOwner)) && !root.previewDef; label: "Export"; onClicked: root.exportFormFile() }
                         // drops the form and its creator pin from this device, so the right link can be
                         // opened (open-review 2026-11-02, FR-13); asks once more
                         WbButton { visible: !!root.sel && !root.previewDef && !root.sel.mine && !root.sel.coOwner

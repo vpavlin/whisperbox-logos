@@ -486,6 +486,7 @@ exposes the same names.
 | `closeForm` / `reopenForm` | formId | creator only; re-open refused at the cap or after `expiresAt` |
 | `submitResponse` | formId, answers JSON | validates, seals, handles edits, anonymous identity, reply key |
 | `confirmResponse` | formId, respondent address | creator / co-owner |
+| `confirmAnswer` | formId, confirmationId | creator / co-owner; one answer's receipt (several answers per person, ADR 0022) |
 | `confirmAll` | formId | one batch receipt for every unreceipted answer |
 | `setAutoReceipts` | formId, "1"/"0" | local setting; turning it on needs a form you make or co-own |
 | `getDecryptedResponses` / `exportCsv` | formId | creator / co-owner; CSV has a `score` column on quizzes. Cells are answers from untrusted respondents: one starting with `=`, `+`, `-`, `@`, tab or CR that isn't a plain number gets a leading `'`, so a spreadsheet shows it as text instead of running it as a formula |
@@ -493,6 +494,8 @@ exposes the same names.
 | `replyToResponse` | formId, confirmationId, message | creator / co-owner |
 | `sendScores` | formId | one score reply per answer without any reply yet |
 | `joinForm` / `importForm` | link or id / def | watch a form |
+| `exportForm` | formId | ADR 0023: `{file, path}` - the form file (creator-signed publish + updates), also saved to ~/Downloads |
+| `importFormFile` | file text | ADR 0023: every event checked as from the network; the creator is pinned; refuses a file carrying anything else |
 | `hideForm` / `unhideForm` / `deleteLocalForm` | formId | local only. `deleteLocalForm` drops the watch, the creator pin and hidden; your own answers and receipt ids stay |
 | `saveDraft` / `deleteDraft` / `publishDraft` | draft JSON / id / id | local drafts, optional `publishAt`; at most 200 drafts and 16 MiB with answer drafts; a deleted draft is kept in the trash (the last 20) |
 | `saveAnswerDraft` | formId, answers JSON | local unsent answers |
@@ -500,6 +503,12 @@ exposes the same names.
 | `shareUri` / `shareQr` | formId | link / QR matrix |
 | `importIdentity` / `setDeviceId` | priv hex / id | |
 | `resync` | | SYNC_REQ + catch-up round |
+
+### 12.1 Intent `whisperbox.respond` (respond module, ADR 0023)
+
+Params: `link` (a share link) or `form` (a form file's text). Reply: `{ok:true, data:{formId,
+submitted}}` when the person sends an answer (`true`) or leaves the form (`false`); `ok:false` with the
+reason when the link or file can't be opened.
 
 ## 13. Local state
 

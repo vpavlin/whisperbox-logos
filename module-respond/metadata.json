@@ -1,10 +1,10 @@
 {
   "name": "whisperbox_respond",
   "display_name": "WhisperBox - Answer a Form",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "ui_qml",
   "category": "social",
-  "description": "Answer one WhisperBox form, opened from a link or by another app (intent whisperbox.respond). Answers are sealed end to end: only the form's creators can read them. Uses the whisperbox_core engine; making and managing forms is the WhisperBox studio.",
+  "description": "Answer one WhisperBox form, opened from a link or by another app (intent whisperbox.respond, with a link or a form file the app ships; the reply says whether an answer was sent). Answers are sealed end to end: only the form's creators can read them. Uses the whisperbox_core engine; making and managing forms is the WhisperBox studio.",
   "view": "qml/Main.qml",
   "icon": "icon.png",
   "dependencies": [
@@ -17,10 +17,17 @@
         {
           "name": "link",
           "type": "string",
-          "required": true,
+          "required": false,
           "description": "The form's link: whisperbox://form?id=<form>&by=<creator>"
+        },
+        {
+          "name": "form",
+          "type": "string",
+          "required": false,
+          "description": "A form file exported from the WhisperBox studio (its JSON text): the form opens without being looked up on the network. Give link or form."
         }
-      ]
+      ],
+      "handoff": true
     }
   ],
   "nix": {

@@ -21,6 +21,8 @@ ColumnLayout {
     property bool preview: false        // the studio's preview of a draft: answers are never sent
     // host: act(method, args, okMsg, cb), callVia(method, args, cb), busy(method), toast(msg)
     property var host: null
+    // an answer was sealed and sent (the respond module tells the app that asked, ADR 0023)
+    signal sent(string formId)
     // the form takes several answers per person (ADR 0022)
     readonly property bool multi: !!(fr.form && fr.form.maxPerRespondent !== undefined && fr.form.maxPerRespondent !== 1)
 
@@ -147,6 +149,7 @@ ColumnLayout {
         var wasEditing = fr.editing;
         fr.host.act("submitResponse", [f.id, JSON.stringify(arr)], wasEditing ? "Your edited answer is sealed and sent" : "Response sealed and sent", function () {
             fr.answers = ({}); fr.showErrors = false; fr.editing = false;
+            fr.sent(f.id);
         });
     }
 

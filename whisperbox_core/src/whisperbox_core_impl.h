@@ -87,6 +87,10 @@ public:
     std::string shareQr(std::string formId);
     std::string importForm(std::string defJson);
     std::string exportCsv(std::string formId);
+    // A form as a file (ADR 0023): the creator-signed publish + updates, to ship inside another app
+    std::string exportForm(std::string formId);
+    // Open a form from such a file: every event is checked like one from the network, the creator pinned
+    std::string importFormFile(std::string fileJson);
     std::string resync();
 
 protected:

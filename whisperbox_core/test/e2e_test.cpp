@@ -724,6 +724,32 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return responsesOf(*A, uf).size() == 4; }, 3000), "creator has all 4");
         }
 
+        // Form files (ADR 0023): export the creator-signed definition; a device that never saw the form
+        // opens it from the file, offline; tampered or padded files are refused.
+        {
+            std::string ff = A->call(A->core->createForm(json({{"title", "Shipped in an app"}, {"questions", qs}, {"maxPerRespondent", 0}}).dump())).value("formId", "");
+            json ex = A->call(A->core->exportForm(ff));
+            CHECK(ex.value("ok", false) && !ex.value("file", "").empty(), "the creator exports the form as a file");
+            CHECK(ex["path"].is_string() && std::filesystem::exists(ex["path"].get<std::string>()), "and it is saved as a file");
+            json fj = json::parse(ex.value("file", "{}"));
+            CHECK(fj.value("whisperbox", "") == "form" && fj["events"].size() >= 1 && fj["events"][0].value("type", "") == "form.publish", "file = the signed publish (+ updates)");
+            auto P = mkPeer("P"); P->node->online = false;
+            json tam = fj; tam["events"][0]["payload"]["title"] = "Send your seed phrase here";
+            CHECK(!P->call(P->core->importFormFile(tam.dump())).value("ok", true), "a tampered file is refused (signature)");
+            json pad = fj; pad["events"].push_back(fj["events"][0]); pad["events"][1]["type"] = "response.submit";
+            CHECK(!P->call(P->core->importFormFile(pad.dump())).value("ok", true), "a file carrying anything but the creator's form is refused");
+            CHECK(!P->call(P->core->importFormFile("{\"hello\":1}")).value("ok", true), "not a form file: refused");
+            json im = P->call(P->core->importFormFile(ex.value("file", "")));
+            CHECK(im.value("ok", false) && !im.value("pending", true) && im.value("formId", "") == ff, "offline P opens the form from the file at once");
+            CHECK(formOf(*P, ff).value("pinnedCreator", "") == addrA && formOf(*P, ff).value("canRespond", false), "creator pinned from the file: P may answer");
+            CHECK(P->call(P->core->submitResponse(ff, json::array({{{"questionId", "q1"}, {"value", true}}}).dump())).value("ok", false), "P answers while offline");
+            P->node->online = true;
+            P->core->resync();
+            CHECK(waitUntil([&] { return responsesOf(*A, ff).size() == 1; }, 5000), "the answer reaches the creator once P is online");
+            CHECK(P->call(P->core->importFormFile(ex.value("file", ""))).value("ok", false), "opening the same file again is harmless");
+            P->stop();
+        }
+
         // Anonymous forms: per-form respondent identity; device tag per form on the wire.
         {
             CHECK(!A->call(A->core->createForm(json({{"title", "x"}, {"anonymous", true}, {"whitelist", {{"type", "addresses"}, {"value", addrB}}}}).dump())).value("ok", true),

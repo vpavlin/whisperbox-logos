@@ -18,7 +18,8 @@ Item {
     property var st: ({})
     property string selectedId: ""
     property string toastMsg: ""
-    property string pendingIntent: ""   // an intent's request id, answered once the form is open
+    property string pendingIntent: ""   // an intent's request id: answered when the person sends or leaves (ADR 0023)
+    property string pendingFormId: ""
 
     readonly property var forms: (st.state && st.state.forms) ? st.state.forms : ({})
     readonly property string myAddress: (st.identity && st.identity.address) ? st.identity.address : ""
@@ -51,6 +52,7 @@ Item {
     }
     // leave the open form: Back keeps half-filled answers, Cancel forgets them
     function closeForm(discard) {
+        root.finishIntent(false);
         if (discard) respond.discardDraft(); else { respond.flushDraft(); respond.reset(); }
         root.detail = ({});
         root.selectedId = "";
@@ -129,6 +131,40 @@ Item {
         });
     }
 
+    // ── the app that asked (intent whisperbox.respond) learns the outcome: sent, or left without sending ──
+    function finishIntent(submitted) {
+        if (!root.pendingIntent) return;
+        var rid = root.pendingIntent; root.pendingIntent = "";
+        try { logos.respond(rid, true, ({ formId: root.pendingFormId, submitted: !!submitted }), ""); } catch (e) {}
+    }
+    function startIntent(requestId, formId) {
+        if (root.pendingIntent && root.pendingIntent !== requestId) root.finishIntent(false);   // a new ask replaces the old
+        if (requestId) { root.pendingIntent = requestId; root.pendingFormId = formId; }
+    }
+    function showForm(r) {
+        var id = String(r.formId || "").toLowerCase();
+        respond.flushDraft();
+        if (root.selectedId !== id) { root.detail = ({}); respond.reset(); }
+        root.selectedId = id;
+        linkField.text = "";
+        if (r.pending) toast("Form found - waiting for it to arrive from its creator");
+        Qt.callLater(root.loadDetail);
+        return id;
+    }
+    // a form file another app shipped (ADR 0023): the core checks every signature before using it
+    function openFile(text, requestId) {
+        callVia("importFormFile", [String(text || "")], function (raw) {
+            var r = parse(raw);
+            if (!r || !r.ok) {
+                var err = r && r.error ? r.error : "couldn't open the form file";
+                toast(err);
+                if (requestId) logos.respond(requestId, false, ({}), err);
+                return;
+            }
+            refresh();
+            root.startIntent(requestId, showForm(r));
+        });
+    }
     // ── opening a form: a link (intent or pasted) -> the core adds it; the definition may still be syncing ──
     function openLink(link, requestId) {
         var t = String(link || "").trim();
@@ -138,15 +174,16 @@ Item {
             if (requestId) logos.respond(requestId, false, ({}), "not a whisperbox:// link");
             return;
         }
-        act("importForm", [t], "", function (r) {
-            var id = String(r.formId || "").toLowerCase();
-            respond.flushDraft();
-            if (root.selectedId !== id) { root.detail = ({}); respond.reset(); }
-            root.selectedId = id;
-            linkField.text = "";
-            if (r.pending) toast("Form found - waiting for it to arrive from its creator");
-            Qt.callLater(root.loadDetail);
-            if (requestId) logos.respond(requestId, true, ({ formId: id }), "");
+        callVia("importForm", [t], function (raw) {
+            var r = parse(raw);
+            if (!r || !r.ok) {
+                var err = r && r.error ? r.error : (raw === "" ? "WhisperBox didn't answer - is whisperbox_core installed?" : "couldn't open that link");
+                toast(err);
+                if (requestId) logos.respond(requestId, false, ({}), err);
+                return;
+            }
+            refresh();
+            root.startIntent(requestId, showForm(r));
         });
     }
     Connections {
@@ -155,7 +192,8 @@ Item {
         // Basecamp intents (stock 0.3.2): another app asks us to open a form
         function onIntentRequested(requestId, intent, params, requesterName) {
             if (intent !== "whisperbox.respond") return;
-            root.openLink(params && params.link ? String(params.link) : "", requestId);
+            if (params && params.form) root.openFile(typeof params.form === "string" ? params.form : JSON.stringify(params.form), requestId);
+            else root.openLink(params && params.link ? String(params.link) : "", requestId);
         }
         function onModuleEventReceived(module, event, data) {
             if (module === "whisperbox_core" && event === "stateChanged") {
@@ -253,6 +291,7 @@ Item {
                 form: root.sel
                 myAddress: root.myAddress
                 host: root
+                onSent: function (formId) { root.finishIntent(true); }
             }
             WbButton {
                 visible: !!(root.sel && root.sel.canRespond)

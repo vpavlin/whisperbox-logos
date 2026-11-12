@@ -1,0 +1,30 @@
+{
+  "name": "wb_feedback_demo",
+  "display_name": "Feedback demo (WhisperBox)",
+  "version": "0.1.1",
+  "type": "ui_qml",
+  "category": "social",
+  "description": "Example: a Basecamp app with a Send feedback button. It ships a WhisperBox form file and asks Basecamp for the whisperbox.respond intent; WhisperBox shows the form, seals and sends the answer, and tells the app whether feedback was sent. Copy it into your own app (ADR 0023).",
+  "view": "qml/Main.qml",
+  "icon": "icon.png",
+  "dependencies": [],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  },
+  "uses": [
+    {
+      "intent": "whisperbox.respond",
+      "cardinality": "single"
+    }
+  ]
+}
