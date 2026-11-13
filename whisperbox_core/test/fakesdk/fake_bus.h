@@ -24,6 +24,7 @@ struct FakeNode {
     // ADR 0021: loamInstalled=false = no loam_core in this Basecamp (its status call answers empty);
     // the core then goes direct and these raw delivery_module event handlers are its receive path
     bool loamInstalled = true;
+    std::string loamStatus;   // non-empty: loam_core's status() answers this (e.g. "Transport error: ...")
     std::vector<std::pair<std::string, logos::RawFn>> raw;
     void fireRaw(const std::string& ev, const nlohmann::json& args) { for (auto& h : raw) if (h.first == ev) h.second(args); }
     FakeLoamCore::RxFn onRx;
@@ -103,6 +104,7 @@ inline void FakeLoamCore::statusAsync(StrCb cb) {
     long sid = node->serial;
     FakeBus::later([sid, cb] { FakeNode* n = FakeBus::get().alive(sid);
         if (n && !n->loamInstalled) { cb(""); return; }   // an absent optional module answers empty
+        if (n && !n->loamStatus.empty()) { cb(n->loamStatus); return; }
         cb(n && n->up ? "Connected" : "Connecting..."); });
 }
 // ── delivery_module (direct) ──

@@ -213,6 +213,20 @@ int main(int argc, char** argv) {
         CHECK(transportOf(*L) == "loam_core", "with loam_core installed the core uses it, as before (" + transportOf(*L) + ")");
         CHECK(transportOf(*D) == "delivery_module", "without loam_core the core goes to delivery_module directly (" + transportOf(*D) + ")");
         CHECK(D->node->starts == 1, "the direct peer created and started its node");
+        // review 2026-11-13: an installed loam_core with a sick node ("Transport error: ...") is still
+        // loam_core - going direct would only put a second transport on the same node
+        {
+            auto E = std::make_unique<Peer>(); E->name = "adr21-sick-loam"; E->dir = g_base + "/adr21-sick-loam";
+            setenv("WHISPERBOX_CORE_DATA", E->dir.c_str(), 1);
+            E->node = std::make_unique<FakeNode>(); E->node->name = E->name; E->node->loamStatus = "Transport error: createNode failed";
+            E->core = std::make_unique<WhisperboxCoreImpl>();
+            E->core->modules().loam_core.node = E->node.get();
+            E->core->modules().delivery_module.node = E->node.get();
+            FakeBus::get().nodes.push_back(E->node.get());
+            E->core->fakeStart();
+            CHECK(waitUntil([&] { return !transportOf(*E).empty() && transportOf(*E) != "probing"; }, 15000) && transportOf(*E) == "loam_core",
+                  "a loam_core answering \"Transport error: ...\" is installed: the core stays on it (" + transportOf(*E) + ")");
+        }
         json q = {{"title", "Direct"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Hi?"}, {"required", true}}})}};
         // direct -> loam
         std::string f1 = D->call(D->core->createForm(q.dump())).value("formId", "");
@@ -1645,6 +1659,9 @@ int main(int argc, char** argv) {
                 json big = small; big.erase("sig"); big.erase("pub");
                 big["hlc"]["ctr"] = 1; big["payload"]["form"]["title"] = std::string(100000, 'L');
                 whisperbox::signEventJson(big, z);
+                // earlier hostile sections can drain B's live-frame budget; this check is about size
+                // accounting, so start from a full bucket (refillMs 0 = full on the next take)
+                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); B->core->m_sigRefillMs = 0; }
                 toPeer(*B, small); pump(100); toPeer(*B, big); pump(400);
                 size_t sum = 0; bool hasBig = false;
                 { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); for (const auto& e : B->core->m_log) { sum += e.dump().size(); if (e.dump().size() > 100000) hasBig = true; } }

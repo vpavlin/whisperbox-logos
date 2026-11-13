@@ -841,19 +841,25 @@ void WhisperboxCoreImpl::probeTransport() {
                 std::lock_guard<std::recursive_mutex> lk(self->m_mtx);
                 if (self->m_via != Via::Unknown) return;
                 self->m_probing = false;
-                if (!st.empty() && st.find("error") == std::string::npos) {
-                    self->m_via = Via::Loam;
-                    fprintf(stderr, "WHISPERBOX transport: loam_core (%s)\n", st.c_str());
-                    return;
-                }
-                // An installed loam_core can refuse the first calls while the host wires us up ("auth
-                // token not recognized", a timeout): that is not absence, so it doesn't count as a try.
                 std::string low = st;
                 for (auto& c : low) c = (char)std::tolower((unsigned char)c);
-                if (low.find("token") != std::string::npos || low.find("timeout") != std::string::npos || low.find("timed out") != std::string::npos
-                    || low.find("not ready") != std::string::npos) {
+                auto has = [&low](const char* s) { return low.find(s) != std::string::npos; };
+                // An installed loam_core can refuse the first calls while the host wires us up ("auth
+                // token not recognized", a timeout): that is not absence, so it doesn't count as a try.
+                if (has("token") || has("timeout") || has("timed out") || has("not ready")) {
                     if (self->m_probeTries > 0) self->m_probeTries--;
                     fprintf(stderr, "WHISPERBOX transport: loam_core not answering yet (%s)\n", st.c_str());
+                    return;
+                }
+                // An absent optional module answers nothing or empty (seen live on logosctl 0.3.1). Any
+                // other answer is loam_core's own status - including "Transport error: ..." /
+                // "Transport stalled: ...", which mean it is installed with a sick node (going direct
+                // then would only add a second transport on the same node; review 2026-11-13).
+                const bool absent = st.empty() || has("not found") || has("unknown module") || has("not loaded")
+                    || has("not installed") || has("no such module") || has("not reachable");
+                if (!absent) {
+                    self->m_via = Via::Loam;
+                    fprintf(stderr, "WHISPERBOX transport: loam_core (%s)\n", st.c_str());
                 }
             });
         });
