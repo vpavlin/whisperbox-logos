@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2 desktop core + studio + respond, Android vc26 (2026-11-13) - audit round 4
+
+- Accepting a co-owner invitation never makes the inviter "the creator" of a form; invitations from more
+  than one sender for the same form aren't shown.
+- An answer's time is fixed by the first evidence of it: a live replay can't re-date what a Store dated.
+- If the record of my own answers is lost, my answers still survive the clean-up, however many strangers'
+  answers an older version stored.
+- Four audit rounds of wire v2 are done; remaining limits are listed in ADR 0024 (amendment 4).
+
 ## 1.1.1 desktop core + studio + respond, Android vc25 (2026-11-13) - audit round 3
 
 - Co-owner invitations count only when the form's creator sent them (a fake one is never shown);

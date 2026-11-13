@@ -1336,9 +1336,10 @@ bool WhisperboxCoreImpl::wanted(const json& e) {
     if (!(baseWants(fid) || m_myForms.count(fid) || m_coAccepted.count(fid))) return false;
     // Who may write what (audit R2-2: any signed event for a form I keep used to be kept, junk included).
     if (t == FORM_PUBLISH) {
-        // the link's creator always; anyone else's copy only while a few are held (contested ids and
-        // "this link names someone else" stay visible; junk publishes stay bounded)
+        // the link's creator always; for a form I accepted an invitation to (no link), the inviter's
+        // copy too (R4-1: fakes can't crowd it out); anyone else's only while a few are held
         if (auto pin = m_pinned.find(fid); pin != m_pinned.end() && !pin->second.empty() && author == lc(pin->second)) return true;
+        if (m_coAccepted.count(fid)) { bool conflict = false; if (author == inviterOf(fid, &conflict) && !conflict) return true; }
         return m_publishAlts[fid] < 4;
     }
     if (creator.empty()) return false;   // no creator known yet: only its publishes and invitations (audit R3-5)
@@ -1353,6 +1354,19 @@ bool WhisperboxCoreImpl::grantFromCreator(const std::string& fid, const std::str
     if (auto pin = m_pinned.find(fid); pin != m_pinned.end() && !pin->second.empty()) creator = lc(pin->second);
     else if (auto c = m_formCreator.find(fid); c != m_formCreator.end()) creator = c->second;
     return creator.empty() || creator == lc(grantAuthor);
+}
+// The author of the grant(s) naming me for fid, in log order; *conflict when grants by different
+// authors name me (then nobody's invitation is trusted). C++ and JS take the same one (R4-1).
+std::string WhisperboxCoreImpl::inviterOf(const std::string& fid, bool* conflict) {
+    std::string who; if (conflict) *conflict = false;
+    const std::string me = m_signId.valid ? lc(m_signId.address) : "";
+    for (const auto& e : m_log) {
+        if (!e.is_object() || e.value("type", "") != whisperbox::FORM_COOWNER || formIdOf(e) != fid || !e.contains("payload")) continue;
+        if (lc(e["payload"].value("owner", "")) != me) continue;
+        const std::string a = lc(e["payload"].value("author", ""));
+        if (who.empty()) who = a; else if (a != who && conflict) *conflict = true;
+    }
+    return who;
 }
 bool WhisperboxCoreImpl::coOwnerGranted(const std::string& fid, const std::string& who) {
     for (const auto& e : m_log) {
@@ -1373,6 +1387,8 @@ json WhisperboxCoreImpl::coInvites() {
         const std::string fid = lc(p.value("formId", ""));
         if (lc(p.value("owner", "")) != me || m_coAccepted.count(fid) || m_coDeclined.count(fid)) continue;
         if (!grantFromCreator(fid, p.value("author", "")) || !seen.insert(fid).second) continue;   // R3-1
+        bool conflict = false; (void)inviterOf(fid, &conflict);
+        if (conflict) continue;   // grants from more than one author: no invitation shown (R4-1)
         out.push_back({{"formId", fid}, {"from", lc(p.value("author", ""))}, {"at", e["hlc"].value("wall", 0LL)}});
     }
     return out;
@@ -1408,14 +1424,12 @@ std::string WhisperboxCoreImpl::acceptCoOwner(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     // an invitation (or one I declined): a grant naming me, from the form's creator (R3-1/R3-7)
-    std::string from;
-    const std::string me = lc(m_signId.address);
-    for (const auto& e : m_log)
-        if (e.is_object() && e.value("type", "") == whisperbox::FORM_COOWNER && formIdOf(e) == formId && e.contains("payload")
-            && lc(e["payload"].value("owner", "")) == me && grantFromCreator(formId, e["payload"].value("author", ""))) from = lc(e["payload"].value("author", ""));
-    if (from.empty()) return json({{"ok", false}, {"error", "no co-owner invitation for this form"}}).dump();
-    // the creator I trust for this form is the one who invited me (no link named one): R3-14
-    if (auto pin = m_pinned.find(formId); pin == m_pinned.end() || pin->second.empty()) { m_pinned[formId] = from; savePins(); m_pinsGen++; }
+    bool conflict = false;
+    const std::string from = inviterOf(formId, &conflict);
+    if (from.empty() || !grantFromCreator(formId, from)) return json({{"ok", false}, {"error", "no co-owner invitation for this form"}}).dump();
+    if (conflict) return json({{"ok", false}, {"error", "invitations to this form come from more than one sender - open the creator's link instead"}}).dump();
+    // No pin (R4-1: accepting must never make the inviter "the creator"): the fold decides who created
+    // the form, and the grant only counts if its author is that creator. The inviter's publish is kept.
     m_coAccepted.insert(formId); m_coDeclined.erase(formId);
     saveCoOwnerPrefs();
     m_interestGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear();
@@ -1464,7 +1478,9 @@ void WhisperboxCoreImpl::pruneUnwanted() {
         // copied, not moved: wanted() may look at the whole log (pending invitations) while we go.
         // Unplaceable answers while my record is behind: at most 2,000, not the whole bucket (R3-9).
         bool keep = wanted(e);
-        if (!keep && isResp && ownUnsure && unsureKept < 2000) { keep = true; unsureKept++; }
+        // an answer I made was never received from the network, so it has no first-seen time; a
+        // stranger's always has one (R4-5: 2,000 strangers used to crowd mine out)
+        if (!keep && isResp && ownUnsure && !m_firstSeen.count(e.value("id", ""))) { keep = true; unsureKept++; }
         if (keep) { if (isResp && !m_wantedForm.empty()) m_respPerForm[m_wantedForm]++; kept.push_back(e); }
         else dropped++;
     }
@@ -2027,9 +2043,9 @@ bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
         if (m_storeWindowMs > 0 && netMs < m_storeWindowMs) netMs = m_storeWindowMs;
         if (it != m_netTimes.end() && it->second >= netMs) return false;
     } else {
-        // live: relay only carries fresh messages; the FIRST live copy received is when the network had
-        // it - a later replay never moves it, earlier or later (audit R3-3)
-        if (m_netLive.count(id) && it != m_netTimes.end()) return false;
+        // live: relay only carries fresh messages. The first evidence is final: a live copy never
+        // re-dates an answer a Store already dated, nor an earlier live one (audit R3-3, R4-3)
+        if (it != m_netTimes.end()) return false;
         m_netLive.insert(id);
     }
     m_netTimes[id] = netMs;

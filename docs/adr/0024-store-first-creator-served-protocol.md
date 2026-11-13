@@ -364,3 +364,29 @@ device can't know an answer was confirmed on another device (it confirms again; 
 for a hub) (R3-8); the phone's 2,000 key-missing allowance lasts until the next prune (R3-12); the phone
 can't force a full Store window (R2-11/R3-13, needs loam-transport); trial decryption per key (R2-9);
 with one Store peer configured there is no second opinion.
+
+## Amendment 2026-11-13 (4): audit round 4, and where we stop
+
+The fourth round's verdict: what remains sits at three trust seams (invitation -> creator, Store time
+evidence, bounded DoS); fix R4-1, R4-3, R4-5, document the rest, and stop iterating. Done:
+
+- **Accepting an invitation pins no one** (R4-1). The fold decides who created a form; a grant counts
+  only if its author is that creator. For an accepted form without a link, the inviter's publish is
+  always kept (fakes can't crowd it out). Grants from more than one author for the same form are an
+  ambiguous invitation: not shown, not acceptable. C++ and JS take the same grant (the first).
+- **The first evidence of an answer's time is final** (R4-3): a live copy never re-dates an answer a
+  Store dated, nor an earlier live time; Stores may only raise a Store-sourced time (two Stores, the
+  latest wins).
+- **Own answers while their record is lost** (R4-5): the prune keeps the unplaceable answers this node
+  never received from the network (every received answer has a first-seen time; one made here doesn't),
+  so strangers' answers can't crowd the user's out.
+
+Known limits, accepted for now:
+- One Store peer configured (or the phone, whose host asks one Store per topic): a malicious Store can
+  choose an answer's time inside the asked window (at most 6 h). Fixing it needs a second Store on the
+  phone (loam-transport) or RLN-attested time.
+- A Store reply may be up to ~200 MB before it is refused, and a slow Store can hold a pull for
+  15 s x 20 pages; work per pull is bounded (20,000 events looked at, 5,000 kept).
+- Other round-4 lows (co-owner receipt in an earlier Store page than its grant, the 20-invitation cap
+  counting form ids, 4 fake publishes for a bare id, re-accepting a declined invitation in the UI,
+  coowners.json from 1.1.0 not re-validated) are tracked in the round-4 report.
