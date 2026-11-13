@@ -137,6 +137,7 @@ static bool waitUntil(std::function<bool()> pred, int ms) {
 }
 // the peer's fold: every form it knows from the topic, shown or not
 static json foldOf(Peer& p) { std::lock_guard<std::recursive_mutex> lk(p.core->m_mtx); return json::parse(p.core->foldedState().dump()); }
+static long diag(Peer& p, const char* k) { return p.snap()["diagnostics"].value(k, 0L); }
 // Wire v2 (ADR 0024): a node only receives forms it opened. The older scenarios below were written
 // when every node got every form; waiting for a form on a peer now opens it there first (as a user
 // opening the link would: joinForm watches without pinning, so the pin/contest tests keep meaning).
@@ -293,6 +294,31 @@ int main(int argc, char** argv) {
         {
             const long t0 = txOf(*Rs) + txOf(*By); pump(3000);
             CHECK(txOf(*Rs) + txOf(*By) == t0, "idle nodes send nothing (no catch-up rounds)");
+        }
+        // Václav 2026-11-13: "we should not store forms and answers we do not care about". Two forms in
+        // ONE bucket (the creator's and the bystander's); the respondent opens and answers only one.
+        {
+            std::vector<std::string> ids;
+            for (int i = 0; ids.size() < 2 && i < 100000; i++) {
+                char b[16]; std::snprintf(b, sizeof b, "%08x", 0xb0c0 + i);
+                const std::string id = std::string("form-") + b;
+                if (ids.empty() || WhisperboxCoreImpl::wireTopicFor(id) == WhisperboxCoreImpl::wireTopicFor(ids[0])) ids.push_back(id);
+            }
+            const std::string fa = ids[0], fb = ids[1];
+            json qa = q, qb = q; qa["id"] = fa; qb["id"] = fb;
+            CHECK(Cr->call(Cr->core->createForm(qa.dump())).value("ok", false) && By->call(By->core->createForm(qb.dump())).value("ok", false), "two forms, one bucket");
+            Rs->call(Rs->core->importForm(Cr->call(Cr->core->shareUri(fa)).value("uri", "")));
+            CHECK(waitUntil([&] { return !foldOf(*Rs)["forms"].empty() && foldOf(*Rs)["forms"].contains(fa); }, 8000), "the respondent gets the form it opened");
+            CHECK(Rs->call(Rs->core->submitResponse(fa, json::array({{{"questionId", "q1"}, {"value", "keep me"}}}).dump())).value("ok", false), "...and answers it");
+            CHECK(waitUntil([&] { return responsesOf(*Cr, fa).size() == 1; }, 8000), "the creator keeps the answer it can open");
+            pump(1500);
+            auto holds = [](Peer& p, const std::string& fid) { return foldOf(p)["forms"].contains(fid); };
+            auto answersIn = [](Peer& p) { size_t n = 0; for (auto& ev : readLog(p.dir)) if (ev.value("type", "") == "response.submit") n++; return n; };
+            CHECK(!holds(*Rs, fb) && !holds(*Cr, fb) && !holds(*By, fa), "nobody keeps the other form in its bucket");
+            CHECK(answersIn(*By) == 0, "the bystander creator doesn't keep an answer it can't open");
+            CHECK(answersIn(*Rs) == 1, "the respondent keeps only its own answer");
+            CHECK(diag(*By, "admDropUnwanted") > 0, "...the rest was dropped on arrival");
+            CHECK(Cr->call(Cr->core->confirmAll(fa)).value("ok", false) && waitUntil([&] { return formOf(*Rs, fa).value("myConfirmed", false); }, 8000), "the receipt reaches the respondent");
         }
         // the creator publishes; a respondent opens the link and gets the form from Store
         std::string f1 = Cr->call(Cr->core->createForm(q.dump())).value("formId", "");
@@ -539,7 +565,10 @@ int main(int argc, char** argv) {
     bool caught = waitUntil([&] { return hasForm(*D, fid) && hasForm(*D, wfid); }, 15000);
     CHECK(caught, "late node D catches up on the forms it opened (from Store, ADR 0024)");
     CHECK(t.elapsed() < 8000, "from Store at once, not on a schedule (" + std::to_string(t.elapsed()) + " ms)");
-    CHECK(waitUntil([&] { return D->snap()["state"].value("responseCount", 0) > 0; }, 5000), "D gets the sealed answers on those buckets from Store too");
+    // Václav 2026-11-13: D only opened the forms; the answers are sealed to their creator, so D keeps none
+    pump(1500);
+    CHECK(D->snap()["state"].value("responseCount", 0) == 0 && readLog(D->dir).dump().find("response.submit") == std::string::npos && diag(*D, "admDropUnwanted") > 0,
+          "D doesn't keep the answers on those buckets: they aren't its own and it can't open them");
     {
         long rb = D->snap()["diagnostics"].value("rbsrRx", 0L);
         long legacy = A->snap()["diagnostics"].value("legacyReseeds", 0L) + B->snap()["diagnostics"].value("legacyReseeds", 0L)
@@ -657,6 +686,7 @@ int main(int argc, char** argv) {
         for (auto it = events.rbegin(); it != events.rend(); ++it) if (it->value("id", "") != "form:" + wfid) bad.push_back(*it);   // reversed
         auto F = mkPeer("F"); F->node->online = false; F->stop();
         writeLog(F->dir, bad);
+        { std::ofstream w(F->dir + "/watched.json"); w << json::array({fid, wfid}).dump(); }   // F opened them (only opened forms are kept)
         F->start();
         json st = foldOf(*F);
         CHECK(!st["forms"].contains(wfid), "unsigned placeholder dropped on load");
@@ -1576,10 +1606,12 @@ int main(int argc, char** argv) {
                 json h = A->call(A->core->createForm(json({{"title", "replay"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
                 const std::string hid = h.value("formId", "");
                 const std::string ev = json({{"v", 1}, {"type", "EVENT"}, {"event", respEv(sealTo(formOf(*A, hid).value("publicKey", ""), R"({"formId":")" + hid + R"("})"))}}).dump();
-                long d0 = diag(*B, "rxDup"), b0 = diag(*B, "admDropBudget");
-                for (int i = 0; i < 1000; i++) B->node->onRx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(ev)), (now - i) * 1000000LL);
+                // at the creator: the one node that keeps this answer (Václav 2026-11-13)
+                long d0 = diag(*A, "rxDup"), b0 = diag(*A, "admDropBudget");
+                { std::lock_guard<std::recursive_mutex> lk(A->core->m_mtx); A->core->m_respRefillMs = 0; }
+                for (int i = 0; i < 1000; i++) A->node->onRx(kAnyWire, "net", FakeBus::b64(whisperbox::b64encode(ev)), (now - i) * 1000000LL);
                 pump(1500);
-                CHECK(diag(*B, "rxDup") > d0 && diag(*B, "admDropBudget") > b0, "a replayed answer counts against the budget (FR-6)");
+                CHECK(diag(*A, "rxDup") > d0 && diag(*A, "admDropBudget") > b0, "a replayed answer counts against the budget (FR-6)");
             }
 
             // FR-9: a signed answer with a 100,000-byte confirmationId gets no ill-formed receipt
@@ -1637,8 +1669,9 @@ int main(int argc, char** argv) {
                 B->call(B->core->importForm("whisperbox://form?id=" + hid + "&by=0x" + std::string(40, '7')));   // a wrong link
                 CHECK(formOf(*B, hid).value("linkMismatch", false), "a wrong link: mismatch");
                 CHECK(B->call(B->core->deleteLocalForm(hid)).value("ok", false), "remove from this device");
-                openLink(*B, hid);
-                CHECK(!formOf(*B, hid).value("linkMismatch", true) && formOf(*B, hid).value("canRespond", false), "...then the right link opens it (FR-13)");
+                // removed with its events (it isn't in B's fold any more): the right link pulls it again
+                B->call(B->core->importForm("whisperbox://form?id=" + hid + "&by=" + addrA));
+                CHECK(waitUntil([&] { return !formOf(*B, hid).value("linkMismatch", true) && formOf(*B, hid).value("canRespond", false); }, 5000), "...then the right link opens it (FR-13)");
             }
 
             // FR-8: a transport callback kept after the module is gone is harmless
@@ -1687,15 +1720,19 @@ int main(int argc, char** argv) {
                               {"payload", {{"formId", "ghost5"}, {"author", z.address}, {"form", {{"title", "s"}}}}}};
                 whisperbox::signEventJson(small, z);
                 json big = small; big.erase("sig"); big.erase("pub");
-                big["hlc"]["ctr"] = 1; big["payload"]["form"]["title"] = std::string(100000, 'L');
+                big["hlc"]["ctr"] = 1; big["payload"]["form"]["description"] = std::string(60000, 'L');   // under the 64 KiB field cap (a 100,000-byte title was always refused: the check passed only on someone else's big event)
                 whisperbox::signEventJson(big, z);
                 // earlier hostile sections can drain B's live-frame budget; this check is about size
-                // accounting, so start from a full bucket (refillMs 0 = full on the next take)
-                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); B->core->m_sigRefillMs = 0; }
+                // accounting, so start from a full bucket (refillMs 0 = full on the next take). B opened
+                // the form: only those are kept (Václav 2026-11-13).
+                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); B->core->m_sigRefillMs = 0; B->core->m_watched.insert("ghost5"); }
+                const long u0 = diag(*B, "admDropUnwanted"), bu0 = diag(*B, "admDropBudget"), sh0 = diag(*B, "admDropShape"), n0 = diag(*B, "rxNew"), dp0 = diag(*B, "rxDup");
                 toPeer(*B, small); pump(100); toPeer(*B, big); pump(400);
+                std::printf("  info FR-1 deltas: unwanted=%ld budget=%ld shape=%ld new=%ld dup=%ld watched=%d\n", diag(*B, "admDropUnwanted") - u0, diag(*B, "admDropBudget") - bu0,
+                            diag(*B, "admDropShape") - sh0, diag(*B, "rxNew") - n0, diag(*B, "rxDup") - dp0, (int)B->core->m_watched.count("ghost5"));
                 size_t sum = 0; bool hasBig = false;
-                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); for (const auto& e : B->core->m_log) { sum += e.dump().size(); if (e.dump().size() > 100000) hasBig = true; } }
-                if (!(hasBig && B->core->m_logBytes == sum)) std::printf("  info FR-1: hasBig=%d logBytes=%zu sum=%zu budgetDrops=%ld\n", (int)hasBig, (size_t)B->core->m_logBytes, sum, B->snap()["diagnostics"].value("admDropBudget", 0L));
+                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); for (const auto& e : B->core->m_log) { sum += e.dump().size(); if (e.value("id", "") == "update:ghost5:n" && e.dump().size() > 60000) hasBig = true; } }
+                if (!(hasBig && B->core->m_logBytes == sum)) std::printf("  info FR-1: hasBig=%d logBytes=%zu sum=%zu diag=%s\n", (int)hasBig, (size_t)B->core->m_logBytes, sum, B->snap()["diagnostics"].dump().c_str());
                 CHECK(hasBig && B->core->m_logBytes == sum, "a small signed event replaced by a large earlier copy is charged its full size (FR-1)");
             }
 
@@ -1791,7 +1828,8 @@ int main(int argc, char** argv) {
             // FR-11: pending events are counted, not listed
             {
                 json p = A->snap()["state"]["pending"];
-                CHECK(p.value("count", 0) > 0 && p["events"].empty(), "pending ghost events: a count in the snapshot, no list (FR-11)");
+                // ghosts for forms A never opened aren't kept at all any more (Václav 2026-11-13); none listed either
+                CHECK(p.value("count", 0) == 0 && p["events"].empty(), "ghost events for forms nobody here opened aren't kept, and never listed (FR-11)");
             }
 
             // FR-14: local lists are bounded

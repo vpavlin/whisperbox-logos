@@ -183,11 +183,12 @@ anybody.
   `SHA-256("whisperbox.bucket.v2" || formId)`. All of them are on relay shard
   `/waku/2/rs/2/1` (autosharding of `whisperbox` + `2`).
   - A node joins only the buckets of forms it created, co-owns, opened from a link, answered or
-    has an answer draft for. A node that never opened a form never receives it.
+    has an answer draft for. It still hears the other forms in those buckets; it never stores them
+    (6.2).
 - **Wire message:** base64 of the UTF-8 JSON envelope. Receivers MUST accept one, two or three
   base64 layers; three is a Store payload of a Loam-sent message.
   - `{"v": 2, "type": "EVENTS", "events": [...]}`: a form's state (the creator's publish and
-    edits, close/re-open, co-owner grants, receipts, replies), or one answer. At most 2,000 events;
+    edits, close/re-open, co-owner grants, replies), new receipts, or one answer. At most 2,000 events;
     split at ~120 KB to stay under Delivery's ~150 KB message cap. Every event is admitted as in
     6.1.
   - `{"v": 2, "type": "ASK", "formId": id}`: a respondent can't find a form in Store.
@@ -205,7 +206,12 @@ anybody.
   - Re-publishes each open form every 60 min (±10% per form); a closed form 3 times, then never.
   - Answers an `ASK` for a form it creates or co-owns by publishing its state, at most once per
     form per 10 min. Respondents never answer ASKs.
-  - Receipts and replies travel inside the form's state, so the hourly re-publish carries them.
+  - Replies travel inside the form's state. Receipts go out on their own: only the new
+    `response.confirm` events, coalesced per form while one waits in the queue, never in the form's
+    state. A copy of an answer it holds and has confirmed (the respondent still retrying) makes the
+    creator side send that one receipt again, at most every 10 min.
+- **Opening a link** to a form not held pulls its bucket over the whole window (6 h), also when
+  the bucket is already joined. **Becoming a co-owner** does the same for the form's bucket.
 - **Respondent side.**
   - Sends an answer once, then again until its receipt: every 10 min for an hour, hourly for 4 h,
     then every 6 h, for 14 days.
@@ -579,7 +585,20 @@ Phone (SecureStore / app storage): `wb-identity`, `wb-device`, `wb-log`, `wb-wat
 `wb-pins`, `wb-mysubs`, `wb-myanswers`, `wb-hidden`, `wb-drafts`, `wb-seen`, `wb-fk-index` +
 `wb-fk-<formId>` (Keycard-exported form keys), `wb-notify`, `wb-shared-node`.
 
+### 6.2 What a node keeps (2026-11-13)
+
+After the cheap checks and the budget (6.1), before the signature check, an event must be one this
+node cares about, or it is dropped (`admDropUnwanted`) and never stored:
+- a signed event of a form it created, co-owns, opened (link or file), answered, has an answer
+  draft for, or hid; one it authored; a `form.coowner` naming it;
+- an answer it sent (by event id, until its receipt), or one a form key it holds opens.
+The log is pruned by the same rule on start, after unlocking and when a form is removed. A locked
+identity keeps everything (no keys to judge with; nothing connects until unlocked).
+
 ## 14. Privacy properties
+
+A node stores only its own forms and answers (6.2); it does hear the other forms in its buckets
+(1/16 of all forms each), as any subscriber to those topics does.
 
 On the wire and in fleet stores:
 - public: form definitions (incl. whitelists, co-owner addresses, sealed blobs' existence and

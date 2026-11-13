@@ -153,10 +153,10 @@ test("keycard: export form keys from the real applet", { skip: !SIM && "set KC_S
     const [k] = (await exportFormKeys(km, card, SIM_ACCESS(), [fid])).keys;
     assert.ok((await a.addFormKey(fid, k.privHex)).ok);
     assert.ok(a.createForm({ id: fid, title: "Card form", questions: [{ id: "q1", type: "text", text: "?", required: true }] }, { publicKey: k.pubHex }).ok);
+    b.importForm(`whisperbox://form?id=${fid}&by=${a.identity.address}`);   // the creator's link (FR-3); only opened forms are kept
     pump();
     assert.strictEqual(b.state().forms[fid].publicKey, k.pubHex, "respondents seal to the CARD key");
     assert.notStrictEqual(k.pubHex, C.deriveFormKey(a.identity, fid).pubHex, "not the soft-derived key");
-    b.importForm(`whisperbox://form?id=${fid}&by=${a.identity.address}`);   // the creator's link (FR-3)
     assert.ok(b.submitResponse(fid, [{ questionId: "q1", value: "sealed to a card" }]).ok); pump();
     assert.strictEqual(a.snapshot().creatorView.responses[fid][0].answers[0].value, "sealed to a card");
     assert.ok(!a.createForm({ id: "form-nokey", title: "x" }, { publicKey: k.pubHex }).ok, "refuses to publish with a key it doesn't hold");

@@ -103,9 +103,12 @@ Each form lives on a bucketed topic:
 ```
 
 There are 16 buckets. A node subscribes only to the buckets of forms it created, co-owns or
-opened, and filters by form id locally.
-- Strangers' forms and answers never reach it or its log.
-- The Store peer sees which buckets a node asks about, not which form.
+opened, and keeps only what it cares about (amended 2026-11-13, see below).
+- Strangers' forms and answers in its buckets DO reach it (a bucket holds ~1/16 of all forms); it
+  drops them on arrival and never stores them. As first written, this line said they never reach
+  it; the audit showed every node stored its whole bucket (W2-2).
+- The Store peer sees which buckets a node asks about. An `ASK` still names its form in clear
+  (audit W2-6, open).
 - With few users a bucket is effectively one form. If one ever gets too busy, we move to
   `/whisperbox/3/` with 256 buckets.
 
@@ -244,3 +247,38 @@ Gone: RBSR rounds, `SYNC_REQ`, peers serving events, and the 60 s heartbeat.
   (4) and retry interval (6) follow it as settings.
 - **Hub:** should we provide a "creator hub" (headless WhisperBox holding co-owner keys) as the
   recommended way to keep forms up? Václav's "or a hub".
+
+
+## Amendment 2026-11-13: keep only what you care about; receipts minimal
+
+After the independent audit of wire v2 (proteus/auditor, 2026-11-13, 13 findings). Václav:
+"we should not store forms and answers we do not care about!!" and "we should keep receipts
+minimal!".
+
+**What a node keeps** (desktop core and phone client alike):
+- signed events (publish, update, close/re-open, co-owner, receipt, reply) only for forms it
+  created, co-owns, opened from a link (or file), answered, drafted an answer to, or hid;
+- its own events, always; a co-owner grant naming it;
+- answers only if they are its own (until their receipt) or a form key it holds opens them.
+
+Everything else is dropped on arrival (`admDropUnwanted`) and pruned from the log on start,
+after unlocking, and when a form is removed. A removed form's bucket stops being Store-pulled
+(neither transport can unsubscribe; what still arrives live is dropped). Consequences:
+- opening a link to a form not held pulls its bucket over the whole Store window (a node in the
+  bucket may have heard and dropped it before);
+- a node made co-owner pulls the form's bucket again over the whole window: answers sent before
+  the grant were dropped because it couldn't open them then. Answers older than Store's retention
+  stay unreadable to a new co-owner;
+- the per-node answer cap now counts only answers the node can open or sent, so strangers can't
+  fill it (they can still spam a form whose key is public; the live budgets bound that).
+
+**Receipts:**
+- a receipt goes out on its own: just the new `response.confirm` events, never the whole form
+  state (that made automatic receipts O(N²) bytes, W2-5);
+- receipts made while one is waiting in the send queue join it: one frame per form per send slot;
+- the hourly re-publish and ASK answers carry the form definition (publish, edits, close/re-open,
+  co-owners, replies), no receipts;
+- a lost receipt heals through the respondent's retries: a copy of an answer the creator holds and
+  has confirmed makes it send that one receipt again, at most every 10 minutes.
+
+The remaining audit findings are tracked in the audit report and fixed separately.

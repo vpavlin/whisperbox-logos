@@ -142,6 +142,24 @@ private:
     void probeTransport();
     void bootstrapDirect();
     std::string directNodeMode(std::string* why = nullptr) const;   // Core | Edge for a node we create
+    // What this node keeps (Václav, 2026-11-13: never store forms and answers we don't care about).
+    // Signed events: only forms I created, co-own, opened, answered or drafted. Answers: only mine,
+    // or ones a form key of mine opens. Everything else is dropped on arrival and pruned from the log.
+    bool wanted(const whisperbox::json& e);
+    bool baseWants(const std::string& fid) const;
+    void refreshInterest();
+    void pruneUnwanted();
+    void dropUnusedBuckets();
+    // Receipts, minimal (Václav 2026-11-13): sent on their own, coalesced per form while queued, never
+    // in the hourly form state; a respondent's retried answer gets its receipt again (audit W2-5)
+    void queueReceipt(const std::string& formId, const whisperbox::json& confirmEvent);
+    void resendReceiptFor(const std::string& answerId);
+    std::map<std::string, std::vector<whisperbox::json>> m_rcptPending;   // formId -> receipts not sent yet
+    std::map<std::string, long long> m_rcptResentMs;                     // receipt event id -> last re-send   // stop pulling buckets no form of mine is in (no unsubscribe exists)
+    long long m_interestGen = -1;
+    std::set<std::string> m_myForms;                                   // created or co-owned (from the fold)
+    std::map<std::string, const whisperbox::SignId*> m_myKeys;          // sealing pub -> key (formKeysFor)
+    long m_admDropUnwanted = 0;
     std::string m_nodeMode, m_nodeModeWhy;                            // what bootstrapDirect chose ("" = not chosen)
     void directTick();
     struct Direct;                      // delivery_module directly (loam/delivery_transport.hpp), in the .cpp

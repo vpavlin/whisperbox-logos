@@ -274,6 +274,7 @@ void WhisperboxCoreImpl::onContextReady() {
     loadLocalPrefs();
     loadPins();
     loadPulls();
+    pruneUnwanted();
     // Basecamp 0.3 rejects calls to other modules made inside onContextReady(): the hub tick
     // below starts the transport a second later.
     // Hub tick: retry node start until ready, then a rate-limited periodic seed so
@@ -1156,14 +1157,119 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
 std::string WhisperboxCoreImpl::wireTopicFor(const std::string& formId) { return formTopic(lc(formId)); }
 
 void WhisperboxCoreImpl::broadcastEvent(const json& e) {
-    // Form-state events (publish, update, close, re-open, co-owner, receipt, reply) go out as the
-    // whole form state in one message; it is also what the hourly re-publish sends.
+    // Form-state events (publish, update, close, re-open, co-owner, reply) go out as the form's state in
+    // one message; it is also what the hourly re-publish sends. A receipt goes out on its own.
     if (!whisperbox::wellFormedEvent(e)) return;   // FR-9/10: never send what peers refuse
     const std::string t = e.value("type", "");
     const std::string fid = formIdOf(e);
     if (fid.empty()) return;
+    if (t == RESPONSE_CONFIRM) { queueReceipt(fid, e); return; }
     const int prio = (t == RESPONSE_CONFIRM || t == whisperbox::RESPONSE_REPLY) ? 2 : 3;
     publishFormState(fid, prio);
+}
+
+// A receipt alone, never the whole form state (it used to be: O(N²) bytes with automatic receipts,
+// audit W2-5). Receipts made while one is waiting in the send queue join it: one frame per form.
+void WhisperboxCoreImpl::queueReceipt(const std::string& formId, const json& e) {
+    auto& pend = m_rcptPending[formId];
+    for (const auto& x : pend) if (x.value("id", "") == e.value("id", "")) return;
+    pend.push_back(e);
+    sendEvents(formId, json(pend), 2, "rcpt:" + formId);
+}
+// The respondent sends its answer again until it has the receipt: a copy of an answer I hold and have
+// confirmed means my receipt didn't reach it - send that one receipt again (at most every 10 min)
+void WhisperboxCoreImpl::resendReceiptFor(const std::string& answerId) {
+    auto c = m_openCache.find(answerId);
+    if (c == m_openCache.end() || !c->second.dec.is_object()) return;
+    const json& dec = c->second.dec;
+    const std::string cid = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"].get<std::string>() : "";
+    const std::string fid = dec.contains("formId") && dec["formId"].is_string() ? lc(dec["formId"].get<std::string>()) : "";
+    if (cid.empty() || fid.empty()) return;
+    for (const auto& e : m_log) {
+        if (e.value("type", "") != RESPONSE_CONFIRM || formIdOf(e) != fid || !e.contains("payload")) continue;
+        const json& p = e["payload"];
+        bool has = p.value("confirmationId", "") == cid;
+        if (!has && p.contains("confirmationIds") && p["confirmationIds"].is_array())
+            for (const auto& x : p["confirmationIds"]) if (x.is_string() && x.get<std::string>() == cid) { has = true; break; }
+        if (!has) continue;
+        const std::string rid = e.value("id", "");
+        const long long now = nowMs();
+        if (m_rcptResentMs.count(rid) && now - m_rcptResentMs[rid] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
+        m_rcptResentMs[rid] = now;
+        queueReceipt(fid, e);
+        return;
+    }
+}
+
+// ── what this node keeps ─────────────────────────────────────────────────────────
+// Václav, 2026-11-13: "we should not store forms and answers we do not care about". A bucket topic
+// carries up to 1/16 of all forms; before this, every node in a bucket stored every form and answer
+// in it, and strangers' answers counted against our caps (audit W2-2, 2026-11-13).
+bool WhisperboxCoreImpl::baseWants(const std::string& fid) const {
+    return m_watched.count(fid) || m_mySubmissions.count(fid) || m_pinned.count(fid) || m_answerDrafts.count(fid)
+        || m_myAnswers.count(fid) || m_hidden.count(fid);
+}
+// The forms I created or co-own, and my form keys: from the fold, recomputed only when the log
+// changed (a dropped stranger's event doesn't change it, so a flood never refolds)
+void WhisperboxCoreImpl::refreshInterest() {
+    if (m_interestGen == (long long)m_logGen) return;
+    m_interestGen = (long long)m_logGen;
+    m_myForms.clear(); m_myKeys.clear();
+    if (!m_signId.valid) return;
+    OrderedJson st = foldedState();
+    for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it)
+        if (it.value().value("creator", "") == m_signId.address || isCoOwner(it.value())) m_myForms.insert(it.key());
+    m_myKeys = formKeysFor(st);
+}
+bool WhisperboxCoreImpl::wanted(const json& e) {
+    if (!m_signId.valid) return true;   // locked: no keys to judge with (and nothing connects until unlocked)
+    const std::string t = e.value("type", "");
+    if (t == RESPONSE_SUBMIT) {
+        const std::string id = e.value("id", "");
+        for (const auto& kv : m_myAnswers) {   // mine: kept until its receipt, and re-sent
+            if (kv.second.value("eventId", "") == id) return true;
+            if (kv.second.contains("earlier") && kv.second["earlier"].is_array())
+                for (const auto& a : kv.second["earlier"]) if (a.is_object() && a.value("eventId", "") == id) return true;
+        }
+        refreshInterest();
+        if (m_myKeys.empty()) return false;
+        const std::string hex = e.contains("payload") && e["payload"].is_object() ? e["payload"].value("encryptedPayload", "") : "";
+        if (hex.empty()) return false;
+        const whisperbox::Bytes blob = whisperbox::fromHex(hex);
+        for (const auto& kv : m_myKeys) {   // the budget was taken before this: it bounds the work
+            try { (void)whisperbox::eciesOpen(kv.second->priv, blob); return true; } catch (...) {}
+        }
+        return false;
+    }
+    const std::string fid = formIdOf(e);
+    if (fid.empty()) return false;
+    if (baseWants(fid)) return true;
+    if (e.contains("payload") && e["payload"].is_object()) {
+        const json& p = e["payload"];
+        const std::string me = lc(m_signId.address);
+        if (lc(p.value("creator", "")) == me || lc(p.value("author", "")) == me) return true;   // my own
+        if (t == whisperbox::FORM_COOWNER && lc(p.value("owner", "")) == me) return true;          // a key shared with me
+    }
+    refreshInterest();
+    return m_myForms.count(fid) > 0;
+}
+// Drop from the log what this node no longer keeps (on start, after unlock, after a form is removed)
+void WhisperboxCoreImpl::pruneUnwanted() {
+    if (!m_signId.valid || m_log.empty()) return;
+    refreshInterest();   // from the whole log, before anything goes: my own events always stay
+    std::vector<json> kept; kept.reserve(m_log.size());
+    size_t dropped = 0;
+    for (auto& e : m_log) { if (wanted(e)) kept.push_back(std::move(e)); else dropped++; }
+    if (!dropped) { m_log = std::move(kept); return; }
+    m_log = std::move(kept);
+    std::set<std::string> ids;
+    for (const auto& e : m_log) ids.insert(e.value("id", ""));
+    for (auto* m : {&m_netTimes, &m_firstSeen})
+        for (auto it = m->begin(); it != m->end();) it = ids.count(it->first) ? std::next(it) : m->erase(it);
+    recountLog();
+    m_foldValid = false; m_cvValid = false; m_openCache.clear();
+    saveLog(); saveNetTimes(); saveFirstSeen();
+    fprintf(stderr, "WHISPERBOX pruned %zu events of forms this node doesn't keep (%zu left)\n", dropped, m_log.size());
 }
 
 std::set<std::string> WhisperboxCoreImpl::relevantForms() {
@@ -1178,6 +1284,20 @@ std::set<std::string> WhisperboxCoreImpl::relevantForms() {
             if (it.value().value("creator", "") == m_signId.address || isCoOwner(it.value())) out.insert(it.key());
     }
     return out;
+}
+
+// A bucket no kept form is in any more: forget it, so it isn't Store-pulled again. Neither
+// delivery_module nor loam_core can unsubscribe, so live frames still arrive until the next start;
+// wanted() drops them (audit W2-9).
+void WhisperboxCoreImpl::dropUnusedBuckets() {
+    std::set<std::string> want;
+    for (const auto& f : relevantForms()) want.insert(formTopic(f));
+    bool changed = false;
+    for (auto it = m_joinedTopics.begin(); it != m_joinedTopics.end();)
+        if (isWireTopic(*it) && !want.count(*it)) { it = m_joinedTopics.erase(it); changed = true; } else ++it;
+    for (auto it = m_lastPullMs.begin(); it != m_lastPullMs.end();)
+        if (!want.count(it->first)) { it = m_lastPullMs.erase(it); changed = true; } else ++it;
+    if (changed) savePulls();
 }
 
 void WhisperboxCoreImpl::syncTopics() {
@@ -1222,8 +1342,23 @@ void WhisperboxCoreImpl::drainSendQueue() {
         auto best = std::min_element(m_outQ.begin(), m_outQ.end(), [](const OutMsg& a, const OutMsg& b) { return a.prio != b.prio ? a.prio < b.prio : a.seq < b.seq; });
         OutMsg m = std::move(*best);
         m_outQ.erase(best);
+        // receipts leave the pending set as they leave the queue; a refused send puts them back, so a
+        // later receipt for the form re-queues them together
+        const std::string rf = m.key.rfind("rcpt:", 0) == 0 ? m.key.substr(5, m.key.find('#') == std::string::npos ? std::string::npos : m.key.find('#') - 5) : "";
+        if (!rf.empty()) m_rcptPending.erase(rf);
         if (deliverySend(m.topic, whisperbox::b64encode(m.text))) { m_txTotal++; m_rlnTokens -= 1; }
-        else { m_outQ.push_back(std::move(m)); break; }   // transport not taking it: try on the next tick
+        else {
+            if (!rf.empty()) {
+                json env = json::parse(m.text, nullptr, false);
+                auto& pend = m_rcptPending[rf];
+                if (env.is_object() && env.contains("events") && env["events"].is_array())
+                    for (const auto& e : env["events"]) {
+                        bool have = false; for (const auto& x : pend) if (x.value("id", "") == e.value("id", "")) { have = true; break; }
+                        if (!have) pend.push_back(e);
+                    }
+            }
+            m_outQ.push_back(std::move(m)); break;   // transport not taking it: try on the next tick
+        }
     }
 }
 // events -> EVENTS frames on the form's topic, split to stay under Delivery's ~150 KB message cap
@@ -1242,8 +1377,9 @@ void WhisperboxCoreImpl::sendEvents(const std::string& formId, const json& event
     }
     flush();
 }
-// The form's whole state as its creator side knows it: the creator's publish and edits, close and
-// re-open, co-owner grants, receipts and replies. Peers check each event as from the network.
+// The form's state as its creator side knows it: the creator's publish and edits, close and re-open,
+// co-owner grants and replies - not receipts (they go on their own, see queueReceipt). Peers check
+// each event as from the network.
 void WhisperboxCoreImpl::publishFormState(const std::string& formId, int prio) {
     OrderedJson st = foldedState();
     if (!st["forms"].contains(formId)) return;
@@ -1254,7 +1390,7 @@ void WhisperboxCoreImpl::publishFormState(const std::string& formId, int prio) {
     json events = json::array();
     for (const auto& e : m_log) {
         const std::string t = e.value("type", "");
-        if (t == RESPONSE_SUBMIT || formIdOf(e) != formId || !e.contains("payload")) continue;
+        if (t == RESPONSE_SUBMIT || t == RESPONSE_CONFIRM || formIdOf(e) != formId || !e.contains("payload")) continue;   // receipts go on their own
         const std::string author = lc(t == FORM_PUBLISH ? e["payload"].value("creator", "") : e["payload"].value("author", ""));
         if (t == FORM_PUBLISH ? author != creator : !authors.count(author)) continue;
         if (t == FORM_PUBLISH) events.insert(events.begin(), e); else events.push_back(e);
@@ -1526,9 +1662,11 @@ bool WhisperboxCoreImpl::ingestOne(json e, long long netMs, bool live, bool bund
             if (live && !(bundled && dup) && !(isResp ? takeToken(m_respTokens, m_respRefillMs, 600) : takeToken(m_sigTokens, m_sigRefillMs, 600))) { m_admDropBudget++; return false; }
             if (dup) {   // known without a scan of the log, and without verifying it again
                 m_rxDup++;
+                if (isResp) resendReceiptFor(e.value("id", ""));   // a retry: the receipt didn't reach the respondent
                 if (noteNetTime(e, netMs)) { m_publishDirty = true; scheduleFlush(); }
                 return false;
             }
+            if (!wanted(e)) { m_admDropUnwanted++; return false; }   // not a form or answer of mine: never stored
             if (!admitEvent(e)) return false;   // the signature (counted)
             const bool replaced = held != m_heldHlc.end();
             const size_t eBytes = e.dump().size();
@@ -1546,6 +1684,13 @@ bool WhisperboxCoreImpl::ingestOne(json e, long long netMs, bool live, bool bund
             if (!replaced && isResp) m_logResponses++;
             if (isResp) noteFirstSeen(e);
             m_logGen++;
+            // made a co-owner: the answers sent before were dropped (I couldn't open them then) - pull
+            // the form's bucket again over the whole Store window (Václav 2026-11-13: keep only mine)
+            if (e.value("type", "") == whisperbox::FORM_COOWNER && m_signId.valid && e.contains("payload")
+                && lc(e["payload"].value("owner", "")) == lc(m_signId.address) && m_nodeReady) {
+                const std::string t = formTopic(formIdOf(e));
+                m_lastPullMs.erase(t); syncTopics(); storePull(t);
+            }
             m_rxNew++;
             m_clock.receive(e["hlc"], nowMs() + whisperbox::kMaxClockLeadMs);
             m_journalPending.push_back(e);
@@ -1842,7 +1987,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
-        {"admDropBudget", m_admDropBudget}, {"admDropFull", m_admDropFull}, {"ctlDropBudget", m_ctlDropBudget}, {"startFailures", m_startFailures}, {"logBytes", (long long)m_logBytes}, {"logResponses", (long long)m_logResponses},
+        {"admDropBudget", m_admDropBudget}, {"admDropUnwanted", m_admDropUnwanted}, {"admDropFull", m_admDropFull}, {"ctlDropBudget", m_ctlDropBudget}, {"startFailures", m_startFailures}, {"logBytes", (long long)m_logBytes}, {"logResponses", (long long)m_logResponses},
     });
     return snap;
 }
@@ -2590,6 +2735,8 @@ std::string WhisperboxCoreImpl::deleteLocalForm(std::string formId) try {
     saveWatched();
     if (m_hidden.erase(formId)) saveHidden();
     if (m_pinned.erase(formId)) savePins();   // a new link may pin another creator (FR-5)
+    pruneUnwanted();   // its events go too, unless I created, co-own or answered it (audit W2-9)
+    dropUnusedBuckets();
     publishState();
     json out = {{"ok", true}, {"formId", formId}};
     return out.dump();
@@ -2882,6 +3029,7 @@ std::string WhisperboxCoreImpl::unlock(std::string passphrase) try {
     m_locked = false; m_lockedIdentity = json();
     loadPrivateFiles();
     m_foldValid = false; m_cvValid = false;
+    pruneUnwanted();
     setStatus("Starting...");
     publishState();
     return json({{"ok", true}, {"address", m_signId.address}}).dump();
@@ -3086,7 +3234,10 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) try {
     if (!m_watched.count(formId) && m_watched.size() >= kMaxWatched) { out["ok"] = false; out["error"] = "too many opened forms - remove some"; return out.dump(); }   // FR-14
     OrderedJson state = foldedState();
     const bool have = state["forms"].contains(formId);
-    if (!have && m_nodeReady) { m_watched.insert(formId); syncTopics(); storePull(formTopic(formId)); }
+    // Not here: pull its bucket over the whole window. A bucket we were already in doesn't mean we have
+    // it - a form nobody here opened was dropped on arrival (Václav 2026-11-13), so "since the last
+    // pull" would miss it.
+    if (!have && m_nodeReady) { m_watched.insert(formId); syncTopics(); m_lastPullMs.erase(formTopic(formId)); storePull(formTopic(formId)); }
     m_watched.insert(formId);
     saveWatched();
     // Answers are only ever sealed to a form whose (signed) creator matches the pin.
