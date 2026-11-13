@@ -34,9 +34,11 @@ jobs:
           set -u -o pipefail
           mkdir -p out logs
           ok=1
-          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo; do
+          # delivery_module: upstream releases carry no .lgx, so we build the pinned tag (the one whisperbox_core's flake uses)
+          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo delivery_module:github:logos-co/logos-delivery-module/v0.3.2; do
             name=${m%%:*}; dir=${m#*:}
-            if (cd "$dir" && nix build --accept-flake-config .#lgx-portable -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
+            case "$dir" in github:*) ref="$dir#lgx-portable"; dir=. ;; *) ref=".#lgx-portable" ;; esac
+            if (cd "$dir" && nix build --accept-flake-config "$ref" -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
               cp -L res-$name/*.lgx "out/$name-linux-arm64.lgx"; echo "$name OK"
             else
               echo "$name FAILED"; tail -80 "logs/$name.log"; ok=0
@@ -47,12 +49,14 @@ jobs:
         shell: bash
         run: |
           set -eu
-          mkdir x && tar -xzf out/whisperbox_core-linux-arm64.lgx -C x
-          ls x/variants
           n=0
+          for p in whisperbox_core delivery_module; do
+          rm -rf x && mkdir x && tar -xzf out/$p-linux-arm64.lgx -C x
+          ls x/variants
           for so in x/variants/*/*.so*; do
             c=$(objdump -d "$so" | awk '/^[0-9a-f]+ <.*>:$/ {fn=$2} /\t(cas|casa|casl|casal|swp|swpa|swpl|swpal|ldadd|ldadda|ldaddl|ldaddal|ldclr|ldset|ldeor)[bh]?\t/ && fn !~ /__aarch64_/ {print}' | wc -l)
-            echo "$so: $c inline LSE instructions"; n=$((n + c))
+            echo "$p $so: $c inline LSE instructions"; n=$((n + c))
+          done
           done
           [ "$n" = 0 ] || { echo "would SIGILL on ARMv8.0"; exit 1; }
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65   # v2

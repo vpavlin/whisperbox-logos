@@ -32,9 +32,11 @@ jobs:
           set -u -o pipefail
           mkdir -p out logs
           ok=1
-          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo; do
+          # delivery_module: upstream releases carry no .lgx, so we build the pinned tag (the one whisperbox_core's flake uses)
+          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo delivery_module:github:logos-co/logos-delivery-module/v0.3.2; do
             name=${m%%:*}; dir=${m#*:}
-            if (cd "$dir" && nix build --accept-flake-config .#lgx-portable -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
+            case "$dir" in github:*) ref="$dir#lgx-portable"; dir=. ;; *) ref=".#lgx-portable" ;; esac
+            if (cd "$dir" && nix build --accept-flake-config "$ref" -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
               cp -L res-$name/*.lgx "out/$name-darwin-arm64.lgx"; echo "$name OK"
             else
               echo "$name FAILED"; tail -80 "logs/$name.log"; ok=0
