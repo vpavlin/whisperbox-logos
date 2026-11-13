@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.0 desktop core + studio + respond, Android vc24 (2026-11-13) - after two audit rounds of wire v2
+
+Wire v2 was audited twice (proteus/auditor, 2026-11-13: 13 + 15 findings); ADR 0024 amendments.
+Wire-compatible with 1.0.0.
+
+- **A node keeps only its own forms and answers** (Václav): forms it created, co-owns, opened,
+  answered, drafted or hid, and answers it sent or can open. Everything else in its bucket is dropped
+  on arrival; old data is pruned on the first start; removing a form drops its data.
+- **Co-owner grants are invitations:** Accept / Decline in the studio sidebar and on the phone's home
+  screen; nothing of the form is kept until accepted; Leave on a co-owned form.
+- **Receipts are minimal:** sent on their own, coalesced per form, not in the hourly form state; a
+  retried answer gets its one receipt again.
+- **Deadlines use the network's time:** a Store-delivered answer is judged by the latest time any of
+  two Store nodes reports; a time seen live is never changed by a Store.
+- **Nothing too big to deliver:** forms and answers over ~78 KB are refused with a reason (Delivery
+  caps a message at 150 KiB, base64'd twice).
+- Store replies are untrusted (asked topics only, 100 a page, 5,000 events a pull); signed events must
+  come from someone allowed to write them; 20,000 answers kept per form; ASKs budgeted, never from
+  Store; a squatted form id no longer stops the ASK; re-subscribe after a reconnect; failed sends are
+  retried; the phone counts text in UTF-8 bytes like the desktop.
+
 ## 1.0.0 desktop core + studio + respond (2026-11-12) - wire v2: Store first, creator served (ADR 0024)
 
 A clean break with 0.x on the wire (events, the fold and local data carry over). On 2026-11-12 one fresh
