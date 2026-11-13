@@ -228,7 +228,9 @@ anybody.
   - Store pulls are bounded by their paging and have no budget.
 - **Transport.**
   - Desktop through `loam_core` when it answers (unchanged config), else `delivery_module`
-    directly in **Edge** mode (Filter for the buckets, Lightpush to send, no relaying).
+    directly. A node WhisperBox creates is **Core** when the studio is installed (or outside
+    Basecamp) and **Edge** for a respond-only install (Filter for the buckets, Lightpush to send, no
+    relaying); a node already running on that Basecamp is adopted as it is (ADR 0024 section 8).
   - Phone through loam-transport: `join(topics)`, `storeSync`, `publishSealed(topic, ...)`.
 - **Offline.** Local events wait in the log. When the node comes up, the creator's scheduled
   re-publish and the respondent's unsent answers (`sent: false`) go out.

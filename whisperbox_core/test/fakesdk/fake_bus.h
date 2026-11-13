@@ -24,7 +24,8 @@ struct FakeNode {
     // ADR 0021: loamInstalled=false = no loam_core in this Basecamp (its status call answers empty);
     // the core then goes direct and these raw delivery_module event handlers are its receive path
     bool loamInstalled = true;
-    std::string loamStatus;   // non-empty: loam_core's status() answers this (e.g. "Transport error: ...")
+    std::string loamStatus;
+    std::string createCfg;    // the last createNode config a direct transport sent   // non-empty: loam_core's status() answers this (e.g. "Transport error: ...")
     std::vector<std::pair<std::string, logos::RawFn>> raw;
     void fireRaw(const std::string& ev, const nlohmann::json& args) { for (auto& h : raw) if (h.first == ev) h.second(args); }
     FakeLoamCore::RxFn onRx;
@@ -114,8 +115,9 @@ static inline void fakeBindRaw(FakeNode* n) {
     p.clear();
 }
 static inline StdLogosResult fakeOk(LogosMap v = LogosMap()) { StdLogosResult r; r.success = true; r.value = std::move(v); return r; }
-inline void FakeDelivery::createNodeAsync(const std::string&, Res cb) {
+inline void FakeDelivery::createNodeAsync(const std::string& cfg, Res cb) {
     fakeBindRaw(node);
+    node->createCfg = cfg;
     // a direct transport sets no sender id (plain relay); give the fake node its own so the bus's
     // SDS-style self-filter never mistakes two direct nodes for one
     if (node->senderId.empty()) node->senderId = "direct-" + std::to_string(node->serial);

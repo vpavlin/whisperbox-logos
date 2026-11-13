@@ -227,6 +227,36 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return !transportOf(*E).empty() && transportOf(*E) != "probing"; }, 15000) && transportOf(*E) == "loam_core",
                   "a loam_core answering \"Transport error: ...\" is installed: the core stays on it (" + transportOf(*E) + ")");
         }
+        // Node mode on the direct path (Václav 2026-11-13): studio installed -> Core, respond-only -> Edge,
+        // not in Basecamp -> Core. Read from <user-dir>/plugins next to <user-dir>/module_data.
+        {
+            auto modeIn = [&](const std::string& tag, const std::vector<std::string>& views) {
+                const std::string ud = g_base + "/mode-" + tag;
+                for (auto& v : views) std::filesystem::create_directories(ud + "/plugins/" + v + "/qml");
+                const std::string inst = views.empty() && tag == "headless" ? "" : ud + "/module_data/whisperbox_core/abc123def456";
+                if (!inst.empty()) std::filesystem::create_directories(inst);
+                auto P = std::make_unique<Peer>(); P->name = "mode-" + tag; P->dir = g_base + "/mode-" + tag + "-data";
+                setenv("WHISPERBOX_CORE_DATA", P->dir.c_str(), 1);
+                P->node = std::make_unique<FakeNode>(); P->node->name = P->name; P->node->loamInstalled = false;
+                P->core = std::make_unique<WhisperboxCoreImpl>();
+                P->core->m_fakePersist = inst;
+                P->core->modules().loam_core.node = P->node.get();
+                P->core->modules().delivery_module.node = P->node.get();
+                FakeBus::get().nodes.push_back(P->node.get());
+                P->core->fakeStart();
+                waitUntil([&] { return !P->node->createCfg.empty(); }, 15000);
+                json c = json::parse(P->node->createCfg.empty() ? "{}" : P->node->createCfg, nullptr, false);
+                std::string mode = c.is_object() ? c.value("mode", "") : "";
+                return mode + "/" + P->snap()["diagnostics"].value("nodeMode", "");
+            };
+            std::string m;
+            m = modeIn("studio", {"whisperbox", "whisperbox_respond"});
+            CHECK(m == "Core/Core", "studio installed: the direct path creates a Core node (" + m + ")");
+            m = modeIn("respond", {"whisperbox_respond"});
+            CHECK(m == "Edge/Edge", "respond-only install: the direct path creates an Edge node (" + m + ")");
+            m = modeIn("headless", {});
+            CHECK(m == "Core/Core", "not in Basecamp (logosctl): Core (" + m + ")");
+        }
         json q = {{"title", "Direct"}, {"questions", json::array({{{"id", "q1"}, {"type", "text"}, {"text", "Hi?"}, {"required", true}}})}};
         // direct -> loam
         std::string f1 = D->call(D->core->createForm(q.dump())).value("formId", "");

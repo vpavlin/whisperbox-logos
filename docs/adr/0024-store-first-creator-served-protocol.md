@@ -61,7 +61,9 @@ These override the proposal below where they differ.
   - every 10 min for an hour (5 times);
   - then once an hour for a few hours;
   - then less often.
-- **Edge mode:** yes.
+- **Edge mode:** yes. Refined 2026-11-13 (Václav): on the direct path the **studio** creates a
+  **Core** node and a **respond-only** install creates **Edge**; a node already running on that
+  Basecamp is adopted as it is, whatever its mode (it's shared by every app there). See section 8.
 - **Clean break:** v2 doesn't talk to v1.
 - **RLN for Edge (open question 1):** Lightpush does spend the service node's quota. That's a
   general Delivery-vs-RLN problem, not WhisperBox's.
@@ -190,7 +192,13 @@ Gone: RBSR rounds, `SYNC_REQ`, peers serving events, and the 60 s heartbeat.
 
 - `whisperbox_respond` installs (the feedback channel) run delivery in **Edge** mode: Filter on
   1-2 buckets, Lightpush to send, no relaying.
-- The studio can stay Core or go Edge; a creator hub runs Core.
+- The studio creates **Core** (decided 2026-11-13): on a desktop the node is shared by every app on
+  that Basecamp, and whichever app creates it picks the mode for all of them. A creator hub runs Core.
+- How the core knows: both views share one `whisperbox_core`, which looks next to its own data folder
+  (`<user-dir>/module_data/whisperbox_core/<id>`) at `<user-dir>/plugins/`. `whisperbox` (the studio)
+  installed → Core; only `whisperbox_respond` → Edge; not in Basecamp (logosctl) → Core. Read when the
+  node is created, so installing the studio later takes effect on the next start.
+  `WHISPERBOX_NODE_MODE=Core|Edge` overrides. A node that already runs is adopted unchanged.
 - Loam users keep the shared node; the core asks Loam for subscriptions per bucket, never for
   `/all`.
 

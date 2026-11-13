@@ -870,6 +870,29 @@ void WhisperboxCoreImpl::probeTransport() {
 // the same RLN-off logos.test network, the same wire, and it adopts a node another module already
 // created. Every delivery_module callback arrives on an IPC thread: it hops to this module's thread
 // (withSelf) before it touches the transport, which has no locks of its own.
+// Which mode a node WE create gets. Both views share this core, so the core looks at what Basecamp
+// installed: views live in <user-dir>/plugins/<name>, and this module's folder is
+// <user-dir>/module_data/whisperbox_core/<id>. Studio (whisperbox) installed -> Core; only the respond
+// view (whisperbox_respond) -> Edge; anything else (headless under logosctl, an unknown layout) -> Core,
+// the mode that is safe to share. Read when the node is created: installing the studio later takes
+// effect on the next start. WHISPERBOX_NODE_MODE=Core|Edge overrides (tests, hubs).
+std::string WhisperboxCoreImpl::directNodeMode(std::string* why) const {
+    auto say = [why](const std::string& w) { if (why) *why = w; };
+    if (const char* f = std::getenv("WHISPERBOX_NODE_MODE")) {
+        const std::string v = f;
+        if (v == "Core" || v == "Edge") { say("WHISPERBOX_NODE_MODE"); return v; }
+    }
+    const std::string inst = instancePersistencePath();
+    if (inst.empty()) { say("not in Basecamp"); return "Core"; }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path plugins = fs::path(normDir(inst)).parent_path().parent_path().parent_path() / "plugins";
+    if (fs::is_directory(plugins / "whisperbox", ec)) { say("studio installed"); return "Core"; }
+    if (fs::is_directory(plugins / "whisperbox_respond", ec)) { say("respond-only install"); return "Edge"; }
+    say("no WhisperBox view found in " + plugins.string());
+    return "Core";
+}
+
 void WhisperboxCoreImpl::bootstrapDirect() {
     if (m_direct) return;
     if (!m_signId.valid) { setStatus(m_locked ? "Locked - enter your passphrase" : "No identity"); return; }
@@ -924,9 +947,13 @@ void WhisperboxCoreImpl::bootstrapDirect() {
         if (sub.valid()) d->subs.push_back(std::move(sub));
     };
     DT::Config cfg;
-    // the same network as the loam_core path: logos.test without RLN (nodeConfig spells it out)
-    // Edge (ADR 0024): a light node - Filter for our buckets, Lightpush to send, no relaying
-    json app = {{"mode", "Edge"}, {"preset", "logos.test"}};
+    // the same network as the loam_core path: logos.test without RLN (nodeConfig spells it out).
+    // Mode (Václav, 2026-11-13): the studio creates Core, a respond-only install creates Edge (a light
+    // node: Filter for our buckets, Lightpush to send, no relaying). Only when WE create the node: one
+    // that already runs on this Basecamp is adopted as it is (the header's adopt path).
+    m_nodeMode = directNodeMode(&m_nodeModeWhy);
+    fprintf(stderr, "WHISPERBOX node mode: %s (%s)\n", m_nodeMode.c_str(), m_nodeModeWhy.c_str());
+    json app = {{"mode", m_nodeMode}, {"preset", "logos.test"}};
     if (const char* ov = std::getenv("WHISPERBOX_DELIVERY_CFG")) {
         auto j = json::parse(ov, nullptr, false);
         if (j.is_object()) { app = j; for (const char* k : {"useChannels", "hubMode", "useBle", "useMesh", "useDelivery", "rln"}) app.erase(k); }
@@ -1811,7 +1838,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     json subArr = json::array(); for (auto& id : m_mySubmissions) subArr.push_back(id);
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
-        {"transport", m_via == Via::Loam ? "loam_core" : m_via == Via::Direct ? "delivery_module" : "probing"},
+        {"transport", m_via == Via::Loam ? "loam_core" : m_via == Via::Direct ? "delivery_module" : "probing"}, {"nodeMode", m_nodeMode},
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},

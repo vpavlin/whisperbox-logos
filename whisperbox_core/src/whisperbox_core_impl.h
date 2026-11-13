@@ -141,6 +141,8 @@ private:
     // ADR 0021: loam_core when it is installed (today's path, unchanged), else delivery_module directly
     void probeTransport();
     void bootstrapDirect();
+    std::string directNodeMode(std::string* why = nullptr) const;   // Core | Edge for a node we create
+    std::string m_nodeMode, m_nodeModeWhy;                            // what bootstrapDirect chose ("" = not chosen)
     void directTick();
     struct Direct;                      // delivery_module directly (loam/delivery_transport.hpp), in the .cpp
     std::shared_ptr<Direct> m_direct;   // shared_ptr: the generated glue builds this class without seeing Direct
