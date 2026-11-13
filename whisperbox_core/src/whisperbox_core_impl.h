@@ -171,6 +171,10 @@ private:
     std::map<std::string, long> m_respPerForm;                         // formId -> answers held (audit R2-3)
     std::string m_wantedForm;                                          // the form wanted() found an answer for
     bool m_pruning = false;                                            // pruneUnwanted: no per-form cap on what is already held
+    long m_storeSeenLeft = 0;                                          // events a Store pull may make us look at, duplicates too (R3-10)
+    std::map<std::string, int> m_secondTries;                          // bucket -> failed second-Store tries (R3-2)
+    bool grantFromCreator(const std::string& fid, const std::string& grantAuthor);   // R3-1
+    bool coOwnerGranted(const std::string& fid, const std::string& who);              // R3-6: a creator's grant to `who` is held
     // co-owner invitations (audit R2-1/R2-6): accepted / declined form ids, persisted
     std::set<std::string> m_coAccepted, m_coDeclined;
     void loadCoOwnerPrefs();

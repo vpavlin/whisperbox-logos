@@ -1323,13 +1323,16 @@ int main(int argc, char** argv) {
             CHECK(diag(*A, "netTs") >= net0 + 1, "its network time was recorded");   // live, and maybe again from Store
             FakeBus::get().tsNs = (t0 - 20000) * 1000000LL;   // the store's copy: published before the close
             send(frame); pump(300);
-            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("timeVerified", false), "an earlier copy puts it before the close, time verified");
-            FakeBus::get().tsNs = (t0 + 90000) * 1000000LL;   // re-served later: doesn't move it back
+            // the first live time is final: a replay claiming earlier can't bring it back (audit R3-3)
+            CHECK(responsesOf(*A, fcid).empty(), "a later live copy claiming an earlier time doesn't move it before the close (R3-3)");
+            FakeBus::get().tsNs = (t0 + 90000) * 1000000LL;   // re-served later: doesn't move it either
             send(frame); pump(300);
-            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("receivedAt", 0LL) == t0 - 20000, "a later copy doesn't move it back");
+            long long kept = 0; { std::lock_guard<std::recursive_mutex> lk(A->core->m_mtx); kept = A->core->m_netTimes[ev.value("id", "")]; }
+            CHECK(responsesOf(*A, fcid).empty() && kept > t0, "a later copy doesn't move it: the first live time stays");
             FakeBus::get().tsNs = 0;
             A->stop(); A->start(); pump(200);
-            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("receivedAt", 0LL) == t0 - 20000, "network times survive a restart");
+            long long after = 0; { std::lock_guard<std::recursive_mutex> lk(A->core->m_mtx); after = A->core->m_netTimes[ev.value("id", "")]; }
+            CHECK(responsesOf(*A, fcid).empty() && after == kept, "network times survive a restart");
         }
         // ── open-review 2026-10-29 (FR-1..4, 7, 8) ──
         {
@@ -1734,7 +1737,7 @@ int main(int argc, char** argv) {
                 // earlier hostile sections can drain B's live-frame budget; this check is about size
                 // accounting, so start from a full bucket (refillMs 0 = full on the next take). B opened
                 // the form: only those are kept (Václav 2026-11-13).
-                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); B->core->m_sigRefillMs = 0; B->core->m_watched.insert("ghost5"); }
+                { std::lock_guard<std::recursive_mutex> lk(B->core->m_mtx); B->core->m_sigRefillMs = 0; B->core->m_watched.insert("ghost5"); B->core->m_pinned["ghost5"] = z.address; B->core->m_interestGen = -1; }
                 const long u0 = diag(*B, "admDropUnwanted"), bu0 = diag(*B, "admDropBudget"), sh0 = diag(*B, "admDropShape"), n0 = diag(*B, "rxNew"), dp0 = diag(*B, "rxDup");
                 toPeer(*B, small); pump(100); toPeer(*B, big); pump(400);
                 std::printf("  info FR-1 deltas: unwanted=%ld budget=%ld shape=%ld new=%ld dup=%ld watched=%d\n", diag(*B, "admDropUnwanted") - u0, diag(*B, "admDropBudget") - bu0,
@@ -2037,6 +2040,60 @@ int main(int argc, char** argv) {
                   R->core->pruneUnwanted();
                   for (auto& ev : R->core->m_log) if (ev.value("type", "") == "response.submit") after++; }
                 CHECK(before > 0 && after == before, "with my_answers missing, R's own answers survive the prune (R2-8)");
+            }
+        }
+        // ── round 3 (audit 2026-11-13, R3-*) ──
+        {
+            const long long now = QDateTime::currentMSecsSinceEpoch();
+            const std::string addrR = R->snap()["identity"]["address"];
+            auto live = [&](Peer& p, const std::string& topic, const json& ev) {
+                p.node->onRx(topic, "net", FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())), now * 1000000LL);
+            };
+            auto invitedTo = [&](Peer& p, const std::string& f) { json sn = p.snap(); for (const auto& x : sn["coInvites"]) if (x.value("formId", "") == f) return true; return false; };
+            // R3-1: a grant for P's form signed by someone else is not an invitation
+            {
+                json ev = {{"v", 1}, {"id", "coowner:" + fm + ":" + addrR}, {"type", "form.coowner"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"},
+                           {"payload", {{"formId", fm}, {"author", Dd->core->m_signId.address}, {"owner", addrR}, {"sealedKey", "00"}}}};
+                whisperbox::signEventJson(ev, Dd->core->m_signId);
+                const long u0 = diag(*R, "admDropUnwanted");
+                live(*R, WhisperboxCoreImpl::wireTopicFor(fm), ev); pump(500);
+                CHECK(!invitedTo(*R, fm) && diag(*R, "admDropUnwanted") > u0, "a co-owner grant from someone who isn't the creator is no invitation (R3-1)");
+            }
+            // R3-7: a declined invitation can still be accepted; leaving a form never offered is refused
+            {
+                std::string fd2 = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                R->call(R->core->importForm(linkOf(*P, fd2)));
+                CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(fd2); }, 8000), "R opened fd2");
+                CHECK(P->call(P->core->addCoOwner(fd2, R->snap()["identity"]["pubHex"].get<std::string>())).value("ok", false), "P invites R");
+                CHECK(waitUntil([&] { return invitedTo(*R, fd2); }, 5000) && R->call(R->core->leaveCoOwner(fd2)).value("ok", false), "R declines");
+                CHECK(R->call(R->core->acceptCoOwner(fd2)).value("ok", false) && waitUntil([&] { return formOf(*R, fd2).value("coOwner", false); }, 5000), "...changes its mind and accepts (R3-7)");
+                CHECK(!R->call(R->core->leaveCoOwner("form-0dead0be")).value("ok", true), "leaving a form R was never invited to is refused (R3-7)");
+            }
+            // R3-5: a form opened by its bare id (no creator known) keeps no one's signed junk
+            {
+                R->call(R->core->importForm("form-0badc0de"));
+                whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'b', 'a', 'r', 'e'}));
+                json junk = {{"v", 1}, {"id", "update:form-0badc0de:j"}, {"type", "form.update"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "z"}}}, {"dev", "z"},
+                             {"payload", {{"formId", "form-0badc0de"}, {"author", z.address}, {"form", {{"title", "junk"}}}}}};
+                whisperbox::signEventJson(junk, z);
+                live(*R, WhisperboxCoreImpl::wireTopicFor("form-0badc0de"), junk); pump(500);
+                bool kept = false; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); for (auto& e : R->core->m_log) if (e.value("id", "") == "update:form-0badc0de:j") kept = true; }
+                CHECK(!kept, "no creator known: a signed update by anyone isn't kept (R3-5)");
+            }
+            // R3-3: a Store can't date an answer in the future
+            {
+                std::string ff = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                pump(300);
+                const std::string topic = WhisperboxCoreImpl::wireTopicFor(ff), pub = formOf(*P, ff).value("publicKey", "");
+                std::string pt = R"({"formId":")" + ff + R"("})";
+                std::string hex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end())));
+                json a = {{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}};
+                FakeBus::get().storeInject = json::array({json{{"messageHash", "0xf"}, {"message", {{"payload", FakeBus::b64(FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", a}}).dump())))},
+                                                       {"contentTopic", topic}, {"timestamp", (double)((now + 240000) * 1000000LL)}}}}});
+                P->call(P->core->resync()); pump(1500);
+                FakeBus::get().storeInject = json::array();
+                long long t = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); t = P->core->m_netTimes[a.value("id", "")]; }
+                CHECK(t > 0 && t <= (long long)QDateTime::currentMSecsSinceEpoch(), "a Store's +4 min is clamped to now (R3-3)");
             }
         }
         unsetenv("WHISPERBOX_MINUTE_MS");

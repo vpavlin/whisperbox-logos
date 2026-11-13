@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.1 desktop core + studio + respond, Android vc25 (2026-11-13) - audit round 3
+
+- Co-owner invitations count only when the form's creator sent them (a fake one is never shown);
+  a declined invitation can still be accepted; accepting pins the inviter as the form's creator.
+- A form whose creator isn't known (opened by its bare id) keeps only its publishes and invitations.
+- A co-owner's receipt that arrives before its grant is kept.
+- Times: a Store can't date an answer in the future or before the asked window (phone too); the first
+  live time is final. The second-Store check is retried and survives a restart.
+- Store replies: oversized ones refused before parsing; duplicates count towards the work budget.
+- If the record of my own answers is behind, at most 2,000 unplaceable answers are kept, not the bucket.
+
 ## 1.1.0 desktop core + studio + respond, Android vc24 (2026-11-13) - after two audit rounds of wire v2
 
 Wire v2 was audited twice (proteus/auditor, 2026-11-13: 13 + 15 findings); ADR 0024 amendments.

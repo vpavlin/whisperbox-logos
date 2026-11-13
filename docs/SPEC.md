@@ -596,9 +596,12 @@ node cares about, or it is dropped (`admDropUnwanted`) and never stored:
 - an answer it sent (by event id, until its receipt), or one a form key it holds opens (at most
   20,000 per form).
 A signed event must also be one its author may write: close/update/re-open/co-owner by the creator,
-receipts and replies by the creator or a co-owner, `form.publish` by the creator the link names (plus
-at most four others in all). A `form.coowner` naming this node is an invitation (at most 20 pending):
-nothing of that form is kept or pulled until `acceptCoOwner`.
+receipts and replies by the creator or a co-owner (listed in the fold, or granted by the creator in a
+held `form.coowner`), `form.publish` by the creator the link names (plus at most four others in all).
+With no creator known (bare id, no publish yet) only publishes and invitations are kept. A
+`form.coowner` naming this node is an invitation only if its author is the creator (or none is known;
+at most 20 pending grant events): nothing of that form is kept or pulled until `acceptCoOwner`, which
+pins the grant's author as the creator when no link named one.
 The log is pruned by the same rule on start, after unlocking and when a form is removed. A locked
 identity keeps everything (no keys to judge with; nothing connects until unlocked).
 

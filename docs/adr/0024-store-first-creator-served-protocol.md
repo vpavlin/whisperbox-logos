@@ -335,3 +335,32 @@ Open: trial decryption still costs one ECDH per held key per answer (R2-9; bound
 above; a per-form tag is a protocol change for later, e.g. Rumor), and the phone can't force a full
 Store window yet: loam-transport's storeSync skips a topic pulled in the last minute (R2-11; ASKs and
 the next pull cover it).
+
+## Amendment 2026-11-13 (3): audit round 3
+
+The third round (16 findings, mostly edges of round 2's own fixes) led to:
+
+- **Invitations come from the creator only.** A `form.coowner` naming me counts only if its author is
+  the form's creator (the link's pin, else the fold); with no creator known it waits as a pending
+  invitation, and accepting it pins its author as the creator I trust. At most 20 pending grant events
+  in all. The upgrade migration accepts only grants from the creator. Declining keeps the grant, so it
+  can be accepted later; leaving a form I was never invited to is refused. (R3-1, R3-7, R3-14)
+- **No creator known** (a form opened by its bare id, or before its publish): only its publishes
+  (bounded) and invitations are kept, nothing else. (R3-5)
+- **A co-owner's receipt** counts when the fold lists the co-owner or a creator's grant to it is held;
+  in a bundle, publishes and grants are taken first. (R3-6)
+- **Times:** a Store's time is never later than when we got it; the phone clamps Store times to the
+  same 6 h window the desktop asks for; the FIRST live time is final (a replay never moves it).
+  (R3-3, R3-4)
+- **Second Store:** a failed second pass is retried (3 times) and owed passes survive a restart.
+  (R3-2, R3-15)
+- **Store work:** a reply over 100 full frames is refused before parsing; a pull may make us look at
+  20,000 events (duplicates too) and keep 5,000 (counted after the keep-filter, so junk can't use up
+  the room). (R3-10)
+- **Own answers unsure:** at most 2,000 unplaceable answers kept, not the whole bucket. (R3-9)
+
+Open, documented: one form can still be filled to its own 20,000-answer cap (R3-11); a creator's new
+device can't know an answer was confirmed on another device (it confirms again; automatic receipts do it
+for a hub) (R3-8); the phone's 2,000 key-missing allowance lasts until the next prune (R3-12); the phone
+can't force a full Store window (R2-11/R3-13, needs loam-transport); trial decryption per key (R2-9);
+with one Store peer configured there is no second opinion.
