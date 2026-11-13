@@ -281,4 +281,18 @@ after unlocking, and when a form is removed. A removed form's bucket stops being
 - a lost receipt heals through the respondent's retries: a copy of an answer the creator holds and
   has confirmed makes it send that one receipt again, at most every 10 minutes.
 
-The remaining audit findings are tracked in the audit report and fixed separately.
+**The other audit findings (same day):**
+- W2-1: an event is at most 80,000 bytes of JSON to be made or sent (~142 KB after both base64
+  layers, under Delivery's 150 KiB); bigger forms/answers are refused with a reason. Peers still
+  accept up to 256 KiB.
+- W2-3: a Store reply is untrusted input: only the asked topics, at most 100 messages a page, the
+  same admission and keep-filter; an ASK in it is never acted on.
+- W2-4: after a reconnect (or a new transport) every bucket is joined again.
+- W2-6: a live ASK costs a frame token. Form ids stay public (Václav: Rumor may improve this).
+- W2-7: a held form whose creator isn't the link's doesn't stop the ASK.
+- W2-8: the phone counts UTF-8 bytes like the core; `form.close.expiresAt` is 0..1e14 on both.
+- W2-10: a send that fails after it left is queued again (5 tries, its budget token back).
+- W2-11 (Václav: "use msg timestamp from the network rather than payload"): an answer from Store
+  is judged (deadline, close) by the message's network timestamp, whatever its age (never in the
+  future); a live frame's still has to be about now.
+- W2-12: an empty `WHISPERBOX_STORE_PEERS` keeps the fleet list. W2-13: wire header comments.

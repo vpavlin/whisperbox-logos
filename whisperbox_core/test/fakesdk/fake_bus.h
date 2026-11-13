@@ -24,8 +24,9 @@ struct FakeNode {
     // ADR 0021: loamInstalled=false = no loam_core in this Basecamp (its status call answers empty);
     // the core then goes direct and these raw delivery_module event handlers are its receive path
     bool loamInstalled = true;
-    std::string loamStatus;
-    std::string createCfg;    // the last createNode config a direct transport sent   // non-empty: loam_core's status() answers this (e.g. "Transport error: ...")
+    std::string loamStatus;   // non-empty: loam_core's status() answers this (e.g. "Transport error: ...")
+    std::string createCfg;    // the last createNode config a direct transport sent
+    int failSends = 0;        // the next N sends fail asynchronously (RLN, oversize, disconnected: audit W2-10)
     std::vector<std::pair<std::string, logos::RawFn>> raw;
     void fireRaw(const std::string& ev, const nlohmann::json& args) { for (auto& h : raw) if (h.first == ev) h.second(args); }
     FakeLoamCore::RxFn onRx;
@@ -78,7 +79,13 @@ struct FakeBus {
     long long storeRetentionMs = 2LL * 3600 * 1000;   // tests may shorten it
     bool storeDown = false;
     long long storeQueries = 0;
-    void channel(FakeNode* from, const std::string& topic, const std::string& raw) { deliver(from, topic, raw, false); }
+    nlohmann::json storeInject = nlohmann::json::array();   // a malicious Store: messages added to every reply (audit W2-3)
+    long oversize = 0;                                       // frames Delivery refused: over 150 KiB on the wire (audit W2-1)
+    void channel(FakeNode* from, const std::string& topic, const std::string& raw) {
+        // like Delivery: the transport base64s what the app sent once more; over 150 KiB is refused
+        if ((raw.size() + 2) / 3 * 4 > 153600) { oversize++; return; }
+        deliver(from, topic, raw, false);
+    }
 };
 
 static inline std::string fakeB64decode(const std::string& in) {
@@ -145,6 +152,7 @@ inline void FakeDelivery::sendAsync(const std::string& topic, const LogosMap& pa
     std::string text;
     if (payload.is_array()) for (const auto& c : payload) { if (c.is_number_integer()) text.push_back((char)c.get<int>()); }
     else if (payload.is_string()) text = payload.get<std::string>();
+    if (node->failSends > 0) { node->failSends--; StdLogosResult r; r.success = false; r.error = "RLN proof generation failed"; FakeBus::later([cb, r] { cb(r); }); return; }
     node->tx++; FakeBus::get().channel(node, topic, fakeB64decode(text));
     FakeBus::later([cb] { cb(fakeOk()); });
 }
@@ -173,6 +181,7 @@ inline void FakeDelivery::storeQueryAsync(const std::string& q, const std::strin
         msgs.push_back({{"messageHash", "0x" + std::to_string(i)}, {"pubsubTopic", j.value("pubsubTopic", "")},
                         {"message", {{"payload", FakeBus::b64(FakeBus::b64(m.raw))}, {"contentTopic", m.topic}, {"timestamp", (double)m.tsNs}}}});
     }
+    for (const auto& x : bus.storeInject) msgs.push_back(x);
     nlohmann::json v = {{"requestId", j.value("requestId", "")}, {"statusCode", 200}, {"statusDesc", "OK"}, {"messages", msgs}};
     if (next) v["paginationCursor"] = std::to_string(next);
     StdLogosResult r = fakeOk(v.dump());
@@ -189,6 +198,7 @@ inline void FakeLoamCore::joinAsync(const std::string& topic, StrCb cb) {
 }
 inline void FakeLoamCore::sendSealedAsync(const std::string& topic, const std::string& sealedB64, StrCb cb) {
     if (!node->up) throw std::runtime_error("loam_core: not started");
+    if (node->failSends > 0) { node->failSends--; FakeBus::later([cb] { cb("{\"ok\":false,\"error\":\"send failed: no RLN proof\"}"); }); return; }
     node->tx++; FakeBus::get().channel(node, topic, fakeB64decode(sealedB64));
     FakeBus::later([cb] { cb("{\"ok\":true}"); });
 }

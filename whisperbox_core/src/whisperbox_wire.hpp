@@ -1,20 +1,17 @@
 #pragma once
 // whisperbox_wire.hpp — on-topic envelope encode/decode + base64 helpers.
 //
-// Wire model (single shared topic /whisperbox/1/all/proto, see TOPIC in
-// whisperbox_engine.hpp): messages are PLAIN JSON envelopes over the delivery
-// channel — there is NO transport-level AEAD. Privacy comes from the ECIES-
-// sealed response payloads inside response.submit events; form events are public
-// by design (public feed). Envelopes:
-//   {v:1, type:"EVENT",     event:{...full event envelope...}}
-//   {v:1, type:"SYNC_REQ",  from:<deviceId>[, rbsr:true]}  // joiner asks for state
-//   {v:2, t:"fp"|"ids"|"need", from, ...}         // loam-sync RBSR catch-up (ids only)
-// A SYNC_REQ flagged rbsr comes from a peer that also runs RBSR; RBSR peers ignore it (the
-// fp/ids/need exchange already serves the exact delta) while 0.1.x peers, which only know
-// SYNC_REQ, answer it with their whole log - so mixed-version topics still converge.
-// The channel payload is the base64 TEXT of the envelope (delivery_module
-// base64-encodes once more on the wire — peers may need one or two peels; the
-// ingest path tries both, same as qaku).
+// Wire model: wire v2 (ADR 0024, SPEC 6). One bucket topic per form,
+// /whisperbox/2/form-<b>/proto with b the first hex digit of SHA-256("whisperbox.bucket.v2"+formId),
+// on shard /waku/2/rs/2/1. Messages are PLAIN JSON envelopes - there is NO transport-level AEAD;
+// privacy comes from the ECIES-sealed answers inside response.submit events, and form events are
+// public by design. Envelopes:
+//   {v:2, type:"EVENTS", events:[...]}   // a form's state, new receipts, or one answer
+//   {v:2, type:"ASK", formId}            // a respondent can't find a form in Store (creator side answers)
+//   {v:1, type:"EVENT", event:{...}}     // one event; still accepted
+// v1's SYNC_REQ and RBSR frames (/whisperbox/1/all/proto) are ignored. The channel payload is the
+// base64 TEXT of the envelope; the transport base64s it once more, so a receiver peels one or two
+// layers (three: a Store payload of a Loam send).
 #include <string>
 #include "whisperbox_types.hpp"
 

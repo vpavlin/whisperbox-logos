@@ -150,6 +150,7 @@ private:
     void refreshInterest();
     void pruneUnwanted();
     void dropUnusedBuckets();
+    long m_txErr = 0, m_txDropped = 0, m_storeDropTopic = 0, m_storeDropCap = 0;
     // Receipts, minimal (Václav 2026-11-13): sent on their own, coalesced per form while queued, never
     // in the hourly form state; a respondent's retried answer gets its receipt again (audit W2-5)
     void queueReceipt(const std::string& formId, const whisperbox::json& confirmEvent);
@@ -174,7 +175,10 @@ private:
     void sendControl(const whisperbox::json& msg);
     // ── wire v2 (ADR 0024): per-form bucket topics, Store pull, creator re-publish, RLN budget ──
     std::set<std::string> m_joinedTopics;                    // bucket topics joined on the transport
-    struct OutMsg { int prio; long long seq; std::string topic; std::string text; std::string key; };
+    struct OutMsg { int prio; long long seq; std::string topic; std::string text; std::string key; int tries = 0; };
+    OutMsg m_sending{};                                       // the message deliverySend is sending (its failure callback requeues it)
+    // an async send failure: queue it again (audit W2-10)
+    void onSendFailed(OutMsg m, const std::string& why);
     std::vector<OutMsg> m_outQ;                              // waits for the RLN budget, by priority
     long long m_outSeq = 0;
     double m_rlnTokens = 0; int64_t m_rlnRefillMs = 0;       // messages per 600 s epoch (default 10)

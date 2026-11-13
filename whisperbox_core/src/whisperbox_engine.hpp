@@ -1081,6 +1081,11 @@ inline constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
 // One event, serialized. The per-field limits alone allowed ~1 GiB per form.publish (open-review
 // FR-6); Logos Delivery carries ~150 KB, so nothing legitimate comes near this.
 inline constexpr size_t kMaxEventBytes = 256u * 1024;
+// What one event may be to be SENT (audit W2-1, 2026-11-13): Delivery refuses messages over 150 KiB,
+// and the wire is base64 of the envelope - base64'd once more by the transport. 80,000 bytes of event
+// JSON is ~142 KB after both layers, with room for the envelope. Peers still ACCEPT up to
+// kMaxEventBytes (older events); this node never makes one it couldn't send.
+inline constexpr size_t kMaxWireEventBytes = 80000;
 inline bool wellFormedEvent(const json& e) {
     if (!e.is_object() || !jStr(e, "id", 512) || !jStr(e, "type", 64)) return false;
     try { if (e.dump().size() > kMaxEventBytes) return false; } catch (...) { return false; }

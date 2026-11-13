@@ -72,10 +72,14 @@ static long long nowMs() {
 // it is only taken within kMaxClockLeadMs of when we receive the copy, either way: an older one (a
 // store copy, or a node stamping 2001) proves nothing and is treated as absent (open-review
 // 2026-11-01, FR-6; mirror client.mjs netMsOf).
-static long long netMsOf(long long tsNs, long long now) {
+static long long netMsOf(long long tsNs, long long now, bool fromStore = false) {
     if (tsNs <= 1000000000000000LL) return 0;
     const long long ms = tsNs / 1000000LL;
-    if (ms <= 1000000000000LL || ms > now + whisperbox::kMaxClockLeadMs || ms < now - whisperbox::kMaxClockLeadMs) return 0;
+    if (ms <= 1000000000000LL || ms > now + whisperbox::kMaxClockLeadMs) return 0;
+    // A Store copy carries the message's network timestamp from when it was published: that is the
+    // time deadlines and closes are judged by, not the sender's own clock in the payload (Václav,
+    // 2026-11-13; audit W2-11). A live frame's must be about now.
+    if (!fromStore && ms < now - whisperbox::kMaxClockLeadMs) return 0;
     return ms;
 }
 static std::string trim(const std::string& s) {
@@ -923,7 +927,14 @@ void WhisperboxCoreImpl::bootstrapDirect() {
     ops.start      = [this, res](DT::Cb cb) { modules().delivery_module.startAsync(res(cb)); };
     ops.stop       = [this, res](DT::Cb cb) { modules().delivery_module.stopAsync(res(cb)); };
     ops.subscribe  = [this, res](const std::string& t, DT::Cb cb) { modules().delivery_module.subscribeAsync(t, res(cb)); };
-    ops.sendRaw    = [this, res](const std::string& t, const LogosMap& p, DT::Cb cb) { modules().delivery_module.sendAsync(t, p, res(cb)); };
+    // the header ignores a send's result; we don't: a failed send goes back in the queue (audit W2-10).
+    // m_sending is the message deliverySend is handing over, set around this synchronous call.
+    ops.sendRaw    = [this, hop](const std::string& t, const LogosMap& p, DT::Cb cb) {
+        OutMsg cur = m_sending;
+        modules().delivery_module.sendAsync(t, p, [hop, cur, cb](StdLogosResult r) {
+            hop([cur, r, cb](WhisperboxCoreImpl* s) { cb(r.success, r.error); if (!r.success) s->onSendFailed(cur, r.error); });
+        });
+    };
     ops.metrics    = [this, text](std::function<void(bool, const std::string&)> cb) { modules().delivery_module.getNodeInfoAsync("Metrics", text(cb)); };
     ops.connectionStatus = [this, text](std::function<void(bool, const std::string&)> cb) { modules().delivery_module.getConnectionStatusAsync(text(cb)); };
     // RAW messageReceived: [hash, contentTopic, payload, (source,) ts] - the payload untouched (the
@@ -985,7 +996,12 @@ void WhisperboxCoreImpl::bootstrapDirect() {
 void WhisperboxCoreImpl::directTick() {
     if (!m_direct || !m_direct->t) return;
     auto& t = *m_direct->t;
-    if (!t.ready() && t.status().rfind("error", 0) == 0) { m_direct.reset(); m_subscribed = false; return; }
+    if (!t.ready() && t.status().rfind("error", 0) == 0) {
+        // the next transport is a new node: nothing is joined on it (audit W2-4)
+        m_direct.reset(); m_subscribed = false; m_joinedTopics.clear();
+        if (m_nodeReady) { m_nodeReady = false; setStatus("Reconnecting..."); }
+        return;
+    }
     t.tick(nowMs());
     if (m_nodeReady && !t.ready() && m_status != "Reconnecting...") setStatus("Reconnecting...");
 }
@@ -1010,7 +1026,8 @@ void WhisperboxCoreImpl::onTransportStatus(const std::string& st) {
         // keep saying "Connected" (review 2026-10-22). Back to Connected: catch up what was missed.
         const bool recovered = st == "Connected";
         setStatus(st);
-        if (recovered) { storePullAll(); drainSendQueue(); }
+        // a new or restarted node knows none of our topics: join them all again (audit W2-4)
+        if (recovered) { m_joinedTopics.clear(); syncTopics(); storePullAll(); drainSendQueue(); }
         publishState();
     }
 }
@@ -1101,9 +1118,31 @@ bool WhisperboxCoreImpl::deliverySend(const std::string& topic, const std::strin
     if (!m_nodeReady) return false;
     // the sealed bytes are the base64 envelope text either way (loam_core gets them base64'd once more)
     if (m_via == Via::Direct) return m_direct && m_direct->t && m_direct->t->send(topic, b64Text);
-    try { modules().loam_core.sendSealedAsync(topic, whisperbox::b64encode(b64Text), [](std::string) {}); }
+    // what is being sent, for the result callback: a send that fails later goes back in the queue
+    // (audit W2-10: a dispatched send used to count as delivered)
+    OutMsg cur = m_sending;
+    auto life = m_life;
+    try {
+        modules().loam_core.sendSealedAsync(topic, whisperbox::b64encode(b64Text), [life, cur](std::string r) {
+            if (r.find("\"ok\":false") == std::string::npos && r.find("rror") == std::string::npos) return;
+            withSelf(life, [cur, r](WhisperboxCoreImpl* self) { std::lock_guard<std::recursive_mutex> lk(self->m_mtx); self->onSendFailed(cur, r); });
+        });
+    }
     catch (...) { return false; }
     return true;
+}
+void WhisperboxCoreImpl::onSendFailed(OutMsg m, const std::string& why) {
+    m_txErr++;
+    if (m.text.empty()) return;
+    if (++m.tries >= 5) {   // never forever: the schedules (re-publish, answer retries) send it again later
+        m_txDropped++;
+        fprintf(stderr, "WHISPERBOX send failed 5 times, dropped (%s): %s\n", m.key.c_str(), why.substr(0, 120).c_str());
+        return;
+    }
+    fprintf(stderr, "WHISPERBOX send failed, queued again (%s): %s\n", m.key.c_str(), why.substr(0, 120).c_str());
+    m_rlnTokens += 1;   // it didn't go out
+    for (const auto& q : m_outQ) if (!m.key.empty() && q.key == m.key) return;   // a newer copy is queued already
+    m_outQ.push_back(std::move(m));
 }
 
 // ── event lifecycle ──────────────────────────────────────────────────────────────
@@ -1127,7 +1166,7 @@ json WhisperboxCoreImpl::buildEvent(const std::string& type, const std::string& 
 // used to go into the local log (and the local view) while every peer dropped it (open-review
 // 2026-11-02, FR-9/FR-10).
 bool WhisperboxCoreImpl::adoptChecked(const json& e) {
-    if (whisperbox::wellFormedEvent(e)) return true;
+    if (whisperbox::wellFormedEvent(e) && e.dump().size() <= whisperbox::kMaxWireEventBytes) return true;   // W2-1: also small enough to SEND
     fprintf(stderr, "WHISPERBOX refused a local %s event peers would drop (shape or size)\n", e.value("type", "?").c_str());
     return false;
 }
@@ -1346,7 +1385,10 @@ void WhisperboxCoreImpl::drainSendQueue() {
         // later receipt for the form re-queues them together
         const std::string rf = m.key.rfind("rcpt:", 0) == 0 ? m.key.substr(5, m.key.find('#') == std::string::npos ? std::string::npos : m.key.find('#') - 5) : "";
         if (!rf.empty()) m_rcptPending.erase(rf);
-        if (deliverySend(m.topic, whisperbox::b64encode(m.text))) { m_txTotal++; m_rlnTokens -= 1; }
+        m_sending = m;
+        const bool ok = deliverySend(m.topic, whisperbox::b64encode(m.text));
+        m_sending = OutMsg{};
+        if (ok) { m_txTotal++; m_rlnTokens -= 1; }
         else {
             if (!rf.empty()) {
                 json env = json::parse(m.text, nullptr, false);
@@ -1361,9 +1403,10 @@ void WhisperboxCoreImpl::drainSendQueue() {
         }
     }
 }
-// events -> EVENTS frames on the form's topic, split to stay under Delivery's ~150 KB message cap
+// events -> EVENTS frames on the form's topic, split to stay under Delivery's 150 KiB message cap once
+// base64'd twice (audit W2-1: the old 120,000 counted the JSON, not what goes on the wire)
 void WhisperboxCoreImpl::sendEvents(const std::string& formId, const json& events, int prio, const std::string& key) {
-    static constexpr size_t kMaxBundle = 120000;
+    static constexpr size_t kMaxBundle = whisperbox::kMaxWireEventBytes;
     json chunk = json::array(); size_t bytes = 0; int part = 0;
     auto flush = [&] {
         if (chunk.empty()) return;
@@ -1372,6 +1415,8 @@ void WhisperboxCoreImpl::sendEvents(const std::string& formId, const json& event
     };
     for (const auto& e : events) {
         const size_t n = e.dump().size();
+        // one event too big for any frame (an old one, from before the limit): never sent, said so
+        if (n > kMaxBundle) { m_txDropped++; fprintf(stderr, "WHISPERBOX can't send %s: %zu bytes is over the wire limit\n", e.value("id", "?").c_str(), n); continue; }
         if (bytes + n > kMaxBundle) flush();
         chunk.push_back(e); bytes += n;
     }
@@ -1455,8 +1500,9 @@ void WhisperboxCoreImpl::kickPull() {
             "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
             "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV"};
         if (const char* ov = std::getenv("WHISPERBOX_STORE_PEERS")) {
-            m_storePeers.clear(); std::stringstream ss(ov); std::string a;
-            while (std::getline(ss, a, ',')) if (!trim(a).empty()) m_storePeers.push_back(trim(a));
+            std::vector<std::string> mine; std::stringstream ss(ov); std::string a;
+            while (std::getline(ss, a, ',')) if (!trim(a).empty()) mine.push_back(trim(a));
+            if (!mine.empty()) m_storePeers = std::move(mine);   // empty or only commas: keep the fleet (audit W2-12: % 0)
         }
         if (!m_storePeersAsked) {
             m_storePeersAsked = true;
@@ -1514,14 +1560,22 @@ void WhisperboxCoreImpl::kickPull() {
                         fprintf(stderr, "WHISPERBOX store pull failed: %s\n", r.success ? v.dump().substr(0, 160).c_str() : r.error.c_str());
                         return;
                     }
-                    if (v.contains("messages") && v["messages"].is_array())
+                    // A Store reply is untrusted input (audit W2-3): only the topics we asked for, at most
+                    // a page's worth (we ask for 100), and its events go through the same admission,
+                    // the keep-filter and caps; an ASK in it is never acted on.
+                    if (v.contains("messages") && v["messages"].is_array()) {
+                        size_t taken = 0;
                         for (const auto& m : v["messages"]) {
                             if (!m.is_object() || !m.contains("message") || !m["message"].is_object()) continue;
                             const json& wm = m["message"];
                             if (!wm.contains("payload") || !wm["payload"].is_string()) continue;
+                            const std::string ct = wm.contains("contentTopic") && wm["contentTopic"].is_string() ? wm["contentTopic"].get<std::string>() : std::string();
+                            if (std::find(topics.begin(), topics.end(), ct) == topics.end()) { self->m_storeDropTopic++; continue; }
+                            if (++taken > 100) { self->m_storeDropCap++; continue; }
                             long long ts = wm.contains("timestamp") && wm["timestamp"].is_number() ? (long long)wm["timestamp"].get<double>() : 0;
-                            self->ingestEnvelopeText(wm["payload"].get<std::string>(), false, netMsOf(ts, nowMs()));
+                            self->ingestEnvelopeText(wm["payload"].get<std::string>(), false, netMsOf(ts, nowMs(), /*fromStore=*/true));
                         }
+                    }
                     const std::string next = v.contains("paginationCursor") && v["paginationCursor"].is_string() ? v["paginationCursor"].get<std::string>() : std::string();
                     if (!next.empty() && n < 20) { (*page)(next, n + 1); return; }
                     self->m_pullBusy = false;
@@ -1563,7 +1617,11 @@ void WhisperboxCoreImpl::wireSchedule() {
     // respondent: a form opened from a link that hasn't arrived - ASK after 20 s, 10 min, 30 min,
     // then hourly (for a day)
     for (const auto& fid : m_watched) {
-        if (st["forms"].contains(fid)) { m_askCount.erase(fid); continue; }
+        // held - unless it is someone else's form under that id and the link names another creator:
+        // keep asking for the real one (audit W2-7: a squatted id silenced the ASK)
+        const auto pin = m_pinned.find(fid);
+        const bool have = st["forms"].contains(fid) && (pin == m_pinned.end() || pin->second.empty() || lc(st["forms"][fid].value("creator", "")) == lc(pin->second));
+        if (have) { m_askCount.erase(fid); continue; }
         if (!m_askSentMs.count(fid)) m_askSentMs[fid] = now;   // first seen: give Store a moment (20 s)
         const int n = m_askCount[fid];
         const long long gap = n == 0 ? minute / 3 : n == 1 ? 10 * minute : n == 2 ? 20 * minute : 60 * minute;
@@ -1722,7 +1780,11 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             for (const auto& e : env["events"]) { try { ingestOne(e, netMs, channelPath, true); } catch (...) { m_rxBad++; } }
             return true;
         }
-        if (type == "ASK") { onAsk(env); return true; }
+        if (type == "ASK") {   // a live ASK only, and it costs a frame token (audit W2-3/W2-6)
+            if (!channelPath) return true;
+            if (!takeToken(m_ctlTokens, m_ctlRefillMs, 120)) { m_ctlDropBudget++; return true; }
+            onAsk(env); return true;
+        }
         return false;
     };
     std::string once = whisperbox::b64decode(text);
@@ -1987,7 +2049,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
         {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
-        {"admDropBudget", m_admDropBudget}, {"admDropUnwanted", m_admDropUnwanted}, {"admDropFull", m_admDropFull}, {"ctlDropBudget", m_ctlDropBudget}, {"startFailures", m_startFailures}, {"logBytes", (long long)m_logBytes}, {"logResponses", (long long)m_logResponses},
+        {"admDropBudget", m_admDropBudget}, {"admDropUnwanted", m_admDropUnwanted}, {"txErr", m_txErr}, {"txDropped", m_txDropped}, {"storeDropTopic", m_storeDropTopic}, {"storeDropCap", m_storeDropCap}, {"admDropFull", m_admDropFull}, {"ctlDropBudget", m_ctlDropBudget}, {"startFailures", m_startFailures}, {"logBytes", (long long)m_logBytes}, {"logResponses", (long long)m_logResponses},
     });
     return snap;
 }
@@ -2327,6 +2389,7 @@ std::string WhisperboxCoreImpl::updateForm(std::string formId, std::string defJs
     json e = buildEvent(whisperbox::FORM_UPDATE, whisperbox::formUpdateId(formId, randomHex(6)), p, /*sign=*/true);
     // the same shape check peers apply, or they'd drop it and our state would differ from theirs (FR-5)
     if (!whisperbox::wellFormedEvent(e)) { out["ok"] = false; out["error"] = "the form is too large or has a field peers would refuse"; return out.dump(); }
+    if (e.dump().size() > whisperbox::kMaxWireEventBytes) { out["ok"] = false; out["error"] = "the form is too large to send (about 78 KB at most) - shorten its texts"; return out.dump(); }   // W2-1
     adoptLocal(e); broadcastEvent(e); publishState();
     out["ok"] = true; out["formId"] = formId;
     return out.dump();
@@ -2362,6 +2425,7 @@ std::string WhisperboxCoreImpl::createForm(std::string defJson) try {
 
     json e = buildEvent(FORM_PUBLISH, whisperbox::formPublishId(formId), p, /*sign=*/true);
     if (!whisperbox::wellFormedEvent(e)) { out["ok"] = false; out["error"] = "the form is too large or has a field peers would refuse"; return out.dump(); }   // FR-5
+    if (e.dump().size() > whisperbox::kMaxWireEventBytes) { out["ok"] = false; out["error"] = "the form is too large to send (about 78 KB at most) - shorten its texts"; return out.dump(); }   // W2-1
     adoptLocal(e);
     broadcastEvent(e);
     publishState();
@@ -3417,7 +3481,9 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) try {
 std::string WhisperboxCoreImpl::resync() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!m_nodeReady) { json o = {{"ok", false}, {"error", "node not ready"}}; return o.dump(); }
-    // wire v2: pull our buckets from Store again, and ASK at once for forms that haven't arrived
+    // wire v2: join our buckets again (the node may have restarted), pull them from Store again, and
+    // ASK at once for forms that haven't arrived
+    m_joinedTopics.clear();
     syncTopics();
     storePullAll();
     for (const auto& fid : m_watched) m_askSentMs[fid] = 0;

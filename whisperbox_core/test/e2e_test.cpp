@@ -1841,6 +1841,98 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ── audit 2026-11-13 (wire v2, proteus/auditor): the fixes, each against its finding ──
+    std::printf("audit 2026-11-13 (wire v2):\n");
+    {
+        setenv("WHISPERBOX_MINUTE_MS", "1200", 1);   // ASKs at 0.4 / 12 s
+        auto P = mkPeer("w2-creator"), R = mkPeer("w2-respondent");
+        auto Dd = mkDirectPeer("w2-direct");
+        CHECK(waitUntil([&] { return P->snap().value("nodeReady", false) && R->snap().value("nodeReady", false) && Dd->snap().value("nodeReady", false); }, 15000), "audit peers up");
+        const std::string addrP = P->snap()["identity"]["address"];
+        const json qq = {{"title", "w2"}, {"questions", json::array({{{"id", "q"}, {"type", "textarea"}, {"text", "?"}}})}};
+        auto linkOf = [&](Peer& c, const std::string& f) { return c.call(c.core->shareUri(f)).value("uri", ""); };
+        auto nowNs = [] { return (long long)QDateTime::currentMSecsSinceEpoch() * 1000000LL; };
+        // W2-1: an event is never larger than Delivery can carry
+        std::string fm;
+        {
+            json big = qq; big["description"] = std::string(60000, 'd'); big["thankYou"] = std::string(30000, 't');
+            json r = P->call(P->core->createForm(big.dump()));
+            CHECK(!r.value("ok", true) && r.value("error", "").find("too large to send") != std::string::npos, "a form too large to send is refused with a reason, not lost (W2-1)");
+            json mid = qq; mid["description"] = std::string(65000, 'm');
+            const long over0 = FakeBus::get().oversize;
+            fm = P->call(P->core->createForm(mid.dump())).value("formId", "");
+            R->call(R->core->importForm(linkOf(*P, fm)));
+            CHECK(!fm.empty() && waitUntil([&] { return foldOf(*R)["forms"].contains(fm); }, 8000) && FakeBus::get().oversize == over0,
+                  "a 65 KB form fits under Delivery's 150 KiB and reaches the respondent (W2-1)");
+            json sr = R->call(R->core->submitResponse(fm, json::array({{{"questionId", "q"}, {"value", std::string(60000, 'a')}}}).dump()));
+            CHECK(!sr.value("ok", true), "an answer too large to send is refused (W2-1)");
+        }
+        // W2-3 / W2-6: a malicious Store - a foreign bucket, an ASK, a flood - in every reply
+        {
+            const std::string topicP = WhisperboxCoreImpl::wireTopicFor(fm);
+            std::string otherTopic; for (int i = 0; otherTopic.empty() || otherTopic == topicP; i++) otherTopic = WhisperboxCoreImpl::wireTopicFor("form-" + std::to_string(10000000 + i));
+            auto inj = [&](const std::string& topic, const std::string& envText) {
+                return json{{"messageHash", "0xbad"}, {"message", {{"payload", FakeBus::b64(FakeBus::b64(whisperbox::b64encode(envText)))}, {"contentTopic", topic}, {"timestamp", (double)nowNs()}}}};
+            };
+            const std::string ask = json({{"v", 2}, {"type", "ASK"}, {"formId", fm}}).dump();
+            auto& inject = FakeBus::get().storeInject;
+            inject = json::array();
+            inject.push_back(inj(otherTopic, ask));
+            for (int i = 0; i < 150; i++) inject.push_back(inj(topicP, ask));
+            { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); P->core->m_askAnsweredMs.erase(fm); }
+            P->call(P->core->resync());
+            CHECK(waitUntil([&] { return diag(*P, "storeDropTopic") > 0 && diag(*P, "storeDropCap") > 0; }, 8000), "a Store reply's foreign topics and excess are dropped (W2-3)");
+            { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); CHECK(!P->core->m_askAnsweredMs.count(fm), "an ASK inside a Store reply is never acted on (W2-3/W2-6)"); }
+            inject = json::array();
+            const long c0 = diag(*P, "ctlDropBudget");
+            for (int i = 0; i < 200; i++) P->node->onRx(topicP, "net", FakeBus::b64(whisperbox::b64encode(ask)), nowNs());
+            pump(800);
+            CHECK(diag(*P, "ctlDropBudget") > c0, "a flood of live ASKs runs out of the frame budget (W2-6)");
+        }
+        // W2-4: the node lost its subscriptions (a restart): after Connected the core joins them all again
+        {
+            const std::string topicP = WhisperboxCoreImpl::wireTopicFor(fm);
+            R->node->joined.clear();
+            R->node->onStatus("Transport stalled: no answer for 30 s"); pump(300);
+            R->node->onStatus("Connected");
+            CHECK(waitUntil([&] { return R->node->joined.count(topicP) > 0; }, 5000), "a reconnected node re-joins every bucket (W2-4)");
+        }
+        // W2-10: a send that fails after it left goes out again
+        {
+            P->node->failSends = 2;
+            std::string ff = P->call(P->core->createForm(qq.dump())).value("formId", "");
+            R->call(R->core->importForm(linkOf(*P, ff)));
+            CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(ff); }, 15000) && diag(*P, "txErr") >= 1, "loam_core: a failed send is queued again and arrives (W2-10)");
+            Dd->node->failSends = 2;
+            std::string fd = Dd->call(Dd->core->createForm(qq.dump())).value("formId", "");
+            R->call(R->core->importForm(linkOf(*Dd, fd)));
+            CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(fd); }, 15000) && diag(*Dd, "txErr") >= 1, "delivery_module directly: a failed send is queued again and arrives (W2-10)");
+        }
+        // W2-7: a squatted id doesn't silence the ASK; the real form arrives
+        {
+            P->node->online = false;
+            json qx = qq; qx["id"] = "form-5a5a5a5a";
+            CHECK(P->call(P->core->createForm(qx.dump())).value("ok", false), "the real creator makes form-5a5a5a5a (offline)");
+            R->call(R->core->importForm("whisperbox://form?id=form-5a5a5a5a&by=" + addrP));
+            CHECK(Dd->call(Dd->core->createForm(qx.dump())).value("ok", false), "a squatter publishes the same id");
+            CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains("form-5a5a5a5a"); }, 8000), "the respondent sees only the squatter's form");
+            { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); R->core->m_askSentMs["form-5a5a5a5a"] = 0; }
+            P->node->online = true;
+            CHECK(waitUntil([&] { return formOf(*R, "form-5a5a5a5a").value("creator", "") == addrP && formOf(*R, "form-5a5a5a5a").value("canRespond", false); }, 20000),
+                  "...it keeps asking, and the real creator's form arrives (W2-7)");
+        }
+        // W2-12: an empty Store peer list falls back to the fleet
+        {
+            setenv("WHISPERBOX_STORE_PEERS", ",", 1);
+            auto S = mkPeer("w2-emptypeers");
+            CHECK(waitUntil([&] { return S->snap().value("nodeReady", false); }, 10000), "a node with WHISPERBOX_STORE_PEERS=, starts");
+            S->call(S->core->importForm(linkOf(*P, fm)));
+            CHECK(waitUntil([&] { return foldOf(*S)["forms"].contains(fm); }, 8000), "...and pulls from the fleet's Store, no crash (W2-12)");
+            unsetenv("WHISPERBOX_STORE_PEERS");
+        }
+        unsetenv("WHISPERBOX_MINUTE_MS");
+    }
+
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);
     if (!failures) std::system(("rm -rf '" + g_base + "'").c_str());
     std::printf(failures ? "E2E FAILED\n" : "E2E GREEN\n");
