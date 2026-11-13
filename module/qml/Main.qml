@@ -179,6 +179,8 @@ Item {
     // Preview: the builder's form shown as respondents see it (never sent).
     property var previewDef: null
     readonly property var sel: previewDef ? previewDef : withDetail(forms[selectedId] || null)
+    // sel's questions, never null: the answers table can outlive sel for a frame (refresh, switching forms)
+    readonly property var selQs: (sel && sel.questions) ? sel.questions : []
     // The selected form's private parts (answers, my answers, my replies, quiz key, answer draft) come
     // from formDetail, not the snapshot: the snapshot is also the stateChanged event any module can
     // receive (open-review 2026-11-03, FR-2).
@@ -1417,25 +1419,25 @@ Item {
                                         model: root.respList
                                         Rectangle {
                                             id: trow
-                                            property var r: modelData
+                                            property var r: modelData || ({})
                                             property int ri: index
                                             width: tableCol.width > 0 ? childrenRect.width : 0; height: 40
                                             color: trMa.containsMouse ? root.wbPrimarySubtle : (index % 2 ? root.wbSurfaceRaised : Qt.darker(root.wbSurfaceRaised, 1.08))
                                             Row {
                                                 Repeater {
-                                                    model: 3 + root.sel.questions.length + 1 + (root.selQuiz ? 1 : 0)
+                                                    model: 3 + root.selQs.length + 1 + (root.selQuiz ? 1 : 0)
                                                     Item {
                                                         width: index === 0 ? 44 : (index <= 2 ? 120 : 190); height: 40
                                                         Text { textFormat: Text.PlainText; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
                                                             font.pixelSize: 12; font.family: index === 1 ? "monospace" : ""
-                                                            color: index === 3 + root.sel.questions.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
+                                                            color: index === 3 + root.selQs.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
                                                             text: {
                                                                 if (index === 0) return String(trow.ri + 1) + (trow.r.edits > 0 ? " \u270E" : "");
                                                                 if (index === 1) return root.shortAddr(trow.r.respondent) + (trow.r.answerNo ? "  #" + trow.r.answerNo : "") + (trow.r.verified === false ? "  (unverified)" : "");
                                                                 if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
-                                                                if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
-                                                                if (index === 4 + root.sel.questions.length) return root.scoreText(trow.r) + (trow.r.replies > 0 ? "  \u2709" : "");
-                                                                var q = root.sel.questions[index - 3]; return root.answerText(q, root.answerOf(trow.r, q.id));
+                                                                if (index === 3 + root.selQs.length) return trow.r.confirmed ? "sent" : "pending";
+                                                                if (index === 4 + root.selQs.length) return root.scoreText(trow.r) + (trow.r.replies > 0 ? "  \u2709" : "");
+                                                                var q = root.selQs[index - 3]; return root.answerText(q, root.answerOf(trow.r, q.id));
                                                             } }
                                                     }
                                                 }
