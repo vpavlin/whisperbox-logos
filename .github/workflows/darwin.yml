@@ -32,8 +32,7 @@ jobs:
           set -u -o pipefail
           mkdir -p out logs
           ok=1
-          # delivery_module: upstream releases carry no .lgx, so we build the pinned tag (the one whisperbox_core's flake uses)
-          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo delivery_module:github:logos-co/logos-delivery-module/v0.3.2; do
+          for m in whisperbox_core:whisperbox_core whisperbox:module whisperbox_respond:module-respond wb_feedback_demo:examples/feedback-demo; do
             name=${m%%:*}; dir=${m#*:}
             case "$dir" in github:*) ref="$dir#lgx-portable"; dir=. ;; *) ref=".#lgx-portable" ;; esac
             if (cd "$dir" && nix build --accept-flake-config "$ref" -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
