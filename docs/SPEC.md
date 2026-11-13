@@ -533,6 +533,8 @@ exposes the same names.
 | `confirmAnswer` | formId, confirmationId | creator / co-owner; one answer's receipt (several answers per person, ADR 0022) |
 | `confirmAll` | formId | one batch receipt for every unreceipted answer |
 | `setAutoReceipts` | formId, "1"/"0" | local setting; turning it on needs a form you make or co-own |
+| `acceptCoOwner` | formId | accept a co-owner invitation (`coInvites` in the snapshot); the form and its answers are pulled |
+| `leaveCoOwner` | formId | decline an invitation or stop co-owning; the form's answers go from this device |
 | `getDecryptedResponses` / `exportCsv` | formId | creator / co-owner; CSV has a `score` column on quizzes. Cells are answers from untrusted respondents: one starting with `=`, `+`, `-`, `@`, tab or CR that isn't a plain number gets a leading `'`, so a spreadsheet shows it as text instead of running it as a formula |
 | `addCoOwner` | formId, co-owner code (pub33 hex) | creator only; needs the form key on this device |
 | `replyToResponse` | formId, confirmationId, message | creator / co-owner |
@@ -591,7 +593,12 @@ After the cheap checks and the budget (6.1), before the signature check, an even
 node cares about, or it is dropped (`admDropUnwanted`) and never stored:
 - a signed event of a form it created, co-owns, opened (link or file), answered, has an answer
   draft for, or hid; one it authored; a `form.coowner` naming it;
-- an answer it sent (by event id, until its receipt), or one a form key it holds opens.
+- an answer it sent (by event id, until its receipt), or one a form key it holds opens (at most
+  20,000 per form).
+A signed event must also be one its author may write: close/update/re-open/co-owner by the creator,
+receipts and replies by the creator or a co-owner, `form.publish` by the creator the link names (plus
+at most four others in all). A `form.coowner` naming this node is an invitation (at most 20 pending):
+nothing of that form is kept or pulled until `acceptCoOwner`.
 The log is pruned by the same rule on start, after unlocking and when a form is removed. A locked
 identity keeps everything (no keys to judge with; nothing connects until unlocked).
 

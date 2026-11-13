@@ -267,7 +267,7 @@ function Banner({ text, tone = "info" }: { text: string; tone?: "ok" | "info" | 
 }
 
 // ── Home ─────────────────────────────────────────────────────────────────────────
-function Home({ snap, push, openLink }: Ctx) {
+function Home({ snap, push, openLink, toast }: Ctx) {
   const [link, setLink] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
@@ -355,6 +355,22 @@ function Home({ snap, push, openLink }: Ctx) {
                   <Text style={st.rowS} numberOfLines={1}>{d.publishAt ? "scheduled  ·  " + fmtTime(d.publishAt) : "draft  ·  edited " + fmtTime(d.updatedAt)}</Text>
                 </View>
               </Pressable>
+            ))}
+          </View>
+        ) : null}
+        {(snap.coInvites || []).length ? (
+          // co-owner invitations (audit R2-1): nothing of the form is kept until accepted
+          <View style={{ marginTop: 18 }}>
+            <Label>CO-OWNER INVITATIONS  {snap.coInvites.length}</Label>
+            {snap.coInvites.map((inv: any) => (
+              <View key={inv.formId} style={st.row}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={st.rowT} numberOfLines={1}>Co-own {inv.formId}?</Text>
+                  <Text style={st.rowS} numberOfLines={1}>invited by {shortAddr(inv.from)}  ·  read its answers, send receipts</Text>
+                </View>
+                <Btn label="Accept" primary onPress={() => { client.acceptCoOwner(inv.formId); toast("Accepted - the form and its answers are on their way"); }} />
+                <Btn label="Decline" onPress={() => { client.leaveCoOwner(inv.formId); toast("Declined"); }} style={{ marginLeft: 6 }} />
+              </View>
             ))}
           </View>
         ) : null}
@@ -735,13 +751,14 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                 <Btn label="Duplicate" onPress={() => push({ k: "create", fromForm: id })} />
               </View>
               {f.coOwner ? <Text style={[st.muted, { marginTop: 10 }]}>You co-own this form: you can read its answers and send receipts. Closing and editing stay with its creator ({shortAddr(f.creator)}).</Text> : null}
+              {f.coOwner ? <Btn label="Leave this form" danger onPress={() => { client.leaveCoOwner(id); toast("You left this form - its answers are gone from this phone"); pop(); }} style={{ marginTop: 8 }} /> : null}
               {f.mine && showCo ? (
                 <View style={st.card}>
-                  <Text style={st.muted}>A co-owner can read every answer and send receipts. They give you their co-owner code (Identity in their WhisperBox). Access can't be taken back once given, and the list of co-owner addresses is public.</Text>
+                  <Text style={st.muted}>A co-owner can read every answer and send receipts. They give you their co-owner code (Identity in their WhisperBox), then accept your invitation in their WhisperBox. Access can't be taken back once given, and the list of co-owner addresses is public.</Text>
                   {(f.coOwners || []).map((c: any) => <Text key={c.address} style={[st.addr, { marginTop: 6 }]}>• {c.address}</Text>)}
                   <View style={[st.joinRow, { marginTop: 10 }]}>
                     <TextInput value={coCode} onChangeText={setCoCode} autoCapitalize="none" placeholder="Co-owner code (66 characters)" placeholderTextColor={C.text3} style={[st.input, { flex: 1, fontFamily: MONO, fontSize: 12 }]} />
-                    <Btn label="Add" primary disabled={!coCode.trim()} onPress={() => { const r = client.addCoOwner(id, coCode); toast(r.ok ? "Co-owner added - they can read answers now" : r.error); if (r.ok) setCoCode(""); }} />
+                    <Btn label="Add" primary disabled={!coCode.trim()} onPress={() => { const r = client.addCoOwner(id, coCode); toast(r.ok ? "Invited - they can read answers once they accept" : r.error); if (r.ok) setCoCode(""); }} />
                   </View>
                 </View>
               ) : null}

@@ -324,6 +324,12 @@ Item {
             rows.push({ kind: "hd", label: "DRAFTS  " + root.drafts.length + "   \u00B7  clear all" });
             for (var dd = 0; dd < root.drafts.length; dd++) rows.push({ kind: "d", id: root.drafts[dd].id, draft: root.drafts[dd] });
         }
+        // co-owner invitations (audit R2-1): nothing of the form is kept until accepted
+        var inv = root.st.coInvites || [];
+        if (inv.length > 0) {
+            rows.push({ kind: "h", label: "CO-OWNER INVITATIONS  " + inv.length });
+            for (var iv = 0; iv < inv.length; iv++) rows.push({ kind: "i", id: inv[iv].formId, invite: inv[iv] });
+        }
         add("WAITING FOR SYNC", root.pendingForms, "p");
         add("MY FORMS", mine, "f");
         add("CO-OWNED", coOwned, "f");
@@ -929,7 +935,8 @@ Item {
                                     spacing: 1
                                     Text { textFormat: Text.PlainText;
                                         Layout.fillWidth: true
-                                        text: row.f ? (row.f.title || "(untitled)") : (modelData.kind === "d" ? ((modelData.draft.def && modelData.draft.def.title) || "Untitled draft") : (modelData.id || ""))
+                                        text: row.f ? (row.f.title || "(untitled)") : (modelData.kind === "d" ? ((modelData.draft.def && modelData.draft.def.title) || "Untitled draft")
+                                              : modelData.kind === "i" ? "Co-own " + modelData.id + "?" : (modelData.id || ""))
                                         font.pixelSize: 13
                                         font.weight: Font.DemiBold
                                         color: root.wbText
@@ -942,6 +949,7 @@ Item {
                                         color: root.wbTextTert
                                         text: {
                                             if (modelData.kind === "d") return modelData.draft.publishAt ? "scheduled  ·  " + root.fmtTime(modelData.draft.publishAt) : "draft  ·  edited " + root.fmtTime(modelData.draft.updatedAt);
+                                            if (modelData.kind === "i") return "invited by " + root.shortAddr(modelData.invite.from) + "  ·  read its answers, send receipts";
                                             if (!row.f) return "syncing...";
                                             var parts = [root.plural(row.f.questions.length, "question", "questions")];
                                             if (row.f.mine) parts.push(root.plural(root.responsesFor(row.f.id).length, "response", "responses"));
@@ -950,6 +958,10 @@ Item {
                                         }
                                     }
                                 }
+                                WbButton { visible: modelData.kind === "i"; label: "Accept"
+                                    onClicked: act("acceptCoOwner", [modelData.id], "Accepted - the form and its answers are on their way") }
+                                WbButton { visible: modelData.kind === "i"; label: "Decline"
+                                    onClicked: act("leaveCoOwner", [modelData.id], "Declined") }
                                 Badge {
                                     visible: !!(row.f && row.f.mine && row.f.newResponses > 0)
                                     label: row.f ? row.f.newResponses + " new" : ""
@@ -963,6 +975,8 @@ Item {
                                 }
                             }
                             MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                z: -1   // under the row's buttons (Accept / Decline on an invitation)
+                                enabled: modelData.kind !== "i"
                                 onClicked: modelData.kind === "d" ? root.openDraft(modelData.draft) : root.selectForm(modelData.id) }
                         }
                     }
@@ -1152,8 +1166,14 @@ Item {
                         visible: !!(root.sel && (root.sel.mine || root.sel.coOwner))
                         spacing: 16
 
-                        Text { textFormat: Text.PlainText; visible: !!(root.sel && root.sel.coOwner); Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
-                            text: "You co-own this form: you can read its answers and send receipts. Closing and editing stay with its creator (" + root.shortAddr(root.sel ? root.sel.creator : "") + ")." }
+                        RowLayout {
+                            visible: !!(root.sel && root.sel.coOwner)
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
+                                text: "You co-own this form: you can read its answers and send receipts. Closing and editing stay with its creator (" + root.shortAddr(root.sel ? root.sel.creator : "") + ")." }
+                            WbButton { label: "Leave"; onClicked: act("leaveCoOwner", [root.selectedId], "You left this form - its answers are gone from this device") }
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -1234,7 +1254,7 @@ Item {
                             ColumnLayout {
                                 id: coCol; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 8
                                 Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12; color: root.wbTextSec
-                                    text: "A co-owner can read every answer and send receipts. They need to give you their co-owner code (Identity in their WhisperBox). Access can't be taken back once given, and the list of co-owner addresses is public." }
+                                    text: "A co-owner can read every answer and send receipts. They need to give you their co-owner code (Identity in their WhisperBox), then accept your invitation in their WhisperBox. Access can't be taken back once given, and the list of co-owner addresses is public." }
                                 Repeater {
                                     model: root.sel && root.sel.coOwners ? root.sel.coOwners : []
                                     Text { textFormat: Text.PlainText; text: "\u2022 " + modelData.address; font.pixelSize: 12; font.family: "monospace"; color: root.wbText }
@@ -1245,7 +1265,7 @@ Item {
                                         TextField { id: coField; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; color: root.wbText; placeholderTextColor: root.wbTextTert
                                             font.pixelSize: 12; font.family: "monospace"; background: null; placeholderText: "Co-owner code (66 characters)" } }
                                     WbButton { label: root.busy("addCoOwner") ? "Adding..." : "Add co-owner"; active: !root.busy("addCoOwner") && coField.text.trim().length > 0
-                                        onClicked: act("addCoOwner", [root.selectedId, coField.text.trim()], "Co-owner added - they can read answers now", function () { coField.text = ""; }) }
+                                        onClicked: act("addCoOwner", [root.selectedId, coField.text.trim()], "Invited - they can read answers once they accept", function () { coField.text = ""; }) }
                                 }
                             }
                         }

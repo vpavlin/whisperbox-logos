@@ -74,6 +74,11 @@ public:
     std::string markSeen(std::string formId);
     std::string updateForm(std::string formId, std::string defJson);
     std::string addCoOwner(std::string formId, std::string coOwnerPubHex);
+    // Accept a co-owner invitation (a creator shared a form's key with me): from then on the form and
+    // its answers are kept, and its bucket is pulled from Store over the whole window. {ok}
+    std::string acceptCoOwner(std::string formId);
+    // Decline a co-owner invitation, or stop co-owning a form: its events and answers go from this device. {ok}
+    std::string leaveCoOwner(std::string formId);
     std::string replyToResponse(std::string formId, std::string confirmationId, std::string message);
     std::string sendScores(std::string formId);
     std::string importIdentity(std::string privHex);
@@ -159,6 +164,26 @@ private:
     std::map<std::string, long long> m_rcptResentMs;                     // receipt event id -> last re-send   // stop pulling buckets no form of mine is in (no unsubscribe exists)
     long long m_interestGen = -1;
     std::set<std::string> m_myForms;                                   // created or co-owned (from the fold)
+    std::map<std::string, std::string> m_formCreator;                  // formId -> creator (the fold's, else the link's)
+    std::map<std::string, std::set<std::string>> m_formCoOwners;       // formId -> co-owner addresses (the fold's)
+    std::map<std::string, int> m_publishAlts;                          // formId -> form.publish events held (contested)
+    std::map<std::string, std::string> m_keyForm;                      // sealing pub -> formId
+    std::map<std::string, long> m_respPerForm;                         // formId -> answers held (audit R2-3)
+    std::string m_wantedForm;                                          // the form wanted() found an answer for
+    bool m_pruning = false;                                            // pruneUnwanted: no per-form cap on what is already held
+    // co-owner invitations (audit R2-1/R2-6): accepted / declined form ids, persisted
+    std::set<std::string> m_coAccepted, m_coDeclined;
+    void loadCoOwnerPrefs();
+    void saveCoOwnerPrefs();
+    whisperbox::json coInvites();
+    // Store pulls (audit R2-4/R2-5): an event budget per pull, the window it asked for, a second Store's opinion
+    bool m_storeIngest = false;
+    long m_storeEventsLeft = 0;
+    long long m_storeWindowMs = 0;
+    std::map<std::string, long long> m_secondWant;                     // bucket -> window start, for the second Store
+    bool m_secondPass = false;
+    std::set<std::string> m_netLive;                                   // answer ids whose network time came live
+    long long m_lastRejoinMs = 0;
     std::map<std::string, const whisperbox::SignId*> m_myKeys;          // sealing pub -> key (formKeysFor)
     long m_admDropUnwanted = 0;
     std::string m_nodeMode, m_nodeModeWhy;                            // what bootstrapDirect chose ("" = not chosen)

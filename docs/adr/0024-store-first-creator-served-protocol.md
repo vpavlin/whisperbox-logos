@@ -296,3 +296,42 @@ after unlocking, and when a form is removed. A removed form's bucket stops being
   is judged (deadline, close) by the message's network timestamp, whatever its age (never in the
   future); a live frame's still has to be about now.
 - W2-12: an empty `WHISPERBOX_STORE_PEERS` keeps the fleet list. W2-13: wire header comments.
+
+## Amendment 2026-11-13 (2): audit round 2
+
+The second audit round (proteus/auditor, 15 findings on the fixes above) led to:
+
+- **Co-owner grants are invitations** (Václav). A `form.coowner` naming me is kept and shown
+  (`coInvites` in the snapshot, at most 20 pending); nothing of the form is opened, kept or pulled
+  until I accept it (`acceptCoOwner`): then the form and its past answers are pulled over the whole
+  Store window. `leaveCoOwner` declines an invitation or stops co-owning: the form's answers go from
+  this device. Forms already co-owned before this stay co-owned. (R2-1, R2-6)
+- **Who may write what.** A signed event for a form I keep is kept only if its author may write it:
+  close/update/re-open/co-owner by the creator; receipts and replies by the creator or a co-owner;
+  `form.publish` by the creator the link names, plus at most four others in all (so a contested id
+  and "this link names someone else" stay visible, and junk stays bounded). (R2-2)
+- **Answers per form:** at most 20,000 kept per form, besides the node-wide 50,000, so one form's
+  public key can't stop every other form taking answers. (R2-3)
+- **Store pulls:** at most 100 messages a page (the rest are not even looked at) and 5,000 events a
+  pull, all pages. (R2-4)
+- **Network time** (Václav: relay doesn't carry old messages; ask more than one Store): every pull is
+  followed by the same query to a second Store peer. A Store-delivered answer's time is the LATEST any
+  Store reports, never before the window asked for; a time seen live is never changed by a Store; a
+  live duplicate never moves a time earlier. A sender can still choose a time inside a pull window
+  before RLN (one Store's honesty is no longer enough to backdate). (R2-5)
+- **Receipts:** a retried answer that was confirmed gets ONE receipt for that answer (deterministic id,
+  made once), never the batch it was in. A creator's other device that never saw the receipt shows
+  the answer unconfirmed (it can confirm it again). (R2-7)
+- **Own answers:** if the record of my answers is missing or behind (an old version, a damaged file, a
+  crash in between), the prune keeps every answer it can't place. (R2-8)
+- **Phone, a form key missing** (Keycard, after a reinstall): at most 2,000 unopenable answers are kept
+  meanwhile; restoring the key prunes and pulls again. (R2-10)
+- Smaller: a failed send is requeued even when the transport was replaced (C++), JS stops after 5 tries
+  (R2-12); a removed bucket leaves the pull queues (R2-13); a form file with an event over the wire
+  limit is refused (R2-14); a stalled loam_core forgets its joins, and the Loam path re-joins every
+  10 minutes (R2-15).
+
+Open: trial decryption still costs one ECDH per held key per answer (R2-9; bounded by the budgets
+above; a per-form tag is a protocol change for later, e.g. Rumor), and the phone can't force a full
+Store window yet: loam-transport's storeSync skips a topic pulled in the last minute (R2-11; ASKs and
+the next pull cover it).

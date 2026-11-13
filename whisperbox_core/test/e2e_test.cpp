@@ -647,7 +647,7 @@ int main(int argc, char** argv) {
         auto G = mkPeer("G");
         CHECK(waitUntil([&] { return G->snap()["nodeReady"] == true; }, 3000), "G up");
         CHECK(G->call(G->core->importForm(link)).value("ok", false), "G opens the creator's pinned link");
-        CHECK(waitUntil([&] { return hasForm(*G, sfid) && formOf(*G, sfid).value("contested", false); }, 8000), "G syncs both copies");
+        CHECK(waitUntil([&] { return hasForm(*G, sfid) && formOf(*G, sfid).value("contested", false); }, 8000), "G syncs both copies (a few alternative publishes are kept, bounded: R2-2)");
         json gf = formOf(*G, sfid);
         CHECK(gf.value("creator", "") == addrA && gf.value("canRespond", false), "pinned link shows the GENUINE form and allows answering");
         json one = json::array({{{"questionId", "q1"}, {"value", "plenty"}}});
@@ -950,6 +950,13 @@ int main(int argc, char** argv) {
             CHECK(!A->call(A->core->addCoOwner(sf, "02abc")).value("ok", true), "a malformed co-owner code is refused");
             CHECK(!G->call(G->core->addCoOwner(sf, A->snap()["identity"]["pubHex"])).value("ok", true), "only the creator can add co-owners");
             CHECK(A->call(A->core->addCoOwner(sf, gCode)).value("ok", false), "creator adds G as co-owner");
+            // a named copy: iterating p.snap()["coInvites"] walks a member of a destroyed temporary
+            auto invited = [&](Peer& p, const std::string& f) { json sn = p.snap(); for (const auto& x : sn["coInvites"]) if (x.value("formId", "") == f) return true; return false; };
+            const bool gInv = waitUntil([&] { return invited(*G, sf); }, 4000);
+            const bool gCo = formOf(*G, sf).value("coOwner", false); const size_t gResp = responsesOf(*G, sf).size();
+            CHECK(gInv && !gCo && gResp == 0, "G is invited, not yet a co-owner: nothing is opened or kept (audit R2-1) inv=" + std::to_string(gInv) + " co=" + std::to_string(gCo) + " resp=" + std::to_string(gResp));
+            dumpFixture(*G, "invited");   // a co-owner invitation in the sidebar (audit R2-1)
+            CHECK(G->call(G->core->acceptCoOwner(sf)).value("ok", false) && !invited(*G, sf), "G accepts the invitation");
             CHECK(waitUntil([&] { return formOf(*G, sf).value("coOwner", false) && responsesOf(*G, sf).size() == 1; }, 4000), "G (co-owner) decrypts B's answer");
             CHECK(G->call(G->core->exportCsv(sf)).value("ok", false), "co-owner can export the CSV");
             CHECK(G->call(G->core->confirmResponse(sf, addrB)).value("ok", false), "co-owner sends the receipt");
@@ -957,6 +964,8 @@ int main(int argc, char** argv) {
             CHECK(!G->call(G->core->closeForm(sf)).value("ok", true), "co-owner can't close");
             CHECK(!G->call(G->core->updateForm(sf, json({{"title", "x"}}).dump())).value("ok", true), "co-owner can't edit");
             CHECK(!formOf(*C, sf).value("coOwner", false) && responsesOf(*C, sf).empty(), "others still see nothing");   // a co-owner would be shown, with the flag
+            CHECK(G->call(G->core->leaveCoOwner(sf)).value("ok", false) && !formOf(*G, sf).value("coOwner", true) && responsesOf(*G, sf).empty(),
+                  "G leaves: no longer a co-owner, the answers gone from G (audit R2-1)");
         }
 
         // Quiz + private replies: the answer key is sealed; scores + replies reach only their respondent.
@@ -1929,6 +1938,106 @@ int main(int argc, char** argv) {
             S->call(S->core->importForm(linkOf(*P, fm)));
             CHECK(waitUntil([&] { return foldOf(*S)["forms"].contains(fm); }, 8000), "...and pulls from the fleet's Store, no crash (W2-12)");
             unsetenv("WHISPERBOX_STORE_PEERS");
+        }
+        // ── round 2 (audit 2026-11-13, R2-*) ──
+        {
+            const long long now = QDateTime::currentMSecsSinceEpoch();
+            auto sealTo = [](const std::string& pub, const std::string& pt) { return whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end()))); };
+            auto respEv = [&](const std::string& hex, long long wall) {
+                return json({{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", wall}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}});
+            };
+            auto live = [&](Peer& p, const std::string& topic, const json& ev, long long tsMs) {
+                p.node->onRx(topic, "net", FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())), tsMs * 1000000LL);
+            };
+            const std::string addrR = R->snap()["identity"]["address"];
+            const std::string rCode = R->snap()["identity"]["pubHex"];
+            // R2-1: a creator makes its respondent a co-owner, unasked: an invitation, nothing more
+            {
+                std::string fg = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                R->call(R->core->importForm(linkOf(*P, fg)));
+                CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(fg); }, 8000), "R opened P's form");
+                CHECK(P->call(P->core->addCoOwner(fg, rCode)).value("ok", false), "P names R co-owner, unasked");
+                auto invited = [&] { json sn = R->snap(); for (const auto& x : sn["coInvites"]) if (x.value("formId", "") == fg) return true; return false; };
+                const bool rInv = waitUntil(invited, 5000); const bool rCo = formOf(*R, fg).value("coOwner", false);
+                CHECK(rInv && !rCo, "R sees an invitation; not a co-owner (R2-1) inv=" + std::to_string(rInv) + " co=" + std::to_string(rCo));
+                bool cursor = false; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); cursor = R->core->m_lastPullMs.count(WhisperboxCoreImpl::wireTopicFor(fg)) > 0; }
+                CHECK(cursor, "...and the grant didn't reset R's Store cursor for that bucket (no forced pull, R2-1)");
+                CHECK(R->call(R->core->leaveCoOwner(fg)).value("ok", false) && !invited(), "R declines: the invitation goes");
+            }
+            // R2-2: signed junk for a form R keeps, by someone who isn't its creator: not kept
+            {
+                whisperbox::SignId z = whisperbox::identityFromPriv(whisperbox::sha256(whisperbox::Bytes{'j', 'u', 'n', 'k'}));
+                json junk = {{"v", 1}, {"id", "update:" + fm + ":junk"}, {"type", "form.update"}, {"hlc", {{"wall", now}, {"ctr", 0}, {"dev", "z"}}}, {"dev", "z"},
+                             {"payload", {{"formId", fm}, {"author", z.address}, {"form", {{"title", std::string(40000, 'J')}}}}}};
+                whisperbox::signEventJson(junk, z);
+                const long u0 = diag(*R, "admDropUnwanted");
+                live(*R, WhisperboxCoreImpl::wireTopicFor(fm), junk, now);
+                pump(500);
+                bool kept = false; for (auto& ev : readLog(R->dir)) if (ev.value("id", "") == "update:" + fm + ":junk") kept = true;
+                CHECK(!kept && diag(*R, "admDropUnwanted") > u0, "a signed form.update for R's form by a non-creator is dropped before it's stored (R2-2)");
+            }
+            // R2-3: one form's answers stop at its own cap; P's other forms still take answers
+            {
+                setenv("WHISPERBOX_MAX_ANSWERS_PER_FORM", "5", 1);
+                std::string f1 = P->call(P->core->createForm(qq.dump())).value("formId", ""), f2 = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                pump(300);
+                const std::string pub1 = formOf(*P, f1).value("publicKey", ""), pub2 = formOf(*P, f2).value("publicKey", "");
+                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); P->core->m_respRefillMs = 0; }
+                for (int i = 0; i < 8; i++) live(*P, WhisperboxCoreImpl::wireTopicFor(f1), respEv(sealTo(pub1, R"({"formId":")" + f1 + R"(","n":)" + std::to_string(i) + "}"), now), now);
+                live(*P, WhisperboxCoreImpl::wireTopicFor(f2), respEv(sealTo(pub2, R"({"formId":")" + f2 + R"("})"), now), now);
+                pump(800);
+                long n1 = 0, n2 = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); n1 = P->core->m_respPerForm[f1]; n2 = P->core->m_respPerForm[f2]; }
+                CHECK(n1 == 5 && n2 == 1, "a flooded form stops at its cap; another form still takes its answer (R2-3): " + std::to_string(n1) + "/" + std::to_string(n2));
+                unsetenv("WHISPERBOX_MAX_ANSWERS_PER_FORM");
+            }
+            // R2-5: a time seen live is never moved by a Store's report; a Store's time is never before the window
+            {
+                std::string fz = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                pump(300);
+                const std::string topic = WhisperboxCoreImpl::wireTopicFor(fz), pub = formOf(*P, fz).value("publicKey", "");
+                json a1 = respEv(sealTo(pub, R"({"formId":")" + fz + R"(","n":1})"), now), a2 = respEv(sealTo(pub, R"({"formId":")" + fz + R"(","n":2})"), now);
+                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); P->core->m_respRefillMs = 0; }
+                live(*P, topic, a1, now);
+                pump(300);
+                auto inj = [&](const json& ev, long long tsMs) {
+                    return json{{"messageHash", "0x" + ev.value("id", "").substr(5, 8)}, {"message", {{"payload", FakeBus::b64(FakeBus::b64(whisperbox::b64encode(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump())))},
+                                {"contentTopic", topic}, {"timestamp", (double)(tsMs * 1000000LL)}}}};
+                };
+                auto& inject = FakeBus::get().storeInject;
+                inject = json::array({inj(a1, now - 3600000), inj(a2, 1041379200000LL)});   // a1 an hour "earlier"; a2 from 2003
+                P->call(P->core->resync());
+                pump(1500);
+                inject = json::array();
+                long long t1 = 0, t2 = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); t1 = P->core->m_netTimes[a1.value("id", "")]; t2 = P->core->m_netTimes[a2.value("id", "")]; }
+                CHECK(t1 >= now - 1000, "a Store's earlier report doesn't move a time seen live (R2-5)");
+                CHECK(t2 > now - 7LL * 3600000LL, "a Store's 2003 is clamped to the window we asked for (R2-5)");
+            }
+            // R2-7: a retried answer gets ONE receipt again, not the batch it was confirmed in
+            {
+                std::string fr = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                R->call(R->core->importForm(linkOf(*P, fr)));
+                CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(fr); }, 8000), "R has form fr");
+                CHECK(R->call(R->core->submitResponse(fr, json::array({{{"questionId", "q"}, {"value", "x"}}}).dump())).value("ok", false), "R answers fr");
+                CHECK(waitUntil([&] { return responsesOf(*P, fr).size() == 1; }, 8000), "P has it");
+                CHECK(P->call(P->core->confirmAll(fr)).value("ok", false), "P confirms in a batch");
+                const std::string cid = responsesOf(*P, fr)[0].value("confirmationId", "");
+                json mine; for (auto& ev : readLog(R->dir)) if (ev.value("type", "") == "response.submit") mine = ev;
+                live(*P, WhisperboxCoreImpl::wireTopicFor(fr), mine, now);   // the respondent's retry
+                pump(800);
+                bool single = false; for (auto& ev : readLog(P->dir)) if (ev.value("id", "") == whisperbox::responseConfirmId(fr, cid)) single = true;
+                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); for (auto& ev : P->core->m_log) if (ev.value("id", "") == whisperbox::responseConfirmId(fr, cid)) single = true; }
+                CHECK(single, "the retry made a single-answer receipt (R2-7)");
+            }
+            // R2-8: my_answers.json behind: the prune keeps answers it can't place
+            {
+                size_t before = 0, after = 0;
+                { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx);
+                  for (auto& ev : R->core->m_log) if (ev.value("type", "") == "response.submit") before++;
+                  R->core->m_myAnswers.clear();
+                  R->core->pruneUnwanted();
+                  for (auto& ev : R->core->m_log) if (ev.value("type", "") == "response.submit") after++; }
+                CHECK(before > 0 && after == before, "with my_answers missing, R's own answers survive the prune (R2-8)");
+            }
         }
         unsetenv("WHISPERBOX_MINUTE_MS");
     }
