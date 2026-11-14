@@ -176,10 +176,9 @@ private:
     long m_storeSeenLeft = 0;                                          // events a Store pull may make us look at, duplicates too (R3-10)
     std::map<std::string, int> m_secondTries;                          // bucket -> failed second-Store tries (R3-2)
     bool grantFromCreator(const std::string& fid, const std::string& grantAuthor);   // R3-1
-    std::string inviterOf(const std::string& fid);                                    // R5-1/R5-2: the known creator, if they invited me
+    std::string inviterOf(const std::string& fid);                                    // R6-5: the link's creator, if they invited me
     bool grantNamesMe(const std::string& fid);                                         // a form.coowner naming me for fid is held
     size_t pendingGrants();                                                          // invitation events held, not accepted/declined
-    bool contestedUnpinned(const std::string& fid);                                   // R5-1: several publishers, no link pin
     bool coOwnerGranted(const std::string& fid, const std::string& who);              // R3-6: a creator's grant to `who` is held
     // co-owner invitations (audit R2-1/R2-6): accepted / declined form ids, persisted
     std::set<std::string> m_coAccepted, m_coDeclined;
@@ -301,8 +300,19 @@ private:
     std::unordered_map<std::string, Opened> m_openCache;
     whisperbox::OrderedJson decryptView(const whisperbox::OrderedJson& state);
     whisperbox::json openAnswer(const whisperbox::OrderedJson& state, const std::map<std::string, const whisperbox::SignId*>& keys, const std::string& id, const std::string& hexBlob);
-    std::vector<std::pair<std::string, std::string>> receiptPairs(const whisperbox::OrderedJson& state);   // ADR 0026: answers I can name
+    // blinded receipts v3 (ADR 0027): per-answer secrets (cached), verified proofs, the keep-filter
+    struct RSecret { whisperbox::Bytes S; std::string tag, rtag; bool ok = false; };
+    struct RPair { std::string fid, cid; RSecret sec; };
+    RSecret secretFor(const std::string& key, const whisperbox::Bytes& priv, const std::string& pubHex);
+    RSecret ownSecret(const std::string& fid, const std::string& cid, const std::string& formPub);
+    RSecret ownerSecret(const std::string& fid, const std::string& cid, const whisperbox::SignId& formKey, const std::string& replyPub);
+    const std::vector<RPair>& receiptPairs(const whisperbox::OrderedJson& state);
+    std::vector<RPair> receiptPairsUncached(const whisperbox::OrderedJson& state);
+    long long proofAt(const whisperbox::OrderedJson& state, const RPair& pr, const std::string& proof);
+    std::vector<whisperbox::VerifiedReceipt> verifiedReceipts(const whisperbox::OrderedJson& state);
     bool receiptWanted(const whisperbox::json& e);
+    int emitNamedReceipts(const std::string& formId, const std::vector<std::string>& cids);
+    long long retryNextAt(int k);   // F4: jittered answer retries
     // Where data lives and whether it can be saved there (shown in the view when not).
     // Appended last: layout rule above.
     std::string m_storageNote;
@@ -413,5 +423,9 @@ private:
     std::set<std::string> m_formContested;                               // forms the fold shows as published by more than one key (R5-1)
     long m_netDisagree = 0;   // network times ignored: too far from the answer's own HLC (R5-3)
     long long m_rintGen = -1;                 // receiptWanted: m_logGen its tag set is for
-    std::set<std::string> m_rintTags;         // tags of the answers I can name
+    std::map<std::string, RPair> m_rintByTag;  // tag -> an answer I can name (receiptWanted)
+    std::unordered_map<std::string, RSecret> m_rsec;                          // answer secrets (an ECDH each)
+    std::unordered_map<std::string, whisperbox::ReceiptProof> m_rproof;       // opened proofs, by tag|proof
+    std::vector<RPair> m_rpairs; std::string m_rpairsKey, m_rintKey;           // receiptPairs cache (R6-2)
+    std::deque<long long> m_rcptResends;                                      // receipt re-sends, last 10 min (R6-9)
 };

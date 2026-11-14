@@ -958,6 +958,7 @@ int main(int argc, char** argv) {
             CHECK(!A->call(A->core->addCoOwner(sf, "02abc")).value("ok", true), "a malformed co-owner code is refused");
             CHECK(!G->call(G->core->addCoOwner(sf, A->snap()["identity"]["pubHex"])).value("ok", true), "only the creator can add co-owners");
             CHECK(A->call(A->core->addCoOwner(sf, gCode)).value("ok", false), "creator adds G as co-owner");
+            openLink(*G, sf);   // the creator's link names who made the form: invitations need it (audit R6-5)
             // a named copy: iterating p.snap()["coInvites"] walks a member of a destroyed temporary
             auto invited = [&](Peer& p, const std::string& f) { json sn = p.snap(); for (const auto& x : sn["coInvites"]) if (x.value("formId", "") == f) return true; return false; };
             const bool gInv = waitUntil([&] { return invited(*G, sf); }, 4000);
@@ -2035,9 +2036,12 @@ int main(int argc, char** argv) {
                 json mine; for (auto& ev : readLog(R->dir)) if (ev.value("type", "") == "response.submit") mine = ev;
                 live(*P, WhisperboxCoreImpl::wireTopicFor(fr), mine, now);   // the respondent's retry
                 pump(800);
-                const std::string rid1 = whisperbox::responseReceiptId({whisperbox::receiptTag(fr, cid)});   // blinded (ADR 0026)
-                bool single = false; for (auto& ev : readLog(P->dir)) if (ev.value("id", "") == rid1) single = true;
-                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); for (auto& ev : P->core->m_log) if (ev.value("id", "") == rid1) single = true; }
+                // blinded v3 (ADR 0027): a fresh receipt with ONE real entry (+ one decoy) for this answer
+                std::string tag1; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); tag1 = R->core->ownSecret(fr, cid, formOf(*P, fr).value("publicKey", "")).tag; }
+                bool single = false;
+                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx);
+                  for (auto& ev : P->core->m_log) if (ev.value("type", "") == "response.receipt" && ev["payload"]["r"].size() == 2)
+                      for (auto& x : ev["payload"]["r"]) if (x.value("t", "") == tag1) single = true; }
                 CHECK(single, "the retry made a single-answer receipt (R2-7)");
             }
             // R2-8: my_answers.json behind: the prune keeps answers it can't place
@@ -2120,8 +2124,8 @@ int main(int argc, char** argv) {
                 whisperbox::signEventJson(ev, Dd->core->m_signId);
                 live(*R, WhisperboxCoreImpl::wireTopicFor(fid), ev, now); pump(500);
                 CHECK(!R->call(R->core->acceptCoOwner(fid)).value("ok", true), "an invitation whose form hasn't arrived can't be accepted (R5-1)");
-                bool listed = false; json sn0 = R->snap(); for (const auto& i : sn0["coInvites"]) if (i.value("formId", "") == fid) listed = true;
-                CHECK(!listed, "...nor is it listed yet");
+                bool needsLink = false; json sn0 = R->snap(); for (const auto& i : sn0["coInvites"]) if (i.value("formId", "") == fid) needsLink = i.value("needsLink", false);
+                CHECK(needsLink, "...it is listed as needing the creator's link (R6-5)");
                 bool pinned = false; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); pinned = R->core->m_pinned.count(fid) && !R->core->m_pinned[fid].empty(); }
                 CHECK(!pinned, "...and nothing pinned anyone as its creator (R4-1)");
             }
@@ -2181,6 +2185,8 @@ int main(int argc, char** argv) {
                 pump(300);
                 const std::string topic = WhisperboxCoreImpl::wireTopicFor(f2);
                 live(*R, topic, evOf(*P, "form.coowner", f2), now); pump(300);
+                CHECK(invited(f2).is_object() && invited(f2).value("needsLink", false) && !R->call(R->core->acceptCoOwner(f2)).value("ok", true), "without the link: listed, not acceptable (R6-5)");
+                R->call(R->core->importForm(linkOf(*P, f2)));
                 live(*R, topic, evOf(*P, "form.publish", f2), now); pump(500);
                 CHECK(invited(f2).is_object() && invited(f2).value("from", "") == P->snap()["identity"]["address"].get<std::string>(), "R sees P's invitation");
                 json x = {{"v", 1}, {"id", "coowner:" + f2 + ":" + addrR + ":x"}, {"type", "form.coowner"}, {"hlc", {{"wall", now + 1}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"},
@@ -2207,9 +2213,11 @@ int main(int argc, char** argv) {
                 whisperbox::signEventJson(xg, Dd->core->m_signId);
                 live(*R, topic, xg, now); live(*R, topic, evOf(*P, "form.coowner", f3), now); pump(300);
                 live(*R, topic, fake, now); live(*R, topic, real, now); pump(600);
-                json inv = invited(f3);
-                CHECK(inv.is_object() && inv.value("contested", false), "the invitation to a contested form is shown as contested (R5-1)");
-                CHECK(!R->call(R->core->acceptCoOwner(f3)).value("ok", true), "...and can't be accepted without the creator's link (R5-1)");
+                CHECK(!R->call(R->core->acceptCoOwner(f3)).value("ok", true), "a backdated fake copy: nothing acceptable without the creator's link (R5-1, R6-5)");
+                R->call(R->core->importForm(linkOf(*P, f3)));
+                live(*R, topic, fake, now); live(*R, topic, real, now); pump(600);
+                CHECK(R->call(R->core->acceptCoOwner(f3)).value("ok", false) && waitUntil([&] { return formOf(*R, f3).value("creator", "") == P->snap()["identity"]["address"].get<std::string>(); }, 5000),
+                      "with the link: the real invitation is accepted and the real form shown (R6-5)");
             }
             // R5-3: a network time far from the answer's own HLC is ignored; the earliest agreeing one wins
             {
@@ -2218,7 +2226,7 @@ int main(int argc, char** argv) {
                 const std::string topic = WhisperboxCoreImpl::wireTopicFor(ff), pub = formOf(*P, ff).value("publicKey", "");
                 std::string pt = R"({"formId":")" + ff + R"(","r5":1})";
                 std::string hex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(pub), whisperbox::Bytes(pt.begin(), pt.end())));
-                const long long h = QDateTime::currentMSecsSinceEpoch() - 120000;   // inside any pull window
+                const long long h = (QDateTime::currentMSecsSinceEpoch() - 120000) / 1000 * 1000;   // inside any pull window; whole seconds survive the fake Store's double ns
                 json a = {{"v", 1}, {"id", whisperbox::responseSubmitId(hex)}, {"type", "response.submit"}, {"hlc", {{"wall", h}, {"ctr", 0}, {"dev", "x"}}}, {"dev", "x"}, {"payload", {{"encryptedPayload", hex}}}};
                 const std::string aid = a.value("id", "");
                 auto storeSays = [&](long long ms, const std::string& mh) {
@@ -2236,7 +2244,6 @@ int main(int argc, char** argv) {
                 storeSays(h0 - 900000, "0xb1");
                 CHECK(tOf() == 0, "a Store's time 15 min from the answer's HLC is ignored (R5-3)");
                 storeSays(h0 + 60000, "0xb2");
-                CHECK(tOf() == h0 + 60000, "a time that agrees with the HLC counts");
                 storeSays(h0 + 90000, "0xb4");
                 CHECK(tOf() == h0 + 60000, "a later one doesn't re-date it");
                 storeSays(h0 + 10000, "0xb3");
@@ -2255,6 +2262,40 @@ int main(int argc, char** argv) {
                   R->core->pruneUnwanted();
                   for (auto& e : R->core->m_log) if (e.value("type", "") == "response.submit") { total++; if (std::find(mineIds.begin(), mineIds.end(), e.value("id", "")) != mineIds.end()) mineKept++; } }
                 CHECK(total <= 2000 && mineKept == mineIds.size() && !mineIds.empty(), "first-seen lost too: at most 2,000 unsure answers kept, mine among them (R5-4)");
+            }
+            // receipts v3 (ADR 0027): tag + sealed signed proof; decoys; coarse HLC; forgery and replay
+            {
+                std::string f5 = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                R->call(R->core->importForm(linkOf(*P, f5)));
+                CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(f5); }, 8000), "R has f5");
+                CHECK(R->call(R->core->submitResponse(f5, json::array({{{"questionId", "q"}, {"value", "v3"}}}).dump())).value("ok", false), "R answers f5");
+                CHECK(waitUntil([&] { return responsesOf(*P, f5).size() == 1; }, 8000), "P has it");
+                const std::string cid = responsesOf(*P, f5)[0].value("confirmationId", "");
+                const std::string topic = WhisperboxCoreImpl::wireTopicFor(f5), fpub = formOf(*P, f5).value("publicKey", "");
+                // A: R signs a "receipt" for its own answer
+                json forged;
+                { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx);
+                  auto v = R->core->ownSecret(f5, cid, fpub);
+                  json r = json::array({{{"t", v.tag}, {"s", whisperbox::sealReceiptProof(v.S, R->core->m_signId, f5, cid, now)}}, whisperbox::decoyReceiptEntry()});
+                  forged = {{"v", 1}, {"id", whisperbox::responseReceiptId(r)}, {"type", "response.receipt"}, {"hlc", {{"wall", now / 600000 * 600000}, {"ctr", 0}, {"dev", "wb-x"}}}, {"dev", "wb-x"}, {"payload", {{"r", r}}}}; }
+                live(*P, topic, forged, now); live(*R, topic, forged, now); pump(500);
+                bool held = false; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); for (auto& e : P->core->m_log) if (e.value("id", "") == forged.value("id", "")) held = true; }
+                CHECK(!held && !responsesOf(*P, f5)[0].value("confirmed", true), "a respondent's self-signed receipt is dropped; the answer isn't confirmed (ADR 0027)");
+                CHECK(!formOf(*R, f5).value("myConfirmed", true), "...and the respondent doesn't count its own signature");
+                // the real one
+                CHECK(P->call(P->core->confirmAll(f5)).value("events", 0) == 1, "P confirms");
+                json real; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); for (auto& e : P->core->m_log) if (e.value("type", "") == "response.receipt" && e.value("id", "") != forged.value("id", "")) real = e; }
+                const size_t nr = real.is_object() ? real["payload"]["r"].size() : 0;
+                CHECK(nr >= 2 && (nr & (nr - 1)) == 0 && real["hlc"].value("wall", 1LL) % 600000 == 0 && real["hlc"].value("ctr", 1) == 0 && !real.contains("sig")
+                      && real.dump().find(f5) == std::string::npos && real.dump().find(cid) == std::string::npos, "a receipt: decoys to a power of two, a 10-min HLC, no signature, form or receipt id");
+                CHECK(waitUntil([&] { return formOf(*R, f5).value("myConfirmed", false); }, 8000), "R verifies the creator's proof");
+                long long at = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); at = foldOf(*P)["receiptHlc"][f5][cid].value("wall", 0LL); }
+                json back = real; back["hlc"]["wall"] = real["hlc"].value("wall", 0LL) - 3600000;
+                live(*P, topic, back, now); live(*R, topic, back, now); pump(500);
+                long long atP = 0, atR = 0;
+                { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); atP = foldOf(*P)["receiptHlc"][f5][cid].value("wall", 0LL); }
+                { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); atR = foldOf(*R)["receiptHlc"][f5][cid].value("wall", 0LL); }
+                CHECK(at > 0 && atP == at && atR == at, "the edit lock is the signed time on both sides; an earlier-HLC copy changes nothing (ADR 0027)");
             }
         }
         unsetenv("WHISPERBOX_MINUTE_MS");

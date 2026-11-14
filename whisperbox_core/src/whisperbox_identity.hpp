@@ -18,6 +18,7 @@
 #include <openssl/ecdsa.h>
 #include <openssl/obj_mac.h>
 #include <openssl/bn.h>
+#include <openssl/rand.h>
 #include "whisperbox_crypto.hpp"   // Bytes, toHex, fromHex, sha256, strBytes
 #include "whisperbox_types.hpp"    // Event, HLC, json
 
@@ -340,6 +341,54 @@ inline void signEventJson(json& e, const SignId& id) {
     signEvent(id, ev);
     e["pub"] = ev.pub;
     e["sig"] = ev.sig;
+}
+
+// ── Receipts v3 (ADR 0027; mirror crypto-portable.mjs) ───────────────────────────────
+// S = ecdhX(replyPriv, formPub) = ecdhX(formPriv, replyPub); tag = hex(sha256("wb-receipt-v3|"||S));
+// proof = hex(nonce12 || ChaCha20-Poly1305(HKDF(S,"wb-receipt-v3-key"), nonce, pt, aad = tag)),
+// pt = {"at":<ms>,"pub":"<hex>","sig":"<hex>"}, sig over sha256("wb-receipt-v3-sig|formId|cid|at").
+inline constexpr size_t kReceiptProofBytes = 260;
+inline Bytes receiptSecret(const Bytes& priv32, const Bytes& pub33) { return ecdhX(priv32, pub33); }
+inline std::string tagWith(const char* prefix, const Bytes& S) {
+    Bytes b = strBytes(prefix); b.insert(b.end(), S.begin(), S.end());
+    return toHex(sha256(b));
+}
+inline std::string receiptTagOf(const Bytes& S) { return tagWith("wb-receipt-v3|", S); }
+inline std::string replyTagOf(const Bytes& S) { return tagWith("wb-reply-v3|", S); }
+inline Bytes receiptSigDigest(const std::string& formId, const std::string& cid, long long at) {
+    return sha256(strBytes("wb-receipt-v3-sig|" + toLower(formId) + "|" + cid + "|" + std::to_string(at)));
+}
+inline std::string sealReceiptProof(const Bytes& S, const SignId& signer, const std::string& formId, const std::string& cid, long long at) {
+    const Bytes sig = ecdsaSignLowS(signer.priv, receiptSigDigest(formId, cid, at));
+    const std::string pt = "{\"at\":" + std::to_string(at) + ",\"pub\":\"" + signer.pubHex + "\",\"sig\":\"" + toHex(sig) + "\"}";
+    Bytes nonce(12);
+    if (RAND_bytes(nonce.data(), 12) != 1) throw std::runtime_error("the random number generator failed");
+    const Bytes key = hkdfSha256(S, strBytes("wb-receipt-v3-key"), Bytes(), 32);
+    const Bytes ct = aeadSeal(key, nonce, strBytes(pt), strBytes(receiptTagOf(S)));
+    Bytes out = nonce; out.insert(out.end(), ct.begin(), ct.end());
+    return toHex(out);
+}
+struct ReceiptProof { bool ok = false; long long at = 0; std::string by; };
+inline ReceiptProof openReceiptProof(const Bytes& S, const std::string& formId, const std::string& cid, const std::string& proofHex) try {
+    ReceiptProof r;
+    const Bytes b = fromHex(proofHex);
+    if (b.size() < 12 + 16 + 2 || b.size() > 1024) return r;
+    const Bytes key = hkdfSha256(S, strBytes("wb-receipt-v3-key"), Bytes(), 32);
+    const Bytes pt = aeadOpen(key, Bytes(b.begin(), b.begin() + 12), Bytes(b.begin() + 12, b.end()), strBytes(receiptTagOf(S)));
+    const json o = json::parse(std::string(pt.begin(), pt.end()));
+    if (!o.is_object() || !o.contains("at") || !o["at"].is_number_integer() || o["at"].get<long long>() < 0
+        || !o.contains("pub") || !o["pub"].is_string() || !o.contains("sig") || !o["sig"].is_string()) return r;
+    const Bytes pub = fromHex(o["pub"].get<std::string>()), sig = fromHex(o["sig"].get<std::string>());
+    const long long at = o["at"].get<long long>();
+    if (!ecdsaVerify(pub, receiptSigDigest(formId, cid, at), sig)) return r;
+    const Bytes h = sha256(pub);
+    r.ok = true; r.at = at; r.by = "0x" + toHex(h.data(), 32).substr(24, 40);
+    return r;
+} catch (...) { return ReceiptProof{}; }
+inline json decoyReceiptEntry() {
+    Bytes t(32), s(kReceiptProofBytes);
+    if (RAND_bytes(t.data(), 32) != 1 || RAND_bytes(s.data(), (int)s.size()) != 1) throw std::runtime_error("the random number generator failed");
+    return json({{"t", toHex(t)}, {"s", toHex(s)}});
 }
 
 } // namespace whisperbox

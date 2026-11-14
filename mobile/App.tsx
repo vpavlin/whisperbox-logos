@@ -366,7 +366,7 @@ function Home({ snap, push, openLink, toast }: Ctx) {
               <View key={inv.formId} style={st.row}>
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={st.rowT} numberOfLines={1}>Co-own {inv.formId}?</Text>
-                  <Text style={st.rowS} numberOfLines={1}>invited by {shortAddr(inv.from)}  ·  {inv.contested ? "another copy exists: accept from the creator's link" : "read its answers, send receipts"}</Text>
+                  <Text style={st.rowS} numberOfLines={1}>{inv.needsLink ? "open the form's link from its creator to accept" : `invited by ${shortAddr(inv.from)}  ·  read its answers, send receipts`}</Text>
                 </View>
                 <Btn label="Accept" primary onPress={() => { const r = client.acceptCoOwner(inv.formId); toast(r.ok ? "Accepted - the form and its answers are on their way" : r.error); }} />
                 <Btn label="Decline" onPress={() => { client.leaveCoOwner(inv.formId); toast("Declined"); }} style={{ marginLeft: 6 }} />

@@ -25,6 +25,8 @@
 | [0022](0022-several-answers-per-respondent.md) | Several answers per respondent (feedback channel) | accepted, 0.7.0 |
 | [0023](0023-form-files-and-the-respond-intent.md) | Form files; other Basecamp apps ask WhisperBox for feedback by intent | accepted, 0.8.0 |
 | [0024](0024-store-first-creator-served-protocol.md) | Store first, creator served: protocol v2 (no global topic, no chatter, RLN budget) | accepted, 1.0 |
-| [0026](0026-blinded-receipts.md) | Blinded receipts and reply addresses (no form, author or signature on a receipt) | accepted, 1.1.3 |
+| [0026](0026-blinded-receipts.md) | Blinded receipts and reply addresses (no form, author or signature on a receipt) | accepted, 1.1.3; format superseded by 0027 |
+| [0027](0027-receipts-v3-sealed-proofs.md) | Receipts v3: tags from a per-answer secret, sealed signed proofs, decoys, coarse HLC | accepted, 1.1.4 |
+| [0028](0028-privacy-hardening-without-mix.md) | Privacy hardening without Mix (retry jitter; then ASK by bucket, ASK on schedule, decoy buckets) | in progress, 1.1.4 |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.

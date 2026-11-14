@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.4 desktop core + studio + respond, Android vc28 (2026-11-14) - receipts v3, retry jitter
+
+- **Receipts v3 (ADR 0027).** Each receipt carries a proof signed by the form's creator or a co-owner,
+  encrypted under a secret only the respondent and the form's owners share.
+  - A respondent can no longer mark its own answer as confirmed.
+  - A replayed receipt can't move the edit lock.
+  - Receipts can't be guessed back to their form.
+  - Receipts carry decoy entries and only a 10-minute clock, and are sent per bucket.
+  - 1.1.3 receipts are no longer read: answers confirmed with them show as unconfirmed until the
+    creator confirms again (automatic receipts do this).
+- Replies are addressed by a tag from the same secret.
+- **Audit round 6:**
+  - **Co-owner invitations need the creator's link (R6-5).** Without the link an invitation is listed
+    as "open the form's link from its creator to accept". A fake copy of a form can no longer be
+    accepted, and can't hide the real invitation.
+  - A replayed receipt padded with junk is no longer kept (R6-1), and receipt handling is cached
+    (R6-2).
+  - Oversized receipt ids are ignored (R6-3).
+  - Show-count forms count only named receipts (R6-6).
+  - Receipt re-sends are capped (R6-9).
+- **Answer retries (ADR 0028, F4).** Retries happen at random times (±30%), and on anonymous forms
+  they stop after about an hour.
+
 ## 1.1.3 desktop core + studio + respond, Android vc27 (2026-11-14) - blinded receipts, audit round 5
 
 - **Receipts are blinded (ADR 0026):** a receipt names no form, no author and no device, and isn't signed.

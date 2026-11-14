@@ -101,7 +101,7 @@ HLC (loam-sync): `send(now)`: if `now > wall` then `wall = now, ctr = 0` else `c
 |---|---|---|---|
 | `form.publish` | `form:<formId>` | yes (creator) | form definition, section 4.3 |
 | `response.submit` | `resp:<hex(sha256(utf8(encryptedPayload)))>` | **no** | `{encryptedPayload}` |
-| `response.receipt` | `rcpt:<hex(sha256(sorted tags joined ","))>` | **no** (refused if signed) | `{tags:[1..100 × hex(sha256("wb-receipt-v2\|"+formId+"\|"+cid))]}` - blinded, ADR 0026 |
+| `response.receipt` | `rcpt:<hex(sha256(sorted "t.s" joined ","))>` | **no** (refused if signed) | `{r:[1..64 × {t, s}]}`: `t` = hex(sha256("wb-receipt-v3\|"‖S)), `s` = sealed signed proof, decoys pad to 2^k; S = per-answer ECDH secret. ADR 0026/0027 |
 | `response.confirm` | `confirm:<formId>:<cid>`; batch `confirm:<formId>:b:<hex(sha256(sorted cids joined ","))[0..16]>` | yes | `{formId, author, confirmationId}` or `{formId, author, confirmationIds:[..]}` |
 | `form.close` | `close:<formId>:<nonce>` (legacy `close:<formId>`) | yes | `{formId, author, expiresAt: null}` |
 | `form.reopen` | `reopen:<formId>:<nonce>` | yes | `{formId, author}` |
@@ -411,6 +411,12 @@ Rules, per event:
   receipts, closes, co-owners and replies are untouched. Latest (by HLC) wins.
 - `response.confirm`: add each new receipt id to `confirmations`; remember the HLC of each
   id's first receipt in `receiptHlc[formId][cid]`.
+- `response.receipt` (ADR 0027): unsigned, no form. Each entry `{t, s}` is kept under its tag in
+  `receiptTags` (at most 8 distinct proofs per tag), and the state carries `receiptTags` only when
+  any exist. The fold doesn't interpret entries. A client opens the proofs for the answers it can
+  name, checks the signer (the form's creator or a co-owner) and calls
+  `resolveReceipts(state, [[formId, cid, at]])`. Each answer then joins `confirmations`, and the
+  signed `at` becomes `receiptHlc` (the edit lock).
 - `form.close`: `status = closed`; open a closed span `{from: hlc, to: null}` unless one is
   open. `form.reopen`: `status = open`; close the open span (`to = hlc`). Last one wins.
 - `form.coowner`: owner must be a `0x` + 40-hex address and `sealedKey` non-empty
@@ -609,11 +615,12 @@ held `form.coowner`), `form.publish` by the creator the link names (plus at most
 With no creator known (bare id, no publish yet) only publishes and invitations are kept. A
 `form.coowner` naming this node is an invitation only if its author is the creator (or none is known;
 at most 20 pending grant events): nothing of that form is kept or pulled until it is accepted (`acceptCoOwner`). An invitation
-is shown or acceptable only once the form's publish is held and its creator wrote the grant (a
-form with a pending invitation keeps its publishes for that); a stranger's grant is ignored; a
-contested form (published by several keys) needs the creator's link to accept (audit R5-1/R5-2).
-A `response.receipt` is kept only if one of its tags is for an answer this node can name: its own,
-or one it opens as the form's creator or co-owner (ADR 0026).
+is acceptable only once this device opened the form's link with `by=` and that creator wrote the
+grant. Until then it is listed with `needsLink` (a bare id proves nothing about who made a form: a
+fake first publish could be "the creator", audit R5-1/R6-5). A stranger's grant is ignored.
+A `response.receipt` is kept only if one of its entries is a valid proof (signed by the form's
+creator or a co-owner) for an answer this node can name - its own, or one it opens as the form's
+creator or co-owner - that this node doesn't hold yet (ADR 0027, R6-1); the prune keeps held ones.
 The log is pruned by the same rule on start, after unlocking and when a form is removed. A locked
 identity keeps everything (no keys to judge with; nothing connects until unlocked).
 
@@ -633,9 +640,11 @@ On the wire and in fleet stores:
   contents, form keys.
 
 Linkability:
-- receipts and replies are addressed by tags derived from the form id and the respondent-chosen
-  random `confirmationId` (sealed inside the answer): only the respondent and the form's owners
-  can make or recognise them (ADR 0026). Receipts are unsigned and carry a random device tag;
+- receipts and replies are addressed by tags from a per-answer secret S = ECDH(reply key, form key):
+  only the respondent and the form's owners can compute or recognise them; a receipt's proof is
+  sealed under S and signed by the creator or a co-owner, so nobody else (the respondent included)
+  can confirm an answer (ADR 0027). Receipts are unsigned on the outside, carry a random device tag,
+  a 10-minute HLC and decoy entries;
 - `response.submit` carries a fresh random tag (0.4.3); the derived per-form tag it replaced
   linked a device's answers across forms for anyone who knew its device id, and every signed
   event published that (review WB-5);
@@ -648,6 +657,8 @@ as unverified and counts for nothing. Anyone can still generate fresh identities
 with each (only a members list stops that). Close, expiry, the cap and the edit window use the
 network's timestamp of the answer; before RLN is on, a sender running a modified node can still
 choose that timestamp, and an answer arriving without one (BLE) is judged by its own clock.
+
+Answer retries are jittered (±30%) and stop after about an hour on anonymous forms (ADR 0028).
 
 Not protected: timing/network-level correlation (Mix is not deployable yet); the bucket a form is
 in (its id is public in links); answer length (answers aren't padded); the clear-text HLC of signed

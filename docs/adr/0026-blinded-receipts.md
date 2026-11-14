@@ -1,6 +1,7 @@
 # ADR 0026: Blinded receipts and reply addresses
 
-Status: accepted, 1.1.3 (2026-11-14)
+Status: accepted, 1.1.3 (2026-11-14). The receipt FORMAT is superseded by ADR 0027 (1.1.4): tags now come from a
+per-answer secret and carry a sealed, signed proof. The goals and the showResponseCount exception stand.
 
 ## Context
 

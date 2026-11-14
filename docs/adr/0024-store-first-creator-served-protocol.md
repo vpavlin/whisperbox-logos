@@ -411,3 +411,18 @@ adjacent cases. Fixed:
 
 Receipts became blinded in the same release (ADR 0026).
 
+## Amendment 2026-11-14 (6): invitations need the creator's link (1.1.4, audit R6-5)
+
+Round 6 showed that R5-1's "known creator" was not enough. A fake publish under a known id, backdated
+so it is first in the fold, *was* the known creator: its grant could be accepted, and it hid the real
+invitation. The contested check turned one fake publish into a denial of accepting. A bare form id
+proves nothing about who made the form. So:
+
+- An invitation is acceptable only if this device opened the form's link with `by=` (the creator's
+  address pinned) and a grant by that creator names it. The fold's first publish no longer counts.
+- Without the link, an invitation is listed with `needsLink: true` ("open the form's link from its
+  creator to accept"). Its grant is kept (at most 20 forms), but the form's publishes aren't.
+- A stranger's grant is ignored. A fake copy can't hide or block the real invitation once the link
+  is open.
+- Forms accepted before 1.1.4 without a link stay accepted (the fold's creator, as before).
+

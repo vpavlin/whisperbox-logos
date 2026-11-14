@@ -949,7 +949,7 @@ Item {
                                         color: root.wbTextTert
                                         text: {
                                             if (modelData.kind === "d") return modelData.draft.publishAt ? "scheduled  ·  " + root.fmtTime(modelData.draft.publishAt) : "draft  ·  edited " + root.fmtTime(modelData.draft.updatedAt);
-                                            if (modelData.kind === "i") return "invited by " + root.shortAddr(modelData.invite.from) + (modelData.invite.contested ? "  ·  another copy exists: accept from the creator's link" : "  ·  read its answers, send receipts");
+                                            if (modelData.kind === "i") return modelData.invite.needsLink ? "open the form's link from its creator to accept" : "invited by " + root.shortAddr(modelData.invite.from) + "  ·  read its answers, send receipts";
                                             if (!row.f) return "syncing...";
                                             var parts = [root.plural(row.f.questions.length, "question", "questions")];
                                             if (row.f.mine) parts.push(root.plural(root.responsesFor(row.f.id).length, "response", "responses"));
