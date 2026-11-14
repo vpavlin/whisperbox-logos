@@ -303,11 +303,16 @@ private:
     // blinded receipts v3 (ADR 0027): per-answer secrets (cached), verified proofs, the keep-filter
     struct RSecret { whisperbox::Bytes S; std::string tag, rtag; bool ok = false; };
     struct RPair { std::string fid, cid; RSecret sec; };
-    RSecret secretFor(const std::string& key, const whisperbox::Bytes& priv, const std::string& pubHex);
+    RSecret secretFor(const std::string& key, const whisperbox::Bytes& priv, const std::string& pubHex, const std::string& fid, const std::string& cid);
     RSecret ownSecret(const std::string& fid, const std::string& cid, const std::string& formPub);
     RSecret ownerSecret(const std::string& fid, const std::string& cid, const whisperbox::SignId& formKey, const std::string& replyPub);
     const std::vector<RPair>& receiptPairs(const whisperbox::OrderedJson& state);
     std::vector<RPair> receiptPairsUncached(const whisperbox::OrderedJson& state);
+    bool pairOfAnswer(const whisperbox::OrderedJson& state, const std::map<std::string, const whisperbox::SignId*>& keys, const std::string& id, const std::string& hex, RPair& out);
+    void noteNewAnswer(const whisperbox::json& e);
+    long long receiptDelayMs();
+    void saveOutbox();
+    int flushReceipts(const std::string& topic);
     long long proofAt(const whisperbox::OrderedJson& state, const RPair& pr, const std::string& proof);
     std::vector<whisperbox::VerifiedReceipt> verifiedReceipts(const whisperbox::OrderedJson& state);
     bool receiptWanted(const whisperbox::json& e);
@@ -428,4 +433,10 @@ private:
     std::unordered_map<std::string, whisperbox::ReceiptProof> m_rproof;       // opened proofs, by tag|proof
     std::vector<RPair> m_rpairs; std::string m_rpairsKey, m_rintKey;           // receiptPairs cache (R6-2)
     std::deque<long long> m_rcptResends;                                      // receipt re-sends, last 10 min (R6-9)
+    long long m_rpEpoch = 0, m_rpGen = 0;                                     // receipt pairs: full-rebuild epoch, change count (R7-2)
+    std::vector<std::pair<std::string, std::string>> m_rpNew;                 // answers added since (id, sealed hex)
+    whisperbox::json m_rcptOutbox = whisperbox::json::object();               // bucket topic -> {due, items}: receipts not sent yet
+    std::map<std::string, long long> m_formNextMs;                            // next re-publish (±25%, F5)
+    long long m_ansWall = 0, m_ansCtr = 0;                                    // answers' 10-minute HLC (F3)
+    long m_askIgnored = 0;                                                    // older peers' ASKs (never answered)
 };

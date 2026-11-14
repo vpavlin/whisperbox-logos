@@ -76,6 +76,7 @@ static json callCore(WhisperboxCoreImpl* c, const std::string& m, const json& a)
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     setenv("WHISPERBOX_MSGS_PER_EPOCH", "1000000", 1);   // the interop run sends far more than an RLN epoch allows
+    setenv("WHISPERBOX_RECEIPT_DELAY_MS", "0", 0);   // receipts at once (production: 1-5 min, ADR 0027 D)
     char tmpl[] = "/tmp/wb-bridge-XXXXXX"; base = mkdtemp(tmpl);
 
     // The phone: a node on the bus that hands everything it receives to stdout.

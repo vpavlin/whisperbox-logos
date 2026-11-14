@@ -565,6 +565,7 @@ void WhisperboxCoreImpl::loadLog() {
 void WhisperboxCoreImpl::recountLog() {
     m_logGen++;
     m_logBytes = 0; m_logResponses = 0; m_heldHlc.clear(); m_heldBytes.clear();
+    m_rpEpoch++; m_rpNew.clear();   // receipt pairs: rebuilt from the whole log next time (R7-2)
     for (const auto& e : m_log) {
         const size_t n = e.dump().size();
         m_logBytes += n; if (e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++;
@@ -670,6 +671,7 @@ void WhisperboxCoreImpl::loadLocalPrefs() {
                  if (a.is_array()) for (auto& x : a) if (x.is_string()) m_hidden.insert(lc(x.get<std::string>())); }
     } catch (...) { /* ignore */ }
     loadPrivateFiles();
+    try { std::ifstream ob(m_dataDir + "/rcpt_outbox.json"); if (ob) { json o = parseFile(ob); m_rcptOutbox = o.is_object() ? o : json::object(); } } catch (...) {}   // receipts not sent yet
 }
 // my_answers.json and drafts.json: plaintext, or sealed under the identity when a passphrase is set
 // (open-review 2026-11-03, FR-13). Sealed + locked = not read yet (unlock() reads them).
@@ -1190,7 +1192,7 @@ void WhisperboxCoreImpl::adoptLocal(json e) {
         const std::string key = whisperbox::eventKey(e);
         const size_t eBytes = e.dump().size();
         const size_t oldBytes = m_heldBytes.count(key) ? m_heldBytes[key] : 0;
-        if (!m_heldHlc.count(key) && e.value("type", "") == RESPONSE_SUBMIT) m_logResponses++;
+        if (!m_heldHlc.count(key) && e.value("type", "") == RESPONSE_SUBMIT) { m_logResponses++; noteNewAnswer(e); }
         m_logBytes = m_logBytes + eBytes - oldBytes;
         m_heldHlc[key] = e.value("hlc", json::object());
         m_heldBytes[key] = eBytes;
@@ -1258,14 +1260,15 @@ int WhisperboxCoreImpl::emitNamedReceipts(const std::string& formId, const std::
 // ── Blinded receipts v3 (ADR 0027; mirror client.mjs) ──
 // The per-answer secret, cached (an ECDH each). Mine: my reply key x the form's public key. An owner's:
 // the form key x the answer's reply key.
-WhisperboxCoreImpl::RSecret WhisperboxCoreImpl::secretFor(const std::string& key, const whisperbox::Bytes& priv, const std::string& pubHex) {
+WhisperboxCoreImpl::RSecret WhisperboxCoreImpl::secretFor(const std::string& key, const whisperbox::Bytes& priv, const std::string& pubHex,
+                                                          const std::string& fid, const std::string& cid) {
     auto c = m_rsec.find(key);
     if (c != m_rsec.end()) return c->second;
     RSecret v;
     try {
         const whisperbox::Bytes pub = whisperbox::fromHex(pubHex);
         if (priv.size() == 32 && pub.size() == 33 && whisperbox::validPubPoint(pub)) {
-            v.S = whisperbox::receiptSecret(priv, pub); v.tag = whisperbox::receiptTagOf(v.S); v.rtag = whisperbox::replyTagOf(v.S); v.ok = true;
+            v.S = whisperbox::receiptSecret(priv, pub); v.tag = whisperbox::receiptTagOf(v.S, fid, cid); v.rtag = whisperbox::replyTagOf(v.S, fid, cid); v.ok = true;
         }
     } catch (...) { v = RSecret{}; }
     if (m_rsec.size() >= 60000) m_rsec.clear();
@@ -1277,10 +1280,10 @@ WhisperboxCoreImpl::RSecret WhisperboxCoreImpl::ownSecret(const std::string& fid
     auto c = m_rsec.find(key);
     if (c != m_rsec.end()) return c->second;
     const whisperbox::SignId rk = whisperbox::deriveReplyKey(m_signId, fid, cid);
-    return secretFor(key, rk.valid ? rk.priv : whisperbox::Bytes(), formPub);
+    return secretFor(key, rk.valid ? rk.priv : whisperbox::Bytes(), formPub, fid, cid);
 }
 WhisperboxCoreImpl::RSecret WhisperboxCoreImpl::ownerSecret(const std::string& fid, const std::string& cid, const whisperbox::SignId& formKey, const std::string& replyPub) {
-    return secretFor("o|" + fid + "|" + cid + "|" + lc(replyPub) + "|" + formKey.pubHex, formKey.priv, lc(replyPub));
+    return secretFor("o|" + fid + "|" + cid + "|" + lc(replyPub) + "|" + formKey.pubHex, formKey.priv, lc(replyPub), fid, cid);
 }
 // Receipts for these answers of formId, BLINDED (ADR 0026): unsigned, a fresh device tag, no form id
 // and no author on the wire - tags only, at most kMaxReceiptTags per event. Sent on their own.
@@ -1306,24 +1309,60 @@ int WhisperboxCoreImpl::emitReceipts(const std::string& formId, const std::vecto
         if (v.ok) blind.push_back({c, v}); else legacy.push_back(c);
     }
     if (!legacy.empty()) n += emitNamedReceipts(formId, legacy);   // answers from before 0.3.9 have no reply key
+    if (blind.empty()) return n;
+    // into the bucket's outbox: sent after a random 1-5 min with everything else queued for the bucket,
+    // as ONE event (ADR 0027 D: no per-form groups, no answer-to-receipt timing). Counted here at once.
     const long long at = nowMs();
+    const std::string topic = wireTopicFor(formId);
+    if (!m_rcptOutbox.contains(topic)) m_rcptOutbox[topic] = {{"due", at + receiptDelayMs()}, {"items", json::array()}};
+    json& items = m_rcptOutbox[topic]["items"];
+    for (const auto& b : blind) {
+        bool have = false; for (const auto& x : items) if (x.value("t", "") == b.second.tag) { have = true; break; }
+        if (!have) items.push_back({{"formId", formId}, {"cid", b.first}, {"at", at}, {"t", b.second.tag},
+                                    {"s", whisperbox::sealReceiptProof(b.second.S, m_signId, formId, b.first, at)}});
+    }
+    saveOutbox();
+    m_foldValid = false; m_cvValid = false;
+    if (m_rcptOutbox[topic].value("due", 0LL) <= at) flushReceipts(topic);
+    return n + 1;
+}
+long long WhisperboxCoreImpl::receiptDelayMs() {
+    if (const char* v = std::getenv("WHISPERBOX_RECEIPT_DELAY_MS")) {   // tests: 0 = at once (envLL ignores 0)
+        char* end = nullptr; const long long x = std::strtoll(v, &end, 10);
+        if (end && *end == 0 && x >= 0) return x;
+    }
+    unsigned char rb[2] = {0, 0}; RAND_bytes(rb, 2);
+    return (long long)(envLL("WHISPERBOX_MINUTE_MS", 60000LL) * (1.0 + 4.0 * (((rb[0] << 8) | rb[1]) / 65535.0)));   // 1-5 min
+}
+void WhisperboxCoreImpl::saveOutbox() { writeAtomic(m_dataDir + "/rcpt_outbox.json", m_rcptOutbox.dump()); }
+// One event per 32 receipts in the bucket, decoys to a power of two (at least 8), sorted by tag
+int WhisperboxCoreImpl::flushReceipts(const std::string& topic) {
+    if (!m_rcptOutbox.contains(topic)) return 0;
+    const json items = m_rcptOutbox[topic].value("items", json::array());
+    m_rcptOutbox.erase(topic);
+    int n = 0;
     const size_t REAL = whisperbox::kMaxReceiptTags / 2;
-    for (size_t i = 0; i < blind.size(); i += REAL) {
+    for (size_t i = 0; i < items.size(); i += REAL) {
         json entries = json::array();
-        for (size_t j = i; j < std::min(blind.size(), i + REAL); j++)
-            entries.push_back({{"t", blind[j].second.tag}, {"s", whisperbox::sealReceiptProof(blind[j].second.S, m_signId, formId, blind[j].first, at)}});
-        size_t size = 2; while (size < entries.size()) size *= 2;
+        std::string fid;
+        for (size_t j = i; j < std::min(items.size(), i + REAL); j++) {
+            entries.push_back({{"t", items[j].value("t", "")}, {"s", items[j].value("s", "")}});
+            if (fid.empty()) fid = items[j].value("formId", "");
+        }
+        size_t size = 8; while (size < entries.size()) size *= 2;
         while (entries.size() < size) entries.push_back(whisperbox::decoyReceiptEntry());
         std::vector<json> sorted(entries.begin(), entries.end());
         std::sort(sorted.begin(), sorted.end(), [](const json& a, const json& b) { return a["t"].get<std::string>() < b["t"].get<std::string>(); });
         entries = json(sorted);
         const std::string dev = "wb-" + randomHex(6);
         json e = {{"v", 1}, {"id", whisperbox::responseReceiptId(entries)}, {"type", whisperbox::RESPONSE_RECEIPT},
-                  {"hlc", {{"wall", at / 600000 * 600000}, {"ctr", 0}, {"dev", dev}}}, {"dev", dev}, {"payload", {{"r", entries}}}};
-        if (!adoptChecked(e)) break;
+                  {"hlc", {{"wall", nowMs() / 600000 * 600000}, {"ctr", 0}, {"dev", dev}}}, {"dev", dev}, {"payload", {{"r", entries}}}};
+        if (!adoptChecked(e)) continue;
         adoptLocal(e);
-        queueReceipt(formId, e); n++;
+        queueReceipt(fid, e); n++;
     }
+    saveOutbox();
+    m_foldValid = false; m_cvValid = false;
     return n;
 }
 // A form that shows respondents how many answers came in counts PUBLIC receipts: there, receipts stay
@@ -1356,6 +1395,29 @@ void WhisperboxCoreImpl::resendReceiptFor(const std::string& answerId) {
     if (m_rcptResends.size() >= 30) return;
     m_rcptResends.push_back(now);
     m_rcptResentMs[key] = now;
+    // the receipt already sent, byte-identical: a fresh one with new decoys showed which entry is real
+    // (anoncomms review of v3, item 1). Only if none is held (confirmed elsewhere), a new one.
+    std::string tag;
+    if (dec.contains("replyPub") && dec["replyPub"].is_string()) {
+        const auto keys = formKeysFor(st);
+        auto k = keys.find(st["forms"][fid].value("publicKey", ""));
+        if (k != keys.end()) { RSecret v = ownerSecret(fid, cid, *k->second, dec["replyPub"].get<std::string>()); if (v.ok) tag = v.tag; }
+    }
+    for (const auto& e : m_log) {
+        if (!e.is_object() || !e.contains("payload") || !e["payload"].is_object()) continue;
+        const std::string t = e.value("type", "");
+        bool hit = false;
+        if (!tag.empty() && t == whisperbox::RESPONSE_RECEIPT && e["payload"].contains("r") && e["payload"]["r"].is_array())
+            for (const auto& y : e["payload"]["r"]) if (y.is_object() && y.value("t", "") == tag) { hit = true; break; }
+        if (!hit && t == RESPONSE_CONFIRM && formIdOf(e) == fid && lc(e["payload"].value("author", "")) == lc(m_signId.address)) {
+            if (e["payload"].value("confirmationId", "") == cid) hit = true;
+            else if (e["payload"].contains("confirmationIds") && e["payload"]["confirmationIds"].is_array())
+                for (const auto& x : e["payload"]["confirmationIds"]) if (x.is_string() && x.get<std::string>() == cid) { hit = true; break; }
+        }
+        if (hit) { queueReceipt(fid, e); return; }
+    }
+    if (!tag.empty()) for (auto it = m_rcptOutbox.begin(); it != m_rcptOutbox.end(); ++it)
+        for (const auto& x : it.value().value("items", json::array())) if (x.value("t", "") == tag) return;   // still waiting to go out
     emitReceipts(fid, {cid});
 }
 
@@ -1945,35 +2007,28 @@ void WhisperboxCoreImpl::wireSchedule() {
     const long long now = nowMs();
     const long long minute = envLL("WHISPERBOX_MINUTE_MS", 60000LL);   // tests shrink time
     const long long hour = envLL("WHISPERBOX_REPUBLISH_MS", 60 * minute);
+    // receipts whose outbox time has come (ADR 0027 D)
+    { std::vector<std::string> due;
+      for (auto it = m_rcptOutbox.begin(); it != m_rcptOutbox.end(); ++it) if (it.value().value("due", 0LL) <= now) due.push_back(it.key());
+      for (const auto& t : due) flushReceipts(t); }
     OrderedJson st = foldedState();
-    // creator: re-publish open forms hourly (±10% per form), a closed one 3 times
+    // creator: re-publish open forms hourly (±25%, drawn per send: a per-form fixed offset was
+    // predictable from the public form id - privacy review F5), a closed one 3 times
     for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it) {
         const std::string fid = it.key();
         const auto& f = it.value();
         if (!(m_signId.valid && f.value("creator", "") == m_signId.address)) continue;
-        const int jitter = (int)(std::hash<std::string>{}(fid) % 21) - 10;   // -10..+10 %
-        const long long every = hour + hour * jitter / 100;
         const bool closed = f.value("status", "open") != "open";
         if (closed && m_formClosedSends[fid] >= 3) continue;
-        if (now - m_formSentMs[fid] < every) continue;
+        const long long nextAt = m_formNextMs.count(fid) ? m_formNextMs[fid] : m_formSentMs[fid] + hour;
+        if (now < nextAt) continue;
+        unsigned char rb[2] = {0, 0}; RAND_bytes(rb, 2);
+        m_formNextMs[fid] = now + (long long)(hour * (0.75 + 0.5 * (((rb[0] << 8) | rb[1]) / 65535.0)));
         if (closed) m_formClosedSends[fid]++;
         publishFormState(fid, 5);
     }
-    // respondent: a form opened from a link that hasn't arrived - ASK after 20 s, 10 min, 30 min,
-    // then hourly (for a day)
-    for (const auto& fid : m_watched) {
-        // held - unless it is someone else's form under that id and the link names another creator:
-        // keep asking for the real one (audit W2-7: a squatted id silenced the ASK)
-        const auto pin = m_pinned.find(fid);
-        const bool have = st["forms"].contains(fid) && (pin == m_pinned.end() || pin->second.empty() || lc(st["forms"][fid].value("creator", "")) == lc(pin->second));
-        if (have) { m_askCount.erase(fid); continue; }
-        if (!m_askSentMs.count(fid)) m_askSentMs[fid] = now;   // first seen: give Store a moment (20 s)
-        const int n = m_askCount[fid];
-        const long long gap = n == 0 ? minute / 3 : n == 1 ? 10 * minute : n == 2 ? 20 * minute : 60 * minute;
-        if (n >= 26 || now - m_askSentMs[fid] < gap) continue;
-        m_askSentMs[fid] = now; m_askCount[fid] = n + 1;
-        enqueueSend(4, formTopic(fid), json({{"v", 2}, {"type", "ASK"}, {"formId", fid}}), "ask:" + fid);
-    }
+    // no ASK any more (privacy review F1/F5, ADR 0028): it named the form in clear and made the creator
+    // answer at once (a presence oracle). A missing form comes from the Store pull or the hourly re-publish.
     // respondent: each answer again until its receipt - every 10 min for an hour, hourly for 4 h,
     // then every 6 h, for 14 days
     static const long long kRetryAt[] = {10, 20, 30, 40, 50, 110, 170, 230, 290};   // minutes after sending
@@ -2099,7 +2154,7 @@ bool WhisperboxCoreImpl::ingestOne(json e, long long netMs, bool live, bool bund
             m_heldHlc[key] = e["hlc"];
             m_heldBytes[key] = eBytes;
             m_logBytes = m_logBytes + eBytes - oldBytes;
-            if (!replaced && isResp) { m_logResponses++; if (!m_wantedForm.empty()) m_respPerForm[m_wantedForm]++; }
+            if (!replaced && isResp) { m_logResponses++; noteNewAnswer(e); if (!m_wantedForm.empty()) m_respPerForm[m_wantedForm]++; }
             if (isResp) noteFirstSeen(e);
             m_logGen++;
             // a co-owner grant naming me is an invitation: nothing is pulled until I accept it (R2-1)
@@ -2141,11 +2196,7 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
                 }
             return true;
         }
-        if (type == "ASK") {   // a live ASK only, and it costs a frame token (audit W2-3/W2-6)
-            if (!channelPath) return true;
-            if (!takeToken(m_ctlTokens, m_ctlRefillMs, 120)) { m_ctlDropBudget++; return true; }
-            onAsk(env); return true;
-        }
+        if (type == "ASK") { m_askIgnored++; return true; }   // older peers' ASK: never answered (ADR 0028)
         return false;
     };
     std::string once = whisperbox::b64decode(text);
@@ -2181,7 +2232,8 @@ bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
     // a live copy corrects a later claim, and a replay (always later) never re-dates one (R4-3).
     const long long hw = e.contains("hlc") && e["hlc"].is_object() && e["hlc"].contains("wall") && e["hlc"]["wall"].is_number_integer()
                          ? e["hlc"]["wall"].get<long long>() : -1;
-    if (hw < 0 || std::llabs(netMs - hw) > kNetHlcTolMs) { m_netDisagree++; return false; }
+    // an answer's HLC is floored to 10 min (ADR 0028 F3): the network time is up to 10 min after it
+    if (hw < 0 || netMs < hw - kNetHlcTolMs || netMs > hw + kNetHlcTolMs + 600000) { m_netDisagree++; return false; }
     // never before the Store window we asked for (audit R2-5)
     if (m_storeIngest && m_storeWindowMs > 0 && netMs < m_storeWindowMs) netMs = m_storeWindowMs;
     if (it != m_netTimes.end() && it->second <= netMs) return false;
@@ -2501,14 +2553,25 @@ json WhisperboxCoreImpl::openAnswer(const OrderedJson& state, const std::map<std
 }
 // Every answer this device can name, with its secret: its own, and those it opens as the form's creator
 // or co-owner (ADR 0027).
-// cached until an answer arrives, my answers or my keys change - not per log event (audit R6-2)
+// A new answer in the log: its pair is added on the next receiptPairs, without a rescan (R7-2)
+void WhisperboxCoreImpl::noteNewAnswer(const json& e) {
+    if (m_rpNew.size() >= 60000) { m_rpEpoch++; m_rpNew.clear(); return; }   // too many: rebuild once instead
+    m_rpNew.push_back({e.value("id", ""), e.contains("payload") && e["payload"].is_object() ? e["payload"].value("encryptedPayload", "") : std::string()});
+}
+// Rebuilt only when my answers, keys, forms or the log as a whole change; a new answer is added on its
+// own (audit R6-2, R7-2: a rescan per answer was O(N^2))
 const std::vector<WhisperboxCoreImpl::RPair>& WhisperboxCoreImpl::receiptPairs(const OrderedJson& state) {
     size_t mine = 0;
     for (const auto& kv : m_myAnswers) { mine++; if (kv.second.is_object() && kv.second.contains("earlier") && kv.second["earlier"].is_array()) mine += kv.second["earlier"].size(); }
-    const std::string key = (m_signId.valid ? m_signId.address : std::string()) + "|" + std::to_string(m_logResponses) + "|" + std::to_string(m_mySubmissions.size())
+    const std::string key = (m_signId.valid ? m_signId.address : std::string()) + "|" + std::to_string(m_rpEpoch) + "|" + std::to_string(m_mySubmissions.size())
         + "|" + std::to_string(mine) + "|" + std::to_string(m_coAccepted.size()) + "|" + std::to_string(m_pinned.size()) + "|" + std::to_string(state["forms"].size())
         + "|" + std::to_string(m_formKeyCache.size());
-    if (key != m_rpairsKey) { m_rpairs = receiptPairsUncached(state); m_rpairsKey = key; }
+    if (key != m_rpairsKey) { m_rpairs = receiptPairsUncached(state); m_rpairsKey = key; m_rpNew.clear(); m_rpGen++; }
+    else if (!m_rpNew.empty()) {
+        const auto keys = formKeysFor(state);
+        for (const auto& n : m_rpNew) { RPair pr; if (pairOfAnswer(state, keys, n.first, n.second, pr)) m_rpairs.push_back(pr); }
+        m_rpNew.clear(); m_rpGen++;
+    }
     return m_rpairs;
 }
 std::vector<WhisperboxCoreImpl::RPair> WhisperboxCoreImpl::receiptPairsUncached(const OrderedJson& state) {
@@ -2525,21 +2588,28 @@ std::vector<WhisperboxCoreImpl::RPair> WhisperboxCoreImpl::receiptPairsUncached(
     if (keys.empty()) return out;
     for (const auto& e : m_log) {
         if (!e.is_object() || e.value("type", "") != RESPONSE_SUBMIT || !e.contains("payload") || !e["payload"].is_object()) continue;
-        const json dec = openAnswer(state, keys, e.value("id", ""), e["payload"].value("encryptedPayload", ""));
-        // a receipt id of 1-128 bytes only: a huge one went into confirmations (audit R6-3)
-        if (!dec.is_object() || !dec.contains("confirmationId") || !whisperbox::validConfirmationId(dec["confirmationId"])
-            || !dec.contains("replyPub") || !dec["replyPub"].is_string() || !dec.contains("formId") || !dec["formId"].is_string()) continue;
-        const std::string fid = lc(dec["formId"].get<std::string>());
-        auto k = keys.find(state["forms"].contains(fid) ? state["forms"][fid].value("publicKey", "") : "");
-        if (k == keys.end()) continue;
-        RSecret v = ownerSecret(fid, dec["confirmationId"].get<std::string>(), *k->second, dec["replyPub"].get<std::string>());
-        if (v.ok) out.push_back({fid, dec["confirmationId"].get<std::string>(), v});
+        RPair pr;
+        if (pairOfAnswer(state, keys, e.value("id", ""), e["payload"].value("encryptedPayload", ""), pr)) out.push_back(pr);
     }
     return out;
 }
+bool WhisperboxCoreImpl::pairOfAnswer(const OrderedJson& state, const std::map<std::string, const whisperbox::SignId*>& keys, const std::string& id, const std::string& hex, RPair& out) {
+    if (keys.empty() || hex.empty()) return false;
+    const json dec = openAnswer(state, keys, id, hex);
+    // a receipt id of 1-128 bytes only: a huge one went into confirmations (audit R6-3)
+    if (!dec.is_object() || !dec.contains("confirmationId") || !whisperbox::validConfirmationId(dec["confirmationId"])
+        || !dec.contains("replyPub") || !dec["replyPub"].is_string() || !dec.contains("formId") || !dec["formId"].is_string()) return false;
+    const std::string fid = lc(dec["formId"].get<std::string>());
+    auto k = keys.find(state["forms"].contains(fid) ? state["forms"][fid].value("publicKey", "") : "");
+    if (k == keys.end()) return false;
+    RSecret v = ownerSecret(fid, dec["confirmationId"].get<std::string>(), *k->second, dec["replyPub"].get<std::string>());
+    if (!v.ok) return false;
+    out = {fid, dec["confirmationId"].get<std::string>(), v};
+    return true;
+}
 // A proof counts only if signed by the form's creator or a co-owner: its signed time, else -1.
 long long WhisperboxCoreImpl::proofAt(const OrderedJson& state, const RPair& pr, const std::string& proof) {
-    const std::string key = pr.sec.tag + "|" + proof;
+    const std::string key = pr.fid + "|" + pr.cid + "|" + pr.sec.tag + "|" + proof;   // per answer, not per tag (R7-1)
     auto c = m_rproof.find(key);
     if (c == m_rproof.end()) {
         if (m_rproof.size() >= 60000) m_rproof.clear();
@@ -2568,8 +2638,8 @@ std::vector<whisperbox::VerifiedReceipt> WhisperboxCoreImpl::verifiedReceipts(co
 // a blinded receipt is kept only if one of its entries is a valid proof for an answer I can name
 bool WhisperboxCoreImpl::receiptWanted(const json& e) {
     const auto& pairs = receiptPairs(foldedState());
-    if (m_rintKey != m_rpairsKey) {
-        m_rintKey = m_rpairsKey;
+    if (m_rintGen != m_rpGen) {   // the pairs changed (a rebuild or new answers)
+        m_rintGen = m_rpGen;
         m_rintByTag.clear();
         for (const auto& pr : pairs) m_rintByTag[pr.sec.tag] = pr;
     }
@@ -2613,7 +2683,14 @@ const OrderedJson& WhisperboxCoreImpl::foldedState() {
     if (m_foldValid && m_foldLogGen == m_logGen && m_foldPinsGen == m_pinsGen && m_foldIdent == me) return m_foldCache;
     m_foldCache = whisperbox::computeState(m_log, me, nullptr, m_pinned, /*withPool=*/false);
     // blinded receipts for the answers I can name (ADR 0026): from here on they read as named ones
-    if (m_foldCache.contains("receiptTags")) whisperbox::resolveReceipts(m_foldCache, verifiedReceipts(m_foldCache));
+    // blinded receipts I can verify (ADR 0027), and mine still in the outbox (they count here at once)
+    {
+        std::vector<whisperbox::VerifiedReceipt> v;
+        for (auto it = m_rcptOutbox.begin(); it != m_rcptOutbox.end(); ++it)
+            for (const auto& x : it.value().value("items", json::array())) v.push_back({x.value("formId", ""), x.value("cid", ""), x.value("at", 0LL)});
+        if (m_foldCache.contains("receiptTags")) { auto w = verifiedReceipts(m_foldCache); v.insert(v.end(), w.begin(), w.end()); }
+        if (!v.empty()) whisperbox::resolveReceipts(m_foldCache, v);
+    }
     m_foldIds.clear();
     for (auto it = m_foldCache["forms"].begin(); it != m_foldCache["forms"].end(); ++it) m_foldIds.insert(it.key());
     m_foldValid = true; m_foldLogGen = m_logGen; m_foldPinsGen = m_pinsGen; m_foldIdent = me;
@@ -3125,7 +3202,11 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         // signed event carries the device id in clear, so anyone could compute a user's tag for any
         // form and link an anonymous answer to their device (review 2026-10-22, WB-5).
         const std::string tag = "wb-" + randomHex(6);
-        e["dev"] = tag; if (e.contains("hlc") && e["hlc"].is_object()) e["hlc"]["dev"] = tag;
+        // its clock to the 10 minutes, not the device's millisecond HLC (privacy review F3); a counter keeps
+        // edits in one window in order
+        const long long W = nowMs() / 600000 * 600000;
+        if (W == m_ansWall) m_ansCtr++; else { m_ansWall = W; m_ansCtr = 0; }
+        e["dev"] = tag; e["hlc"] = {{"wall", W}, {"ctr", m_ansCtr}, {"dev", tag}};
         // peers refuse an event over 256 KiB: say so instead of keeping an answer nobody gets (FR-10)
         if (!adoptChecked(e)) { out["ok"] = false; out["error"] = "these answers are too long to send - shorten the longest ones"; return out.dump(); }
         adoptLocal(e);

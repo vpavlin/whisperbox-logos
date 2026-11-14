@@ -179,6 +179,7 @@ static json responsesOf(Peer& p, const std::string& fid) {
 }
 
 int main(int argc, char** argv) {
+    setenv("WHISPERBOX_RECEIPT_DELAY_MS", "0", 0);   // receipts at once in tests (production: 1-5 min, ADR 0027 D)
     // Print a backtrace on an uncaught exception (diagnoses crashes that hide under gdb).
     std::set_terminate([] {
         void* fr[64]; int n = backtrace(fr, 64);
@@ -337,16 +338,19 @@ int main(int argc, char** argv) {
             CHECK(stored() >= s0 + 2, "the creator re-publishes its open form on a schedule (" + std::to_string(stored() - s0) + " in 8 s)");
             unsetenv("WHISPERBOX_REPUBLISH_MS");
         }
-        // a form Store no longer has: the respondent ASKs, only the creator side answers
+        // a form Store no longer has: no ASK any more (ADR 0028); the creator's re-publish brings it
         {
             FakeBus::get().storeRetentionMs = 1;   // Store forgets at once
             std::string f2 = Cr->call(Cr->core->createForm(q.dump())).value("formId", "");
             std::string link2 = Cr->call(Cr->core->shareUri(f2)).value("uri", "");
             pump(500);
-            const long crTx = txOf(*Cr), rsTx = txOf(*Rs);
+            const long rsTx = txOf(*Rs);
             Rs->call(Rs->core->importForm(link2));
-            CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f2) && !f[f2]["questions"].empty(); }, 8000), "a form missing from Store arrives after an ASK");
-            CHECK(txOf(*Rs) > rsTx && txOf(*Cr) > crTx, "...the respondent asked, the creator answered");
+            pump(1500);
+            CHECK(txOf(*Rs) == rsTx, "the respondent sends no ASK for a missing form (ADR 0028)");
+            setenv("WHISPERBOX_REPUBLISH_MS", "2000", 1);
+            CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f2) && !f[f2]["questions"].empty(); }, 12000), "...the creator's scheduled re-publish brings it");
+            unsetenv("WHISPERBOX_REPUBLISH_MS");
             FakeBus::get().storeRetentionMs = 2LL * 3600 * 1000;
         }
         // an answer the creator missed (offline, and Store forgot it) is sent again until the receipt
@@ -1905,10 +1909,11 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return diag(*P, "storeDropTopic") > 0 && diag(*P, "storeDropCap") > 0; }, 8000), "a Store reply's foreign topics and excess are dropped (W2-3)");
             { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); CHECK(!P->core->m_askAnsweredMs.count(fm), "an ASK inside a Store reply is never acted on (W2-3/W2-6)"); }
             inject = json::array();
-            const long c0 = diag(*P, "ctlDropBudget");
+            const long t0 = diag(*P, "txTotal");
             for (int i = 0; i < 200; i++) P->node->onRx(topicP, "net", FakeBus::b64(whisperbox::b64encode(ask)), nowNs());
             pump(800);
-            CHECK(diag(*P, "ctlDropBudget") > c0, "a flood of live ASKs runs out of the frame budget (W2-6)");
+            long ign = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); ign = P->core->m_askIgnored; }
+            CHECK(ign >= 200 && diag(*P, "txTotal") == t0, "live ASKs are never answered: no presence oracle (W2-6, ADR 0028)");
         }
         // W2-4: the node lost its subscriptions (a restart): after Connected the core joins them all again
         {
@@ -1937,10 +1942,11 @@ int main(int argc, char** argv) {
             R->call(R->core->importForm("whisperbox://form?id=form-5a5a5a5a&by=" + addrP));
             CHECK(Dd->call(Dd->core->createForm(qx.dump())).value("ok", false), "a squatter publishes the same id");
             CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains("form-5a5a5a5a"); }, 8000), "the respondent sees only the squatter's form");
-            { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); R->core->m_askSentMs["form-5a5a5a5a"] = 0; }
             P->node->online = true;
+            setenv("WHISPERBOX_REPUBLISH_MS", "2000", 1);
             CHECK(waitUntil([&] { return formOf(*R, "form-5a5a5a5a").value("creator", "") == addrP && formOf(*R, "form-5a5a5a5a").value("canRespond", false); }, 20000),
-                  "...it keeps asking, and the real creator's form arrives (W2-7)");
+                  "...the real creator's re-publish arrives and wins by the link (W2-7, ADR 0028)");
+            unsetenv("WHISPERBOX_REPUBLISH_MS");
         }
         // W2-12: an empty Store peer list falls back to the fleet
         {
@@ -2036,13 +2042,14 @@ int main(int argc, char** argv) {
                 json mine; for (auto& ev : readLog(R->dir)) if (ev.value("type", "") == "response.submit") mine = ev;
                 live(*P, WhisperboxCoreImpl::wireTopicFor(fr), mine, now);   // the respondent's retry
                 pump(800);
-                // blinded v3 (ADR 0027): a fresh receipt with ONE real entry (+ one decoy) for this answer
+                // v3 (ADR 0027): the stored receipt event goes out again, byte-identical (a fresh one with new
+                // decoys showed which entry is real); no new receipt event is made
                 std::string tag1; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); tag1 = R->core->ownSecret(fr, cid, formOf(*P, fr).value("publicKey", "")).tag; }
-                bool single = false;
+                int holding = 0; size_t size = 0;
                 { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx);
-                  for (auto& ev : P->core->m_log) if (ev.value("type", "") == "response.receipt" && ev["payload"]["r"].size() == 2)
-                      for (auto& x : ev["payload"]["r"]) if (x.value("t", "") == tag1) single = true; }
-                CHECK(single, "the retry made a single-answer receipt (R2-7)");
+                  for (auto& ev : P->core->m_log) if (ev.value("type", "") == "response.receipt")
+                      for (auto& x : ev["payload"]["r"]) if (x.value("t", "") == tag1) { holding++; size = ev["payload"]["r"].size(); } }
+                CHECK(holding == 1 && size >= 8, "the retry re-sent the one stored receipt (padded to >= 8), no fresh one (R2-7, ADR 0027)");
             }
             // R2-8: my_answers.json behind: the prune keeps answers it can't place
             {
@@ -2296,6 +2303,21 @@ int main(int argc, char** argv) {
                 { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); atP = foldOf(*P)["receiptHlc"][f5][cid].value("wall", 0LL); }
                 { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); atR = foldOf(*R)["receiptHlc"][f5][cid].value("wall", 0LL); }
                 CHECK(at > 0 && atP == at && atR == at, "the edit lock is the signed time on both sides; an earlier-HLC copy changes nothing (ADR 0027)");
+                // the outbox (ADR 0027 D): counted here at once, sent after the delay as one event of >= 8 entries
+                std::string f6 = P->call(P->core->createForm(qq.dump())).value("formId", "");
+                R->call(R->core->importForm(linkOf(*P, f6)));
+                CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains(f6); }, 8000), "R has f6");
+                CHECK(R->call(R->core->submitResponse(f6, json::array({{{"questionId", "q"}, {"value", "d"}}}).dump())).value("ok", false), "R answers f6");
+                CHECK(waitUntil([&] { return responsesOf(*P, f6).size() == 1; }, 8000), "P has it");
+                json ans; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); for (auto& e : R->core->m_log) if (e.value("type", "") == "response.submit") ans = e; }
+                CHECK(ans.is_object() && ans["hlc"].value("wall", 1LL) % 600000 == 0, "an answer's HLC is a 10-minute mark (F3, ADR 0028)");
+                auto receiptsOf = [&](Peer& p) { int n = 0; std::lock_guard<std::recursive_mutex> lk(p.core->m_mtx); for (auto& e : p.core->m_log) if (e.value("type", "") == "response.receipt") n++; return n; };
+                const int r0 = receiptsOf(*P);
+                setenv("WHISPERBOX_RECEIPT_DELAY_MS", "2500", 1);
+                CHECK(P->call(P->core->confirmAll(f6)).value("ok", false) && responsesOf(*P, f6)[0].value("confirmed", false) && receiptsOf(*P) == r0,
+                      "confirmed here at once, nothing sent yet (outbox)");
+                setenv("WHISPERBOX_RECEIPT_DELAY_MS", "0", 1);
+                CHECK(waitUntil([&] { return formOf(*R, f6).value("myConfirmed", false); }, 15000) && receiptsOf(*P) == r0 + 1, "after the delay, one receipt event reaches R");
             }
         }
         unsetenv("WHISPERBOX_MINUTE_MS");

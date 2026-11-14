@@ -192,7 +192,8 @@ anybody.
     edits, close/re-open, co-owner grants, replies), new receipts, or one answer. At most 2,000 events;
     split at ~120 KB to stay under Delivery's ~150 KB message cap. Every event is admitted as in
     6.1.
-  - `{"v": 2, "type": "ASK", "formId": id}`: a respondent can't find a form in Store.
+  - `{"v": 2, "type": "ASK", "formId": id}`: removed in 1.1.4 (ADR 0028: it named the form in clear
+    and made the creator answer at once). Never sent; an older peer's ASK is ignored (`askIgnored`).
   - `{"type": "EVENT", "event": e}`: one event; still accepted.
   - v1 `RBSR` and `SYNC_REQ` frames are ignored.
 - **Store.**
@@ -204,28 +205,36 @@ anybody.
   - Assume Store keeps 1-2 h (measured ~48 h on `logos.test`, 2026-11-12).
 - **Creator side.**
   - Sends the form's state on every change.
-  - Re-publishes each open form every 60 min (±10% per form); a closed form 3 times, then never.
-  - Answers an `ASK` for a form it creates or co-owns by publishing its state, at most once per
-    form per 10 min. Respondents never answer ASKs.
-  - Replies travel inside the form's state. Receipts go out on their own: only the new
-    `response.confirm` events, coalesced per form while one waits in the queue, never in the form's
-    state. A copy of an answer it holds and has confirmed (the respondent still retrying) makes the
-    creator side send that one receipt again, at most every 10 min.
+  - Re-publishes each open form every 60 min ±25%, drawn at random per send (ADR 0028 F5); a closed
+    form 3 times, then never.
+  - Replies travel inside the form's state. Receipts go out on their own, never in the form's state
+    (ADR 0027):
+    - a confirmation goes into the bucket's outbox (`rcpt_outbox.json` / `wb-rcpt-outbox`) and counts
+      locally at once;
+    - after a random 1-5 min, everything waiting for the bucket goes out as ONE `response.receipt`
+      (up to 32 real entries, decoys to a power of two, at least 8);
+    - named receipts (show-count forms, answers without a reply key) go out at once.
+  - A copy of an answer it holds and has confirmed (the respondent still retrying) makes it send the
+    stored receipt event again, byte-identical, at most every 10 min per answer and 30 per 10 min in
+    all.
 - **Opening a link** to a form not held pulls its bucket over the whole window (6 h), also when
   the bucket is already joined. **Becoming a co-owner** does the same for the form's bucket.
 - **Respondent side.**
   - Sends an answer once, then again until its receipt: every 10 min for an hour, hourly for 4 h,
-    then every 6 h, for 14 days.
-  - A form opened from a link that isn't in Store: `ASK` after 20 s, 10 min and 30 min, then
-    hourly (at most 26 times).
+    then every 6 h, for 14 days, each gap ±30% at random. Anonymous forms stop after 5 retries
+    (ADR 0028 F4).
+  - An answer's HLC is the 10-minute mark it was sent in, with a counter that keeps one window's
+    answers in order (ADR 0028 F3). The network time must be within [−10, +20] min of it.
+  - A form opened from a link that isn't in Store arrives with the next Store pull (every 15 min)
+    or the creator's hourly re-publish. There is no ASK.
 - **RLN budget.**
   - Everything sent goes through one queue: at most 10 messages per 600 s epoch by default
     (`$WHISPERBOX_MSGS_PER_EPOCH`), of the node's 100.
   - Priority:
     1. answer
     2. receipt / reply
-    3. form change / ASK answer
-    4. ASK
+    3. form change
+    4. (unused; was ASK)
     5. scheduled re-publish
     6. answer retry
   - A message queued again under the same key replaces the waiting one.

@@ -89,3 +89,28 @@ and a self-signed proof doesn't verify. Also done in 1.1.4:
 - **R6-9:** a node re-sends at most 30 receipts per 10 minutes in all (older respondents can't read
   new receipts and keep retrying).
 
+## Amendment 2026-11-14 (2): audit round 7 and the privacy review of v3 (still 1.1.4)
+
+**Audit round 7 (proteus/auditor):**
+- **R7-1 (High).** A respondent could reuse one reply key for two answers, so both answers had the
+  same S and the same tag, and one creator proof confirmed both. The tag is now
+  `sha256("wb-receipt-v3|" || S || "|" + lc(formId) + "|" + cid)`; the reply tag likewise. The proof
+  cache is keyed per answer.
+- **R7-2.** The answers a node can name are kept incrementally. A new answer is opened once when it
+  arrives; the full rebuild runs only when my answers, keys or forms change, or after a load or prune.
+- **R7-3.** Closed by R7-1: tags are now unique per answer.
+- **R7-4.** `at` must have 13 digits (sealing refuses anything else, opening rejects it), so every
+  real proof is exactly as long as a decoy.
+- **R7-5.** The phone checks that both keys are curve points before the ECDH.
+
+**proteus/anoncomms on v3** ("A, B and C are closed; nothing forgeable"). The linkable leftovers are
+fixed:
+1. A re-send is the stored receipt event, byte-identical. A fresh one with new decoys showed which
+   entry was real when two frames were compared.
+2. Receipts wait in a per-bucket outbox and go out as ONE event for the bucket, so per-form groups
+   aren't visible.
+3. Each event is padded to at least 8 entries.
+4. The outbox waits a random 1-5 min, which fits inside the respondent's first retry gap (7-13 min).
+   Tests set `WHISPERBOX_RECEIPT_DELAY_MS` / `receiptDelayMs` to 0.
+5. Answers' fine clocks are handled in ADR 0028 (F3).
+

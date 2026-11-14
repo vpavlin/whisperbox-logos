@@ -1,6 +1,6 @@
 # ADR 0028: Privacy hardening without Mix
 
-Status: in progress. F4 is done in 1.1.4; the rest are planned in the order below (2026-11-14).
+Status: in progress. F1, F3 (answers), F4 and F5 are done in 1.1.4; F6 and F7 are planned (2026-11-14).
 
 ## Context
 
@@ -20,11 +20,19 @@ help without it. Each is small and needs no protocol break unless noted.
      and the creator's pull.
    - Retries stay byte-identical. Re-sealing each retry would need the engine to dedup answers by
      (formId, cid), because a several-answer form would otherwise count each one. That is a later step.
-2. **F1, ASK names the form (next).** Replace `ASK{formId}` with `ASK{bucket}`. The creator answers
-   by re-publishing the forms it holds in that bucket, rate-limited per bucket, and the respondent picks
-   its form by id. Never send an ASK and an answer back to back.
-3. **F5, presence.** Answer an ASK only at the next scheduled re-publish (a flag, not an immediate
-   send), with ±25% jitter on the hourly re-publish.
+2. **F1 + F5, ASK (done, 1.1.4): ASK is removed.** anoncomms pointed out that a creator answering
+   ASKs only at its next scheduled re-publish (the F5 fix) makes ASK a no-op. The re-publish happens
+   anyway, and Store holds the copies. So respondents no longer send ASK (it named the form in clear,
+   F1), and creators ignore older peers' ASKs (no presence oracle, F5). A missing form arrives with
+   the next Store pull or the creator's hourly re-publish. The re-publish interval is drawn at random
+   per send (±25%), where it was a fixed per-form offset predictable from the public form id. A clean
+   break on the test repos.
+3. **F3, the sender's clock (done for answers, 1.1.4).** An answer's HLC is the 10-minute mark it was
+   sent in, plus a counter that keeps one window's answers (edits) in order. Its network time must
+   be within [−10, +20] min of it. Without a network time (BLE), close and expiry checks judge the
+   answer by that mark, so it can count up to 10 min late. Signed events keep their HLC: anoncomms
+   advised against flooring them, since closes compare against them and two of a creator's devices
+   would race.
 4. **F6, the bucket set as a fingerprint.** Sticky random decoy buckets: 3-4 extra buckets per install,
    joined and Store-pulled with the real ones, the count a setting.
 5. **F7, public metadata (optional, opt-in features).** Whitelists as commitments

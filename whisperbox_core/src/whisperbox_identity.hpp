@@ -349,22 +349,27 @@ inline void signEventJson(json& e, const SignId& id) {
 // pt = {"at":<ms>,"pub":"<hex>","sig":"<hex>"}, sig over sha256("wb-receipt-v3-sig|formId|cid|at").
 inline constexpr size_t kReceiptProofBytes = 260;
 inline Bytes receiptSecret(const Bytes& priv32, const Bytes& pub33) { return ecdhX(priv32, pub33); }
-inline std::string tagWith(const char* prefix, const Bytes& S) {
+// bound to the answer too (audit R7-1: one reply key reused for two answers gave them one tag)
+inline std::string tagWith(const char* prefix, const Bytes& S, const std::string& formId, const std::string& cid) {
     Bytes b = strBytes(prefix); b.insert(b.end(), S.begin(), S.end());
+    const std::string tail = "|" + toLower(formId) + "|" + cid; b.insert(b.end(), tail.begin(), tail.end());
     return toHex(sha256(b));
 }
-inline std::string receiptTagOf(const Bytes& S) { return tagWith("wb-receipt-v3|", S); }
-inline std::string replyTagOf(const Bytes& S) { return tagWith("wb-reply-v3|", S); }
+inline std::string receiptTagOf(const Bytes& S, const std::string& formId, const std::string& cid) { return tagWith("wb-receipt-v3|", S, formId, cid); }
+inline std::string replyTagOf(const Bytes& S, const std::string& formId, const std::string& cid) { return tagWith("wb-reply-v3|", S, formId, cid); }
+// `at` has 13 digits: every real proof is kReceiptProofBytes, like a decoy (R7-4)
+inline bool receiptAtOk(long long at) { return at >= 1000000000000LL && at < 10000000000000LL; }
 inline Bytes receiptSigDigest(const std::string& formId, const std::string& cid, long long at) {
     return sha256(strBytes("wb-receipt-v3-sig|" + toLower(formId) + "|" + cid + "|" + std::to_string(at)));
 }
 inline std::string sealReceiptProof(const Bytes& S, const SignId& signer, const std::string& formId, const std::string& cid, long long at) {
+    if (!receiptAtOk(at)) throw std::runtime_error("receipt time out of range");
     const Bytes sig = ecdsaSignLowS(signer.priv, receiptSigDigest(formId, cid, at));
     const std::string pt = "{\"at\":" + std::to_string(at) + ",\"pub\":\"" + signer.pubHex + "\",\"sig\":\"" + toHex(sig) + "\"}";
     Bytes nonce(12);
     if (RAND_bytes(nonce.data(), 12) != 1) throw std::runtime_error("the random number generator failed");
     const Bytes key = hkdfSha256(S, strBytes("wb-receipt-v3-key"), Bytes(), 32);
-    const Bytes ct = aeadSeal(key, nonce, strBytes(pt), strBytes(receiptTagOf(S)));
+    const Bytes ct = aeadSeal(key, nonce, strBytes(pt), strBytes(receiptTagOf(S, formId, cid)));
     Bytes out = nonce; out.insert(out.end(), ct.begin(), ct.end());
     return toHex(out);
 }
@@ -374,12 +379,13 @@ inline ReceiptProof openReceiptProof(const Bytes& S, const std::string& formId, 
     const Bytes b = fromHex(proofHex);
     if (b.size() < 12 + 16 + 2 || b.size() > 1024) return r;
     const Bytes key = hkdfSha256(S, strBytes("wb-receipt-v3-key"), Bytes(), 32);
-    const Bytes pt = aeadOpen(key, Bytes(b.begin(), b.begin() + 12), Bytes(b.begin() + 12, b.end()), strBytes(receiptTagOf(S)));
+    const Bytes pt = aeadOpen(key, Bytes(b.begin(), b.begin() + 12), Bytes(b.begin() + 12, b.end()), strBytes(receiptTagOf(S, formId, cid)));
     const json o = json::parse(std::string(pt.begin(), pt.end()));
     if (!o.is_object() || !o.contains("at") || !o["at"].is_number_integer() || o["at"].get<long long>() < 0
         || !o.contains("pub") || !o["pub"].is_string() || !o.contains("sig") || !o["sig"].is_string()) return r;
     const Bytes pub = fromHex(o["pub"].get<std::string>()), sig = fromHex(o["sig"].get<std::string>());
     const long long at = o["at"].get<long long>();
+    if (!receiptAtOk(at)) return r;
     if (!ecdsaVerify(pub, receiptSigDigest(formId, cid, at), sig)) return r;
     const Bytes h = sha256(pub);
     r.ok = true; r.at = at; r.by = "0x" + toHex(h.data(), 32).substr(24, 40);

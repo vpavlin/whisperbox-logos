@@ -20,6 +20,14 @@
   - Oversized receipt ids are ignored (R6-3).
   - Show-count forms count only named receipts (R6-6).
   - Receipt re-sends are capped (R6-9).
+- **Receipts wait 1-5 minutes** in a per-bucket outbox, then go out as one event with at least 8
+  entries. A respondent's retry gets the same receipt again, byte-identical (anoncomms' review of v3).
+- **Audit round 7:**
+  - a proof can't confirm a second answer that reuses a reply key (R7-1);
+  - receipt handling is incremental (R7-2);
+  - receipt times are fixed-length (R7-4).
+- **No ASK any more (ADR 0028, F1/F5).** A missing form arrives with the Store pull or the creator's
+  hourly re-publish, which now has a random ±25% interval. Answers carry only a 10-minute clock (F3).
 - **Answer retries (ADR 0028, F4).** Retries happen at random times (±30%), and on anonymous forms
   they stop after about an hour.
 
