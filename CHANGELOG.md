@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.5 desktop core + studio + respond, Android vc29 (2026-11-14) - respondent privacy first (ADR 0029)
+
+- **A form that missed the network's Store arrives in seconds again.** The respondent asks for its
+  bucket (1 of 16, never the form), and the creator answers at once.
+- **Receipts arrive within seconds** (they waited 1-5 minutes in 1.1.4).
+- **Anonymous answers keep retrying until their receipt**, so an answer isn't lost while the creator
+  is offline.
+- Forms are public, so hiding the creator's activity no longer costs anyone time. Everything that
+  protects respondents stays.
+
 ## 1.1.4 desktop core + studio + respond, Android vc28 (2026-11-14) - receipts v3, retry jitter
 
 - **Receipts v3 (ADR 0027).** Each receipt carries a proof signed by the form's creator or a co-owner,

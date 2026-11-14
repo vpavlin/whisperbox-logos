@@ -1,6 +1,6 @@
 # ADR 0028: Privacy hardening without Mix
 
-Status: in progress. F1, F3 (answers), F4 and F5 are done in 1.1.4; F6 and F7 are planned (2026-11-14).
+Status: in progress. F1, F3 (answers) and F4 are done; F5 and the anonymous-retry limit were rolled back by ADR 0029 (creator privacy never at the cost of UX); F6 and F7 are planned (2026-11-14).
 
 ## Context
 

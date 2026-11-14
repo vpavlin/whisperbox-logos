@@ -1335,8 +1335,10 @@ long long WhisperboxCoreImpl::receiptDelayMs() {
         char* end = nullptr; const long long x = std::strtoll(v, &end, 10);
         if (end && *end == 0 && x >= 0) return x;
     }
+    // 2-10 s: enough to send a confirm-all (and automatic receipts) as one event; the respondent sees its
+    // receipt at once (ADR 0029: a 1-5 min wait only hid the creator's timing)
     unsigned char rb[2] = {0, 0}; RAND_bytes(rb, 2);
-    return (long long)(envLL("WHISPERBOX_MINUTE_MS", 60000LL) * (1.0 + 4.0 * (((rb[0] << 8) | rb[1]) / 65535.0)));   // 1-5 min
+    return (long long)(2000 + 8000 * (((rb[0] << 8) | rb[1]) / 65535.0));
 }
 // saved with the next flush, not per confirmation (audit R8-5), and sealed like my other private files
 // when a passphrase is set (R8-6)
@@ -1846,18 +1848,30 @@ void WhisperboxCoreImpl::publishFormState(const std::string& formId, int prio) {
     sendEvents(formId, events, prio, "form:" + formId);
 }
 
+// An ASK for a bucket (or an older peer's for a form: its bucket): the creator side re-publishes its open
+// forms in that bucket, at most once per bucket per 10 min (ADR 0029)
 void WhisperboxCoreImpl::onAsk(const json& env) {
-    const std::string fid = env.contains("formId") && env["formId"].is_string() ? lc(env["formId"].get<std::string>()) : std::string();
-    if (fid.empty() || fid.size() > 128) return;
+    std::string topic;
+    if (env.contains("bucket") && env["bucket"].is_string()) {
+        const std::string b = env["bucket"].get<std::string>();
+        if (b.size() == 1 && std::string("0123456789abcdef").find(b[0]) != std::string::npos) topic = "/whisperbox/2/form-" + b + "/proto";
+    } else if (env.contains("formId") && env["formId"].is_string()) {
+        const std::string fid = lc(env["formId"].get<std::string>());
+        if (!fid.empty() && fid.size() <= 128) topic = formTopic(fid);
+    }
+    if (topic.empty()) return;
+    if (m_askAnsweredMs.count(topic) && nowMs() - m_askAnsweredMs[topic] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
     OrderedJson st = foldedState();
-    if (!st["forms"].contains(fid)) return;
-    const auto& f = st["forms"][fid];
-    // only the creator side answers, at most once per form per 10 min whoever asked
-    if (!(m_signId.valid && f.value("creator", "") == m_signId.address) && !isCoOwner(f)) return;
-    // its own limit: an ASK right after a publish still gets an answer (Store may have missed it)
-    if (m_askAnsweredMs.count(fid) && nowMs() - m_askAnsweredMs[fid] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
-    m_askAnsweredMs[fid] = nowMs();
-    publishFormState(fid, 3);
+    std::vector<std::string> mine;
+    for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it) {
+        const auto& f = it.value();
+        if (!((m_signId.valid && f.value("creator", "") == m_signId.address) || isCoOwner(f))) continue;   // only the creator side answers
+        if (f.value("status", "open") != "open" || formTopic(it.key()) != topic) continue;
+        mine.push_back(it.key());
+    }
+    if (mine.empty()) return;
+    m_askAnsweredMs[topic] = nowMs();
+    for (const auto& fid : mine) publishFormState(fid, 3);
 }
 
 void WhisperboxCoreImpl::loadPulls() {
@@ -2051,8 +2065,26 @@ void WhisperboxCoreImpl::wireSchedule() {
         if (closed) m_formClosedSends[fid]++;
         publishFormState(fid, 5);
     }
-    // no ASK any more (privacy review F1/F5, ADR 0028): it named the form in clear and made the creator
-    // answer at once (a presence oracle). A missing form comes from the Store pull or the hourly re-publish.
+    // A form opened from a link that hasn't arrived: ASK its BUCKET after 20 s, 10 min, 30 min, then
+    // hourly (ADR 0029). The bucket (1 of 16) is all it names, so the respondent's interest in one form
+    // stays hidden; the creator side answers at once - forms are public (Václav 2026-11-14).
+    std::set<std::string> askBuckets;
+    for (const auto& fid : m_watched) {
+        // held - unless it is someone else's form under that id and the link names another creator (W2-7)
+        const auto pin = m_pinned.find(fid);
+        const bool have = st["forms"].contains(fid) && (pin == m_pinned.end() || pin->second.empty() || lc(st["forms"][fid].value("creator", "")) == lc(pin->second));
+        if (have) { m_askCount.erase(fid); continue; }
+        if (!m_askSentMs.count(fid)) m_askSentMs[fid] = now;   // first seen: give Store a moment (20 s)
+        const int n = m_askCount[fid];
+        const long long gap = n == 0 ? minute / 3 : n == 1 ? 10 * minute : n == 2 ? 20 * minute : 60 * minute;
+        if (n >= 26 || now - m_askSentMs[fid] < gap) continue;
+        m_askSentMs[fid] = now; m_askCount[fid] = n + 1;
+        askBuckets.insert(formTopic(fid));
+    }
+    for (const auto& t : askBuckets) {
+        const std::string b = t.substr(std::string("/whisperbox/2/form-").size(), 1);
+        enqueueSend(4, t, json({{"v", 2}, {"type", "ASK"}, {"bucket", b}}), "ask:" + b);
+    }
     // respondent: each answer again until its receipt - every 10 min for an hour, hourly for 4 h,
     // then every 6 h, for 14 days
     static const long long kRetryAt[] = {10, 20, 30, 40, 50, 110, 170, 230, 290};   // minutes after sending
@@ -2061,16 +2093,12 @@ void WhisperboxCoreImpl::wireSchedule() {
         const std::string fid = kv.first;
         if (!st["forms"].contains(fid)) continue;
         const auto& conf = st["forms"][fid]["confirmations"];
-        const bool anon = st["forms"][fid].value("anonymous", false);
         auto handle = [&](json& a) {
             const std::string eid = a.value("eventId", ""), cid = a.value("confirmationId", "");
             if (eid.empty() || cid.empty() || containsStr(conf, cid)) return;
             const long long first = a.value("submittedAt", 0LL);
             if (first <= 0 || now - first > 14LL * 24 * 60 * minute) return;
             const int n = a.value("retries", 0);
-            // anonymous forms: 5 retries (about an hour), then the Store copy and the creator's pull do
-            // the rest - fewer sends to link (privacy review F4)
-            if (a.value("sent", false) && anon && n >= 5) return;
             // due at the jittered time set when it was last sent (F4: +/-30%, never a fixed schedule an
             // observer can match); older entries without one: the fixed schedule
             const long long dueAt = !a.value("sent", false) ? 0
@@ -2220,7 +2248,11 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
                 }
             return true;
         }
-        if (type == "ASK") { m_askIgnored++; return true; }   // older peers' ASK: never answered (ADR 0028)
+        if (type == "ASK") {   // a live ASK only, and it costs a frame token (audit W2-3/W2-6)
+            if (!channelPath) return true;
+            if (!takeToken(m_ctlTokens, m_ctlRefillMs, 120)) { m_ctlDropBudget++; return true; }
+            onAsk(env); return true;
+        }
         return false;
     };
     std::string once = whisperbox::b64decode(text);

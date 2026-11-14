@@ -338,19 +338,16 @@ int main(int argc, char** argv) {
             CHECK(stored() >= s0 + 2, "the creator re-publishes its open form on a schedule (" + std::to_string(stored() - s0) + " in 8 s)");
             unsetenv("WHISPERBOX_REPUBLISH_MS");
         }
-        // a form Store no longer has: no ASK any more (ADR 0028); the creator's re-publish brings it
+        // a form Store no longer has: the respondent ASKs its bucket, only the creator side answers (ADR 0029)
         {
             FakeBus::get().storeRetentionMs = 1;   // Store forgets at once
             std::string f2 = Cr->call(Cr->core->createForm(q.dump())).value("formId", "");
             std::string link2 = Cr->call(Cr->core->shareUri(f2)).value("uri", "");
             pump(500);
-            const long rsTx = txOf(*Rs);
+            const long crTx = txOf(*Cr), rsTx = txOf(*Rs);
             Rs->call(Rs->core->importForm(link2));
-            pump(1500);
-            CHECK(txOf(*Rs) == rsTx, "the respondent sends no ASK for a missing form (ADR 0028)");
-            setenv("WHISPERBOX_REPUBLISH_MS", "2000", 1);
-            CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f2) && !f[f2]["questions"].empty(); }, 12000), "...the creator's scheduled re-publish brings it");
-            unsetenv("WHISPERBOX_REPUBLISH_MS");
+            CHECK(waitUntil([&] { json f = foldOf(*Rs)["forms"]; return f.contains(f2) && !f[f2]["questions"].empty(); }, 8000), "a form missing from Store arrives after an ASK");
+            CHECK(txOf(*Rs) > rsTx && txOf(*Cr) > crTx, "...the respondent asked, the creator answered");
             FakeBus::get().storeRetentionMs = 2LL * 3600 * 1000;
         }
         // an answer the creator missed (offline, and Store forgot it) is sent again until the receipt
@@ -1909,11 +1906,10 @@ int main(int argc, char** argv) {
             CHECK(waitUntil([&] { return diag(*P, "storeDropTopic") > 0 && diag(*P, "storeDropCap") > 0; }, 8000), "a Store reply's foreign topics and excess are dropped (W2-3)");
             { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); CHECK(!P->core->m_askAnsweredMs.count(fm), "an ASK inside a Store reply is never acted on (W2-3/W2-6)"); }
             inject = json::array();
-            const long t0 = diag(*P, "txTotal");
+            const long c0 = diag(*P, "ctlDropBudget");
             for (int i = 0; i < 200; i++) P->node->onRx(topicP, "net", FakeBus::b64(whisperbox::b64encode(ask)), nowNs());
             pump(800);
-            long ign = 0; { std::lock_guard<std::recursive_mutex> lk(P->core->m_mtx); ign = P->core->m_askIgnored; }
-            CHECK(ign >= 200 && diag(*P, "txTotal") == t0, "live ASKs are never answered: no presence oracle (W2-6, ADR 0028)");
+            CHECK(diag(*P, "ctlDropBudget") > c0, "a flood of live ASKs runs out of the frame budget (W2-6)");
         }
         // W2-4: the node lost its subscriptions (a restart): after Connected the core joins them all again
         {
@@ -1942,11 +1938,10 @@ int main(int argc, char** argv) {
             R->call(R->core->importForm("whisperbox://form?id=form-5a5a5a5a&by=" + addrP));
             CHECK(Dd->call(Dd->core->createForm(qx.dump())).value("ok", false), "a squatter publishes the same id");
             CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains("form-5a5a5a5a"); }, 8000), "the respondent sees only the squatter's form");
+            { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); R->core->m_askSentMs["form-5a5a5a5a"] = 0; }
             P->node->online = true;
-            setenv("WHISPERBOX_REPUBLISH_MS", "2000", 1);
             CHECK(waitUntil([&] { return formOf(*R, "form-5a5a5a5a").value("creator", "") == addrP && formOf(*R, "form-5a5a5a5a").value("canRespond", false); }, 20000),
-                  "...the real creator's re-publish arrives and wins by the link (W2-7, ADR 0028)");
-            unsetenv("WHISPERBOX_REPUBLISH_MS");
+                  "...it keeps asking, and the real creator's form arrives (W2-7)");
         }
         // W2-12: an empty Store peer list falls back to the fleet
         {

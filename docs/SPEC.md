@@ -192,8 +192,8 @@ anybody.
     edits, close/re-open, co-owner grants, replies), new receipts, or one answer. At most 2,000 events;
     split at ~120 KB to stay under Delivery's ~150 KB message cap. Every event is admitted as in
     6.1.
-  - `{"v": 2, "type": "ASK", "formId": id}`: removed in 1.1.4 (ADR 0028: it named the form in clear
-    and made the creator answer at once). Never sent; an older peer's ASK is ignored (`askIgnored`).
+  - `{"v": 2, "type": "ASK", "bucket": "<hex digit>"}`: a respondent can't find a form in Store. It
+    names the bucket only (ADR 0029); an older peer's `{formId}` ASK is read as that form's bucket.
   - `{"type": "EVENT", "event": e}`: one event; still accepted.
   - v1 `RBSR` and `SYNC_REQ` frames are ignored.
 - **Store.**
@@ -205,13 +205,15 @@ anybody.
   - Assume Store keeps 1-2 h (measured ~48 h on `logos.test`, 2026-11-12).
 - **Creator side.**
   - Sends the form's state on every change.
-  - Re-publishes each open form every 60 min ±25%, drawn at random per send (ADR 0028 F5); a closed
-    form 3 times, then never.
+  - Re-publishes each open form every 60 min ±25%, drawn at random per send; a closed form 3 times,
+    then never.
+  - Answers a live `ASK` for a bucket at once by re-publishing its open forms in that bucket (creator
+    or co-owner), at most once per bucket per 10 min. Respondents never answer ASKs (ADR 0029).
   - Replies travel inside the form's state. Receipts go out on their own, never in the form's state
     (ADR 0027):
     - a confirmation goes into the bucket's outbox (`rcpt_outbox.json` / `wb-rcpt-outbox`) and counts
       locally at once;
-    - after a random 1-5 min, everything waiting for the bucket goes out as ONE `response.receipt`
+    - after 2-10 s (ADR 0029), everything waiting for the bucket goes out as ONE `response.receipt`
       (up to 32 real entries, decoys to a power of two, at least 8);
     - named receipts (show-count forms, answers without a reply key) go out at once.
   - A copy of an answer it holds and has confirmed (the respondent still retrying) makes it send the
@@ -221,21 +223,21 @@ anybody.
   the bucket is already joined. **Becoming a co-owner** does the same for the form's bucket.
 - **Respondent side.**
   - Sends an answer once, then again until its receipt: every 10 min for an hour, hourly for 4 h,
-    then every 6 h, for 14 days, each gap ±30% at random. Anonymous forms stop after 5 retries
-    (ADR 0028 F4).
+    then every 6 h, for 14 days, each gap ±30% at random (ADR 0028 F4), anonymous forms included
+    (ADR 0029).
   - An answer's HLC is the 10-minute mark it was sent in, with a counter that keeps one window's
     answers in order, continuing after a restart (ADR 0028 F3). A network time must be within
     [−5, +15] min of it.
-  - A form opened from a link that isn't in Store arrives with the next Store pull (every 15 min)
-    or the creator's hourly re-publish. There is no ASK.
+  - A form opened from a link that isn't in Store: `ASK` its bucket after 20 s, 10 min and 30 min,
+    then hourly (at most 26 times; one ASK per bucket).
 - **RLN budget.**
   - Everything sent goes through one queue: at most 10 messages per 600 s epoch by default
     (`$WHISPERBOX_MSGS_PER_EPOCH`), of the node's 100.
   - Priority:
     1. answer
     2. receipt / reply
-    3. form change
-    4. (unused; was ASK)
+    3. form change / ASK answer
+    4. ASK
     5. scheduled re-publish
     6. answer retry
   - A message queued again under the same key replaces the waiting one.

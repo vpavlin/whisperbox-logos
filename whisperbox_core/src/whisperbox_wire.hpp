@@ -7,7 +7,8 @@
 // privacy comes from the ECIES-sealed answers inside response.submit events, and form events are
 // public by design. Envelopes:
 //   {v:2, type:"EVENTS", events:[...]}   // a form's state, new receipts, or one answer
-//   {v:2, type:"ASK", formId}            // a respondent can't find a form in Store (creator side answers)
+//   {v:2, type:"ASK", bucket}            // a respondent can't find a form in Store: names its bucket only
+//                                        // (ADR 0029); an older {formId} ASK is read as its bucket
 //   {v:1, type:"EVENT", event:{...}}     // one event; still accepted
 // v1's SYNC_REQ and RBSR frames (/whisperbox/1/all/proto) are ignored. The channel payload is the
 // base64 TEXT of the envelope; the transport base64s it once more, so a receiver peels one or two
@@ -93,7 +94,7 @@ inline json parseEnvelope(const std::string& text) {
         if (t == "SYNC_REQ") return o;
         // wire v2 (ADR 0024): a form's state / an answer as a bundle of events, and a request for a form
         if (t == "EVENTS" && o.contains("events") && o["events"].is_array()) return o;
-        if (t == "ASK" && o.contains("formId") && o["formId"].is_string()) return o;
+        if (t == "ASK" && ((o.contains("bucket") && o["bucket"].is_string()) || (o.contains("formId") && o["formId"].is_string()))) return o;
         return json();
     } catch (...) { return json(); }
 }
