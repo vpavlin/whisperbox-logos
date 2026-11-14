@@ -31,6 +31,10 @@
   - the answer clock survives a restart (R8-2);
   - a tighter network-time window (R8-3);
   - the outbox is saved in batches and sealed with a passphrase (R8-5/R8-6).
+- **Audit round 9:**
+  - new receipts are saved at once (R9-2);
+  - forgetting a co-owned form leaves it (R9-1);
+  - a passphrase re-seals pending receipts (R9-4).
 - **No ASK any more (ADR 0028, F1/F5).** A missing form arrives with the Store pull or the creator's
   hourly re-publish, which now has a random ±25% interval. Answers carry only a 10-minute clock (F3).
 - **Answer retries (ADR 0028, F4).** Retries happen at random times (±30%), and on anonymous forms

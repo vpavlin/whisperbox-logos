@@ -122,3 +122,15 @@ fixed:
 - **R8-6:** on the desktop the outbox is a private file (`rcpt_outbox.json`), sealed when a passphrase
   is set. The phone keeps it in the app's storage like its other state.
 
+## Amendment 2026-11-14 (4): audit round 9 (still 1.1.4)
+
+- **R9-2:** new receipts are written to the outbox at once. A kill within the 250 ms debounce lost
+  a confirmation. Purges and flushes are still batched (R8-5): one write per confirm-all, not per
+  answer.
+- **R9-1:** forgetting a form this node co-owns also leaves it, so its pending receipts are dropped.
+  A co-owner who leaves and accepts again re-confirms the answers. Automatic receipts do this, and
+  the respondent keeps retrying until then.
+- **R9-4:** setting or changing the passphrase re-seals a pending outbox with the other private files.
+- **R9-3 (accepted):** a dishonest Store can still date a valid answer at the edges of [−5, +15] min.
+  Narrowing it needs a tighter sender clock (RLN-attested time).
+

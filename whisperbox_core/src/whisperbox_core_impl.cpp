@@ -1325,7 +1325,7 @@ int WhisperboxCoreImpl::emitReceipts(const std::string& formId, const std::vecto
         if (!have) items.push_back({{"formId", formId}, {"cid", b.first}, {"at", at}, {"t", b.second.tag},
                                     {"s", whisperbox::sealReceiptProof(b.second.S, m_signId, formId, b.first, at)}});
     }
-    saveOutbox();
+    saveOutboxNow();   // at once: a kill before a debounced save lost the confirmation (audit R9-2)
     m_foldValid = false; m_cvValid = false;
     if (m_rcptOutbox[topic].value("due", 0LL) <= at) flushReceipts(topic);
     return n + 1;
@@ -3398,6 +3398,8 @@ std::string WhisperboxCoreImpl::deleteLocalForm(std::string formId) try {
     saveWatched();
     if (m_hidden.erase(formId)) saveHidden();
     if (m_pinned.erase(formId)) savePins();   // a new link may pin another creator (FR-5)
+    // forgetting a form I co-own leaves it too: its receipts waiting to go out are dropped (audit R9-1)
+    if (m_coAccepted.erase(formId)) { m_coDeclined.insert(formId); saveCoOwnerPrefs(); m_interestGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear(); }
     pruneUnwanted();   // its events go too, unless I created, co-own or answered it (audit W2-9)
     dropUnusedBuckets();
     publishState();
@@ -3710,7 +3712,7 @@ std::string WhisperboxCoreImpl::setPassphrase(std::string currentPassphrase, std
     const whisperbox::Bytes oldKey = m_vaultKey;
     if (newPassphrase.empty()) { m_protected = false; m_vaultKey.clear(); m_vaultSalt.clear(); }
     else { m_protected = true; m_vaultSalt = whisperbox::vault::randomBytes(16); m_vaultKey = whisperbox::vault::passKey(newPassphrase, m_vaultSalt); }
-    saveIdentity(); saveMyAnswers(); saveDrafts();
+    saveIdentity(); saveMyAnswers(); saveDrafts(); saveOutboxNow();   // the outbox is sealed too (R9-4)
     {   // identity.json.prev (an imported-over identity): re-sealed or opened like the current one
         json prev = json::parse(std::ifstream(m_dataDir + "/identity.json.prev"), nullptr, false);
         whisperbox::Bytes ppriv;
