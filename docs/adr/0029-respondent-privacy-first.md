@@ -51,3 +51,16 @@ for. Otherwise it is documented as accepted.
   seconds). Forms are public; accepted.
 - 1.1.4 creators don't answer ASKs, and 1.1.3 creators can't parse `ASK{bucket}`. Respondents fall back
   to the Store pull and the hourly re-publish until creators upgrade (test repos only).
+
+## Amendment 2026-11-14: audit round 10 (1.1.6)
+
+- **R10-1 (ASK amplification):** one ASK used to re-publish every open form in the bucket. Now the
+  creator side sends the least recently sent of its open forms there, at most 3 per ASK and 6
+  ASK-driven publishes per 10 minutes in all. A form just sent is not skipped: Store may have missed
+  it, and that is what ASK is for.
+- **R10-2:** every bucket's ASK is rate-limited (once per 10 min), also when this node holds no form
+  there, so ASKs can't make it re-scan its forms 120 times a minute.
+- **R10-3:** already covered. The phone writes a new receipt to its outbox at once (R9-2); only purges
+  and flushes are batched.
+- **R10-4 (accepted):** a co-owner who leaves and accepts again re-confirms (ADR 0027 amendment 4).
+

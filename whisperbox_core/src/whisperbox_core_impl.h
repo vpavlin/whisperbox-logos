@@ -443,4 +443,5 @@ private:
     long m_askIgnored = 0;                                                    // older peers' ASKs (never answered)
     bool m_outboxDirty = false;                                               // rcpt_outbox.json to save (R8-5)
     std::map<std::string, long long> m_askNextMs;                             // next ASK per form (jittered)
+    std::deque<long long> m_askSends;                                         // ASK-driven publishes, last 10 min (R10-1)
 };

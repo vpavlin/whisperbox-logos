@@ -5,6 +5,8 @@
 - **Answers are padded to a few fixed sizes** (1, 4, 16 or 36 KiB), so an answer's size no longer
   hints at which form it is for.
 - Requests for a missing form go out at random times instead of a fixed schedule.
+- A request for a missing form makes the creator re-send at most 3 forms, and at most 6 such sends
+  in 10 minutes, so nobody can flood a creator with requests (audit round 10).
 
 ## 1.1.5 desktop core + studio + respond, Android vc29 (2026-11-14) - respondent privacy first (ADR 0029)
 

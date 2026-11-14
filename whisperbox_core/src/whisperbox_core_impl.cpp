@@ -1860,18 +1860,26 @@ void WhisperboxCoreImpl::onAsk(const json& env) {
         if (!fid.empty() && fid.size() <= 128) topic = formTopic(fid);
     }
     if (topic.empty()) return;
-    if (m_askAnsweredMs.count(topic) && nowMs() - m_askAnsweredMs[topic] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
+    const long long now = nowMs(), win = 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL);
+    if (m_askAnsweredMs.count(topic) && now - m_askAnsweredMs[topic] < win) return;
+    m_askAnsweredMs[topic] = now;   // empty buckets too: an ASK costs at most one scan per bucket (audit R10-2)
+    // bounded (audit R10-1: one ASK re-published every open form in the bucket): the least recently sent
+    // first, at most 3 per ASK and 6 per 10 min in all (a form just sent may still be missing from Store)
+    while (!m_askSends.empty() && now - m_askSends.front() >= win) m_askSends.pop_front();
     OrderedJson st = foldedState();
-    std::vector<std::string> mine;
+    std::vector<std::pair<long long, std::string>> mine;
     for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it) {
         const auto& f = it.value();
         if (!((m_signId.valid && f.value("creator", "") == m_signId.address) || isCoOwner(f))) continue;   // only the creator side answers
         if (f.value("status", "open") != "open" || formTopic(it.key()) != topic) continue;
-        mine.push_back(it.key());
+        mine.push_back({m_formSentMs.count(it.key()) ? m_formSentMs[it.key()] : 0, it.key()});
     }
-    if (mine.empty()) return;
-    m_askAnsweredMs[topic] = nowMs();
-    for (const auto& fid : mine) publishFormState(fid, 3);
+    std::sort(mine.begin(), mine.end());
+    for (size_t i = 0; i < mine.size() && i < 3; i++) {
+        if (m_askSends.size() >= 6) break;
+        m_askSends.push_back(now);
+        publishFormState(mine[i].second, 3);
+    }
 }
 
 void WhisperboxCoreImpl::loadPulls() {
