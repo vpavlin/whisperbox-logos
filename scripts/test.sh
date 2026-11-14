@@ -53,7 +53,7 @@ export WB_OUT="$WB_TMP/render"
 
 step "7/8 interop: JS client vs C++ core"
 "$ROOT/whisperbox_core/test/run-bridge-build.sh" "$WB_TMP/wb-bridge" >/dev/null
-( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs test/hostile.test.mjs test/nettime.test.mjs test/round3.test.mjs test/round4.test.mjs test/round5.test.mjs test/multi-answers.test.mjs test/wire-v2.test.mjs test/audit-w2.test.mjs test/audit-r2.test.mjs test/audit-r3.test.mjs test/audit-r4.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
+( cd "$ROOT/packages/client" && { [ -d node_modules ] || npm install --silent; } && WB_BRIDGE="$WB_TMP/wb-bridge" node --test test/interop.test.mjs test/hermes-globals.test.mjs test/hostile.test.mjs test/nettime.test.mjs test/round3.test.mjs test/round4.test.mjs test/round5.test.mjs test/multi-answers.test.mjs test/wire-v2.test.mjs test/audit-w2.test.mjs test/audit-r2.test.mjs test/audit-r3.test.mjs test/audit-r4.test.mjs test/audit-r5.test.mjs test/blinded-receipts.test.mjs | grep -E "^(ok|not ok)|^# (pass|fail)" )
 
 step "8/8 Keycard: real applets (3.1.2 + 4.0) in jCardSim, Hermes-like globals"
 if [ -x "${JAVA_HOME:-$HOME/jdk/17}/bin/java" ] && [ -d "$ROOT/mobile/node_modules/keycard-sdk" ]; then

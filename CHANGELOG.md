@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.3 desktop core + studio + respond, Android vc27 (2026-11-14) - blinded receipts, audit round 5
+
+- **Receipts are blinded (ADR 0026):** a receipt names no form, no author and no device, and isn't signed.
+  It carries only tags that the respondent and the form's owners can recognise. Bystanders, Stores and
+  relays can't tell which form got receipts, how many, or whether its creator is online. Replies are
+  addressed the same way.
+- Forms that show respondents how many answers came in keep public, signed receipts. The builder now
+  says so.
+- **Clean break for receipts:** 1.1.2 and older don't understand the new receipts, so an older
+  respondent keeps re-sending its answer. Upgrade creators and respondents together.
+- Co-owner invitations: shown and acceptable only from the form's known creator, once the form has
+  arrived. A stranger's grant no longer hides a real invitation. A form someone else also published
+  needs the creator's link to accept (audit R5-1, R5-2).
+- An answer's network time must agree with its own timestamp (within 10 minutes). The earliest
+  agreeing time wins, so a dishonest Store can't push an honest answer past a close (R5-3).
+- With first-seen times lost too, at most 2,000 unplaceable answers are kept (R5-4).
+
 ## 1.1.2 desktop core + studio + respond, Android vc26 (2026-11-13) - audit round 4
 
 - Accepting a co-owner invitation never makes the inviter "the creator" of a form; invitations from more

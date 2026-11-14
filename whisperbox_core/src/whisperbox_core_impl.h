@@ -158,6 +158,8 @@ private:
     long m_txErr = 0, m_txDropped = 0, m_storeDropTopic = 0, m_storeDropCap = 0;
     // Receipts, minimal (Václav 2026-11-13): sent on their own, coalesced per form while queued, never
     // in the hourly form state; a respondent's retried answer gets its receipt again (audit W2-5)
+    int emitReceipts(const std::string& formId, const std::vector<std::string>& cids);   // blinded receipts (ADR 0026)
+    bool namedReceipts(const std::string& formId);                                     // show-count forms keep public receipts
     void queueReceipt(const std::string& formId, const whisperbox::json& confirmEvent);
     void resendReceiptFor(const std::string& answerId);
     std::map<std::string, std::vector<whisperbox::json>> m_rcptPending;   // formId -> receipts not sent yet
@@ -174,7 +176,10 @@ private:
     long m_storeSeenLeft = 0;                                          // events a Store pull may make us look at, duplicates too (R3-10)
     std::map<std::string, int> m_secondTries;                          // bucket -> failed second-Store tries (R3-2)
     bool grantFromCreator(const std::string& fid, const std::string& grantAuthor);   // R3-1
-    std::string inviterOf(const std::string& fid, bool* conflict);                    // R4-1: the author of my invitation(s) to fid
+    std::string inviterOf(const std::string& fid);                                    // R5-1/R5-2: the known creator, if they invited me
+    bool grantNamesMe(const std::string& fid);                                         // a form.coowner naming me for fid is held
+    size_t pendingGrants();                                                          // invitation events held, not accepted/declined
+    bool contestedUnpinned(const std::string& fid);                                   // R5-1: several publishers, no link pin
     bool coOwnerGranted(const std::string& fid, const std::string& who);              // R3-6: a creator's grant to `who` is held
     // co-owner invitations (audit R2-1/R2-6): accepted / declined form ids, persisted
     std::set<std::string> m_coAccepted, m_coDeclined;
@@ -295,6 +300,9 @@ private:
     struct Opened { whisperbox::json dec; size_t nKeys = 0; };
     std::unordered_map<std::string, Opened> m_openCache;
     whisperbox::OrderedJson decryptView(const whisperbox::OrderedJson& state);
+    whisperbox::json openAnswer(const whisperbox::OrderedJson& state, const std::map<std::string, const whisperbox::SignId*>& keys, const std::string& id, const std::string& hexBlob);
+    std::vector<std::pair<std::string, std::string>> receiptPairs(const whisperbox::OrderedJson& state);   // ADR 0026: answers I can name
+    bool receiptWanted(const whisperbox::json& e);
     // Where data lives and whether it can be saved there (shown in the view when not).
     // Appended last: layout rule above.
     std::string m_storageNote;
@@ -401,4 +409,9 @@ private:
     std::vector<whisperbox::json> m_draftTrash;
     bool m_draftsDirty = false;
     size_t draftsBytes() const;
+    // audit round 5 + blinded receipts (1.1.3; appended last: layout rule above)
+    std::set<std::string> m_formContested;                               // forms the fold shows as published by more than one key (R5-1)
+    long m_netDisagree = 0;   // network times ignored: too far from the answer's own HLC (R5-3)
+    long long m_rintGen = -1;                 // receiptWanted: m_logGen its tag set is for
+    std::set<std::string> m_rintTags;         // tags of the answers I can name
 };

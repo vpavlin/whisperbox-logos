@@ -68,7 +68,28 @@ inline const std::string FORM_REOPEN       = "form.reopen";   // 0.3.2+: creator
 inline const std::string FORM_UPDATE       = "form.update";   // 0.3.6+: creator edits a published form
 inline const std::string FORM_COOWNER      = "form.coowner";  // 0.3.8+: creator shares the form key
 inline const std::string RESPONSE_REPLY    = "response.reply"; // 0.3.9+: private reply to one answer
+// 1.1.3+ (ADR 0026): a BLINDED receipt - unsigned, no form id, no author, only tags (mirror events.mjs)
+inline const std::string RESPONSE_RECEIPT  = "response.receipt";
 inline const std::string TOPIC             = "/whisperbox/1/all/proto";
+
+// ── Blinded receipts and reply addresses (ADR 0026; mirror events.mjs) ─────────────
+inline constexpr size_t kMaxReceiptTags = 100;
+inline std::string tagOf(const char* kind, const std::string& formId, const std::string& cid) {
+    const std::string k = std::string(kind) + "|" + lc(formId) + "|" + cid;
+    return toHex(sha256(Bytes(k.begin(), k.end())));
+}
+inline std::string receiptTag(const std::string& formId, const std::string& cid) { return tagOf("wb-receipt-v2", formId, cid); }
+inline std::string replyTag(const std::string& formId, const std::string& cid) { return tagOf("wb-reply-v2", formId, cid); }
+inline std::string responseReceiptId(std::vector<std::string> tags) {
+    std::sort(tags.begin(), tags.end());
+    std::string j; for (size_t i = 0; i < tags.size(); i++) { if (i) j += ","; j += tags[i]; }
+    return "rcpt:" + toHex(sha256(Bytes(j.begin(), j.end())));
+}
+inline bool isReceiptTag(const json& t) {
+    if (!t.is_string()) return false;
+    const std::string& s = t.get_ref<const std::string&>();
+    return s.size() == 64 && s.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
 
 // ── HLC total order: wall → ctr → dev. Identical on every replica. ───────────────
 inline int compareHlc(const json& a, const json& b) {
@@ -267,6 +288,8 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     std::map<std::string, json> closeHlcBy;                            // "formId|creator" -> hlc
     std::map<std::string, std::vector<std::pair<json, json>>> spansBy; // "formId|creator" -> closed periods (from, to|null)
     std::map<std::string, std::map<std::string, json>> receiptHlcBy;  // "formId|creator" -> confirmationId -> first receipt hlc
+    std::unordered_set<std::string> receiptTagSeen;                   // blinded receipts (ADR 0026)
+    OrderedJson receiptTagsJ = OrderedJson::object();                 // tag -> hlc of the first receipt carrying it
 
     // forms in first-publish order, indexed by id (a deque: references stay valid)
     std::deque<std::pair<std::string, OrderedJson>> formsList;
@@ -330,6 +353,15 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
             r["hlc"] = e.value("hlc", json::object());
             r["encryptedPayload"] = p.value("encryptedPayload", "");
             responses.push_back(std::move(r));
+            return;
+        }
+        if (type == RESPONSE_RECEIPT) {
+            // blinded (ADR 0026): no form, no author - only who knows an answer's confirmation id can
+            // tell which answer a tag is for (resolveReceipts, creatorView). HLC-ordered: first wins.
+            if (!p.contains("tags") || !p["tags"].is_array()) { drop(dropped, "bad-receipt"); return; }
+            for (const auto& t : p["tags"])
+                if (isReceiptTag(t) && receiptTagSeen.insert(t.get<std::string>()).second)
+                    appendNewKey(receiptTagsJ, t.get<std::string>(), OrderedJson(e.value("hlc", json::object())));
             return;
         }
         if (type == RESPONSE_CONFIRM || type == FORM_CLOSE || type == FORM_REOPEN || type == FORM_UPDATE || type == FORM_COOWNER || type == RESPONSE_REPLY) {
@@ -488,6 +520,7 @@ inline OrderedJson computeState(const std::vector<json>& mergedLog,
     pending["events"] = pendEvents;
     state["pending"] = pending;
     state["dropped"] = droppedToJson(dropped);
+    if (!receiptTagSeen.empty()) state["receiptTags"] = std::move(receiptTagsJ);   // only when any (older vectors stay byte-identical)
 
     if (!mineIds.empty()) {
         json arr = json::array(); for (auto& m : mineIds) arr.push_back(m);
@@ -589,6 +622,7 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
         for (auto it = state[k].begin(); it != state[k].end(); ++it) idx[it.key()] = &it.value();
     };
     indexOf("closedSpans", spansIdx); indexOf("closeHlc", closeIdx); indexOf("receiptHlc", receiptIdx);
+    const OrderedJson* rTags = state.contains("receiptTags") && state["receiptTags"].is_object() ? &state["receiptTags"] : nullptr;
 
     std::vector<std::string> mine;
     for (auto it = forms.begin(); it != forms.end(); ++it)
@@ -774,8 +808,10 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
             const long long win = std::min<long long>(f["editWindowMinutes"].is_number() ? toLL(f["editWindowMinutes"].get<double>()) : 15, 525600) * 60000LL;
             if (w.wall - pm.firstWall > win) { drop(dropped, "edit-too-late"); continue; }
             auto ri = receiptIdx.find(formId);
-            if (ri != receiptIdx.end() && !pm.cid.empty()
-                && ri->second->contains(pm.cid) && atOrAfter(w, blob, ri->second->at(pm.cid))) { drop(dropped, "edit-after-receipt"); continue; }
+            const OrderedJson* lockAt = nullptr;
+            if (ri != receiptIdx.end() && !pm.cid.empty() && ri->second->contains(pm.cid)) lockAt = &ri->second->at(pm.cid);
+            else if (rTags && !pm.cid.empty()) { auto t = rTags->find(receiptTag(formId, pm.cid)); if (t != rTags->end()) lockAt = &t.value(); }   // ADR 0026
+            if (lockAt && atOrAfter(w, blob, *lockAt)) { drop(dropped, "edit-after-receipt"); continue; }
             auto& e = answers[(size_t)pm.index];
             e["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
             e["answers"] = sanitizeAnswers(dec.contains("answers") ? dec["answers"] : json());
@@ -810,6 +846,17 @@ inline OrderedJson creatorViewPool(const OrderedJson& state, const std::vector<c
       } catch (const std::exception&) { drop(dropped, "malformed"); }
     }
 
+    // blinded receipts (ADR 0026): an answer whose tag is in the log is confirmed, as by a named receipt
+    if (rTags) for (auto& m : mine) {
+        auto& conf = view["confirmations"][m];
+        for (const auto& r : respArrs[m]) {
+            if (!r.contains("confirmationId") || !r["confirmationId"].is_string()) continue;
+            const std::string cid = r["confirmationId"].get<std::string>();
+            if (cid.empty() || !rTags->contains(receiptTag(m, cid))) continue;
+            bool has = false; for (const auto& c : conf) if (c.is_string() && c.get_ref<const std::string&>() == cid) { has = true; break; }
+            if (!has) conf.push_back(cid);
+        }
+    }
     for (auto& m : mine) respObj[m] = std::move(respArrs[m]);
     view["responses"] = respObj;   // by-value copy — must happen after all pushes
     view["dropped"] = droppedToJson(dropped);
@@ -986,6 +1033,27 @@ inline json scoreAnswers(const json& questions, const json& answerKey, const jso
     return json({{"score", num(score)}, {"outOf", num(outOf)}, {"correct", correct}});
 }
 
+// Blinded receipts (ADR 0026), resolved for the answers THIS device can name (mirror engine.mjs
+// resolveReceipts): [formId, confirmationId] pairs it knows. A matching tag confirms the answer as a
+// named receipt did: the id joins form.confirmations, its hlc receiptHlc (the edit lock).
+inline void resolveReceipts(OrderedJson& state, const std::vector<std::pair<std::string, std::string>>& pairs) {
+    if (!state.contains("receiptTags") || !state["receiptTags"].is_object()) return;
+    const OrderedJson& tags = state["receiptTags"];
+    for (const auto& pr : pairs) {
+        const std::string formId = lc(pr.first);
+        const std::string& cid = pr.second;
+        if (cid.empty() || !state["forms"].contains(formId)) continue;
+        auto t = tags.find(receiptTag(formId, cid));
+        if (t == tags.end()) continue;
+        OrderedJson& f = state["forms"][formId];
+        bool has = false; for (const auto& c : f["confirmations"]) if (c.is_string() && c.get_ref<const std::string&>() == cid) { has = true; break; }
+        if (!has) f["confirmations"].push_back(cid);
+        if (!state["receiptHlc"].contains(formId)) appendNewKey(state["receiptHlc"], formId, OrderedJson::object());
+        OrderedJson& rh = state["receiptHlc"][formId];
+        if (!rh.contains(cid)) appendNewKey(rh, cid, OrderedJson(t.value()));
+    }
+}
+
 // ── Deterministic id helpers (mirror events.mjs) ────────────────────────────────
 inline std::string formPublishId(const std::string& formId) { return "form:" + formId; }
 inline std::string responseSubmitId(const std::string& encryptedPayloadHex) {
@@ -1113,6 +1181,15 @@ inline bool wellFormedEvent(const json& e) {
     if (t == FORM_PUBLISH)
         return jStr(p, "id", 128) && jStr(p, "creator", 64) && jOptStr(p, "publicKey", 256) && wellFormedFormFields(p)
             && e["id"].get_ref<const std::string&>() == formPublishId(p["id"].get_ref<const std::string&>());
+    // a blinded receipt (ADR 0026): tags only, never signed (a signature would name its sender)
+    if (t == RESPONSE_RECEIPT) {
+        if ((e.contains("pub") && !e["pub"].is_null() && !e["pub"].get_ref<const std::string&>().empty())
+            || (e.contains("sig") && !e["sig"].is_null() && !e["sig"].get_ref<const std::string&>().empty())) return false;
+        if (p.size() != 1 || !p.contains("tags") || !p["tags"].is_array() || p["tags"].empty() || p["tags"].size() > kMaxReceiptTags) return false;
+        std::vector<std::string> tags; std::set<std::string> uniq;
+        for (const auto& x : p["tags"]) { if (!isReceiptTag(x) || !uniq.insert(x.get<std::string>()).second) return false; tags.push_back(x.get<std::string>()); }
+        return e["id"].get_ref<const std::string&>() == responseReceiptId(tags);
+    }
     // every other event names its form and its (signing) author
     if (!jStr(p, "formId", 128) || !jStr(p, "author", 64)) return false;
     if (t == RESPONSE_CONFIRM) {

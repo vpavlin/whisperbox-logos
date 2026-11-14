@@ -390,3 +390,24 @@ Known limits, accepted for now:
 - Other round-4 lows (co-owner receipt in an earlier Store page than its grant, the 20-invitation cap
   counting form ids, 4 fake publishes for a bare id, re-accepting a declined invitation in the UI,
   coowners.json from 1.1.0 not re-validated) are tracked in the round-4 report.
+
+## Amendment 2026-11-14 (5): audit round 5 (1.1.3)
+
+The narrow round-5 verification closed R4-5, closed R4-3 for the reported replay, and found three
+adjacent cases. Fixed:
+
+- **Invitations come from the known creator only** (R5-1, R5-2). An invitation is shown and acceptable
+  only once its form's publish is held and the fold's creator (or the link's) wrote the grant. A node
+  keeps the publishes of a form with a pending invitation for that. A stranger's grant is ignored, not
+  treated as a "conflict" that hid the real one. A contested form (published by several keys) is shown
+  as `contested` and needs the creator's link to accept. An attacker's backdated copy can't become the
+  form you accept.
+- **Network times must agree with the answer's HLC** (R5-3). A Store or live time more than 10 minutes
+  from the answer's own `hlc.wall` is ignored. The first live time stays final; otherwise the earliest
+  agreeing time wins, so an honest second Store or live copy corrects a dishonest Store, and nothing
+  raises a time. Residual: a Store colluding with a late sender can backdate by up to 10 minutes; an
+  honest sender whose clock is off by more than 10 minutes gets no network time (judged by first-seen).
+- **Unsure answers with first-seen lost too** (R5-4): at most the newest 2,000 are kept.
+
+Receipts became blinded in the same release (ADR 0026).
+

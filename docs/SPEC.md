@@ -101,6 +101,7 @@ HLC (loam-sync): `send(now)`: if `now > wall` then `wall = now, ctr = 0` else `c
 |---|---|---|---|
 | `form.publish` | `form:<formId>` | yes (creator) | form definition, section 4.3 |
 | `response.submit` | `resp:<hex(sha256(utf8(encryptedPayload)))>` | **no** | `{encryptedPayload}` |
+| `response.receipt` | `rcpt:<hex(sha256(sorted tags joined ","))>` | **no** (refused if signed) | `{tags:[1..100 × hex(sha256("wb-receipt-v2\|"+formId+"\|"+cid))]}` - blinded, ADR 0026 |
 | `response.confirm` | `confirm:<formId>:<cid>`; batch `confirm:<formId>:b:<hex(sha256(sorted cids joined ","))[0..16]>` | yes | `{formId, author, confirmationId}` or `{formId, author, confirmationIds:[..]}` |
 | `form.close` | `close:<formId>:<nonce>` (legacy `close:<formId>`) | yes | `{formId, author, expiresAt: null}` |
 | `form.reopen` | `reopen:<formId>:<nonce>` | yes | `{formId, author}` |
@@ -468,6 +469,13 @@ more than that, and a copy fetched from the store more than 5 minutes later carr
 time. Answers without one are judged by their own HLC and shown as "time not verified" (ADR 0008,
 ADR 0019).
 
+**Which network time counts (1.1.3, audit R5-3).** A live time must be within 5 minutes of the
+receiver's clock; a Store time is clamped to [the window asked for, now]. Either must also be within
+10 minutes of the answer's own (public) `hlc.wall`, or it is ignored (`netDisagree`). The first live
+time is final. Otherwise the earliest agreeing time wins, so a second Store or a live copy can lower a
+Store's claim and nothing can raise it. A dishonest Store can't date an honest answer after a close.
+Together with a late sender, it can still backdate an answer by up to 10 minutes from its HLC.
+
 ## 10. Module layer (core and client, not the engine)
 
 Per accepted answer the creator/co-owner additionally gets `confirmed` (its receipt id is in
@@ -600,8 +608,12 @@ receipts and replies by the creator or a co-owner (listed in the fold, or grante
 held `form.coowner`), `form.publish` by the creator the link names (plus at most four others in all).
 With no creator known (bare id, no publish yet) only publishes and invitations are kept. A
 `form.coowner` naming this node is an invitation only if its author is the creator (or none is known;
-at most 20 pending grant events): nothing of that form is kept or pulled until `acceptCoOwner`, which
-pins the grant's author as the creator when no link named one.
+at most 20 pending grant events): nothing of that form is kept or pulled until it is accepted (`acceptCoOwner`). An invitation
+is shown or acceptable only once the form's publish is held and its creator wrote the grant (a
+form with a pending invitation keeps its publishes for that); a stranger's grant is ignored; a
+contested form (published by several keys) needs the creator's link to accept (audit R5-1/R5-2).
+A `response.receipt` is kept only if one of its tags is for an answer this node can name: its own,
+or one it opens as the form's creator or co-owner (ADR 0026).
 The log is pruned by the same rule on start, after unlocking and when a form is removed. A locked
 identity keeps everything (no keys to judge with; nothing connects until unlocked).
 
@@ -612,13 +624,18 @@ A node stores only its own forms and answers (6.2); it does hear the other forms
 
 On the wire and in fleet stores:
 - public: form definitions (incl. whitelists, co-owner addresses, sealed blobs' existence and
-  timing), receipt ids, reply/co-owner events (who replied, to which receipt id);
-- never public: answers, respondent identity, which form a blob answers, quiz answer keys,
-  reply contents, form keys.
+  timing), the bucket (1 of 16) every event goes on, reply and co-owner events (who replied on
+  which form, and when), receipts' tags and timing;
+- on forms that show respondents the answer count (`showResponseCount`): receipts are named and
+  signed, so that form's receipt ids, their number and the creator's signature are public (ADR 0026);
+- never public: answers, respondent identity, which answer a blob or a receipt is for, which form a
+  receipt is for (blinded tags, ADR 0026), which answer a reply is for, quiz answer keys, reply
+  contents, form keys.
 
 Linkability:
-- receipts and replies use the respondent-chosen random `confirmationId`, which can't be
-  derived from the address;
+- receipts and replies are addressed by tags derived from the form id and the respondent-chosen
+  random `confirmationId` (sealed inside the answer): only the respondent and the form's owners
+  can make or recognise them (ADR 0026). Receipts are unsigned and carry a random device tag;
 - `response.submit` carries a fresh random tag (0.4.3); the derived per-form tag it replaced
   linked a device's answers across forms for anyone who knew its device id, and every signed
   event published that (review WB-5);
@@ -632,7 +649,9 @@ with each (only a members list stops that). Close, expiry, the cap and the edit 
 network's timestamp of the answer; before RLN is on, a sender running a modified node can still
 choose that timestamp, and an answer arriving without one (BLE) is judged by its own clock.
 
-Not protected: timing/network-level correlation; answer length (answers aren't padded); the
+Not protected: timing/network-level correlation (Mix is not deployable yet); the bucket a form is
+in (its id is public in links); answer length (answers aren't padded); the clear-text HLC of signed
+events; the
 creator (and co-owners) see everything in an answer; a co-owner keeps access forever; there is
 no forward secrecy (a leaked form key opens all of that form's answers).
 

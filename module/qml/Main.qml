@@ -949,7 +949,7 @@ Item {
                                         color: root.wbTextTert
                                         text: {
                                             if (modelData.kind === "d") return modelData.draft.publishAt ? "scheduled  ·  " + root.fmtTime(modelData.draft.publishAt) : "draft  ·  edited " + root.fmtTime(modelData.draft.updatedAt);
-                                            if (modelData.kind === "i") return "invited by " + root.shortAddr(modelData.invite.from) + "  ·  read its answers, send receipts";
+                                            if (modelData.kind === "i") return "invited by " + root.shortAddr(modelData.invite.from) + (modelData.invite.contested ? "  ·  another copy exists: accept from the creator's link" : "  ·  read its answers, send receipts");
                                             if (!row.f) return "syncing...";
                                             var parts = [root.plural(row.f.questions.length, "question", "questions")];
                                             if (row.f.mine) parts.push(root.plural(root.responsesFor(row.f.id).length, "response", "responses"));
@@ -1290,7 +1290,7 @@ Item {
                                 if (f.maxResponses) parts.push("Closes automatically at " + root.plural(f.maxResponses, "response", "responses"));
                                 if (f.maxPerRespondent !== undefined) parts.push(f.maxPerRespondent > 1 ? "Up to " + f.maxPerRespondent + " answers per person" : "Any number of answers per person");
                                 if (f.expiresAt) parts.push((f.status === "closed" ? "End date " : "Closes ") + root.fmtTime(f.expiresAt));
-                                if (f.showResponseCount) parts.push("respondents see how many receipts you sent");
+                                if (f.showResponseCount) parts.push("respondents see how many receipts you sent (receipts are public)");
                                 return parts.join("  ·  ");
                             }
                         }
@@ -2285,7 +2285,7 @@ Item {
                         implicitWidth: scT.implicitWidth + 22; implicitHeight: 30; radius: 15
                         color: root.draftShowCount ? root.wbPrimarySubtle : "transparent"
                         border.color: root.draftShowCount ? root.wbPrimary : root.wbBorder; border.width: 1
-                        Text { id: scT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShowCount ? "\u2713 " : "") + "Show respondents how many answers came in"; font.pixelSize: 12; color: root.draftShowCount ? root.wbPrimary : root.wbTextSec }
+                        Text { id: scT; textFormat: Text.PlainText; anchors.centerIn: parent; text: (root.draftShowCount ? "\u2713 " : "") + "Show respondents how many answers came in (makes receipts public)"; font.pixelSize: 12; color: root.draftShowCount ? root.wbPrimary : root.wbTextSec }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.draftShowCount = !root.draftShowCount }
                     }
                     Rectangle {

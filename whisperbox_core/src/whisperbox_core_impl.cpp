@@ -72,6 +72,8 @@ static long long nowMs() {
 // it is only taken within kMaxClockLeadMs of when we receive the copy, either way: an older one (a
 // store copy, or a node stamping 2001) proves nothing and is treated as absent (open-review
 // 2026-11-01, FR-6; mirror client.mjs netMsOf).
+// how far a network time may be from the answer's own HLC and still count (R5-3)
+static constexpr long long kNetHlcTolMs = 10LL * 60 * 1000;
 static long long netMsOf(long long tsNs, long long now, bool fromStore = false) {
     if (tsNs <= 1000000000000000LL) return 0;
     const long long ms = tsNs / 1000000LL;
@@ -1225,6 +1227,44 @@ void WhisperboxCoreImpl::queueReceipt(const std::string& formId, const json& e) 
     pend.push_back(e);
     sendEvents(formId, json(pend), 2, "rcpt:" + formId);
 }
+// Receipts for these answers of formId, BLINDED (ADR 0026): unsigned, a fresh device tag, no form id
+// and no author on the wire - tags only, at most kMaxReceiptTags per event. Sent on their own.
+int WhisperboxCoreImpl::emitReceipts(const std::string& formId, const std::vector<std::string>& cids0) {
+    std::vector<std::string> cids; std::set<std::string> seen;
+    for (const auto& c : cids0) if (!c.empty() && seen.insert(c).second) cids.push_back(c);
+    int n = 0;
+    if (namedReceipts(formId)) {   // the creator chose to show the count: receipts stay public, signed
+        for (size_t i = 0; i < cids.size(); i += 100) {
+            std::vector<std::string> chunk(cids.begin() + i, cids.begin() + std::min(cids.size(), i + 100));
+            OrderedJson p = OrderedJson::object();
+            json e;
+            if (chunk.size() == 1) { p["formId"] = formId; p["confirmationId"] = chunk[0]; p["author"] = m_signId.address;
+                                     e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmId(formId, chunk[0]), p, /*sign=*/true); }
+            else { p["formId"] = formId; p["confirmationIds"] = chunk; p["author"] = m_signId.address;
+                   e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmBatchId(formId, chunk), p, /*sign=*/true); }
+            if (!adoptChecked(e)) break;
+            adoptLocal(e); queueReceipt(formId, e); n++;
+        }
+        return n;
+    }
+    for (size_t i = 0; i < cids.size(); i += whisperbox::kMaxReceiptTags) {
+        std::vector<std::string> tags;
+        for (size_t j = i; j < std::min(cids.size(), i + whisperbox::kMaxReceiptTags); j++) tags.push_back(whisperbox::receiptTag(formId, cids[j]));
+        const std::string dev = "wb-" + randomHex(6);
+        json e = {{"v", 1}, {"id", whisperbox::responseReceiptId(tags)}, {"type", whisperbox::RESPONSE_RECEIPT},
+                  {"hlc", {{"wall", nowMs()}, {"ctr", 0}, {"dev", dev}}}, {"dev", dev}, {"payload", {{"tags", tags}}}};
+        if (!whisperbox::wellFormedEvent(e)) break;
+        adoptLocal(e);
+        queueReceipt(formId, e); n++;
+    }
+    return n;
+}
+// A form that shows respondents how many answers came in counts PUBLIC receipts: there, receipts stay
+// named and signed (the creator opted in to that count being public; ADR 0026)
+bool WhisperboxCoreImpl::namedReceipts(const std::string& formId) {
+    const OrderedJson& st = foldedState();
+    return st["forms"].contains(formId) && st["forms"][formId].value("showResponseCount", false);
+}
 // The respondent sends its answer again until it has the receipt: a copy of an answer I hold and have
 // confirmed means my receipt didn't reach it - send that one receipt again (at most every 10 min)
 void WhisperboxCoreImpl::resendReceiptFor(const std::string& answerId) {
@@ -1235,7 +1275,13 @@ void WhisperboxCoreImpl::resendReceiptFor(const std::string& answerId) {
     const std::string fid = dec.contains("formId") && dec["formId"].is_string() ? lc(dec["formId"].get<std::string>()) : "";
     if (cid.empty() || fid.empty()) return;
     bool confirmed = false;
+    const std::string tag = whisperbox::receiptTag(fid, cid);
     for (const auto& e : m_log) {
+        if (e.value("type", "") == whisperbox::RESPONSE_RECEIPT && e.contains("payload") && e["payload"].contains("tags") && e["payload"]["tags"].is_array()) {
+            for (const auto& x : e["payload"]["tags"]) if (x.is_string() && x.get_ref<const std::string&>() == tag) { confirmed = true; break; }
+            if (confirmed) break;
+            continue;
+        }
         if (e.value("type", "") != RESPONSE_CONFIRM || formIdOf(e) != fid || !e.contains("payload")) continue;
         const json& p = e["payload"];
         if (p.value("confirmationId", "") == cid) confirmed = true;
@@ -1247,19 +1293,15 @@ void WhisperboxCoreImpl::resendReceiptFor(const std::string& answerId) {
     if (!confirmed || !m_myForms.count(fid)) return;
     // ONE receipt for this answer, not the batch it was in: a replayed answer must not make us send a
     // 100-id batch again (audit R2-7). Its id is deterministic, so it is made once.
-    const std::string rid = whisperbox::responseConfirmId(fid, cid);
+    const bool named = namedReceipts(fid);
+    const std::string rid = named ? whisperbox::responseConfirmId(fid, cid) : whisperbox::responseReceiptId({tag});
     const long long now = nowMs();
     if (m_rcptResentMs.count(rid) && now - m_rcptResentMs[rid] < 10 * envLL("WHISPERBOX_MINUTE_MS", 60000LL)) return;
     m_rcptResentMs[rid] = now;
     json single;
-    for (const auto& e : m_log) if (e.value("id", "") == rid && e.contains("payload") && lc(e["payload"].value("author", "")) == lc(m_signId.address)) { single = e; break; }
-    if (single.is_null()) {
-        OrderedJson p = OrderedJson::object();
-        p["formId"] = fid; p["confirmationId"] = cid; p["author"] = m_signId.address;
-        single = buildEvent(RESPONSE_CONFIRM, rid, p, /*sign=*/true);
-        adoptLocal(single);
-    }
-    queueReceipt(fid, single);
+    for (const auto& e : m_log) if (e.value("id", "") == rid && (!named || (e.contains("payload") && lc(e["payload"].value("author", "")) == lc(m_signId.address)))) { single = e; break; }
+    if (single.is_null()) emitReceipts(fid, {cid});   // a new one: stored and sent
+    else queueReceipt(fid, single);                    // an old one: sent again
 }
 
 // ── what this node keeps ─────────────────────────────────────────────────────────
@@ -1275,13 +1317,14 @@ bool WhisperboxCoreImpl::baseWants(const std::string& fid) const {
 void WhisperboxCoreImpl::refreshInterest() {
     if (m_interestGen == (long long)m_logGen) return;
     m_interestGen = (long long)m_logGen;
-    m_myForms.clear(); m_myKeys.clear(); m_formCreator.clear(); m_formCoOwners.clear(); m_publishAlts.clear(); m_keyForm.clear();
+    m_myForms.clear(); m_myKeys.clear(); m_formCreator.clear(); m_formContested.clear(); m_formCoOwners.clear(); m_publishAlts.clear(); m_keyForm.clear();
     if (!m_signId.valid) return;
     OrderedJson st = foldedState();
     for (auto it = st["forms"].begin(); it != st["forms"].end(); ++it) {
         const auto& f = it.value();
         if (f.value("creator", "") == m_signId.address || isCoOwner(f)) m_myForms.insert(it.key());
         m_formCreator[it.key()] = lc(f.value("creator", ""));
+        if (f.value("contested", false)) m_formContested.insert(it.key());
         if (f.contains("coOwners") && f["coOwners"].is_array())
             for (const auto& c : f["coOwners"]) if (c.is_object()) m_formCoOwners[it.key()].insert(lc(c.value("address", "")));
         if (!f.value("publicKey", "").empty()) m_keyForm[f.value("publicKey", "")] = it.key();
@@ -1318,6 +1361,7 @@ bool WhisperboxCoreImpl::wanted(const json& e) {
         }
         return false;
     }
+    if (t == whisperbox::RESPONSE_RECEIPT) return receiptWanted(e);   // ADR 0026: by its tags
     const std::string fid = formIdOf(e);
     if (fid.empty() || !e.contains("payload") || !e["payload"].is_object()) return false;
     const json& p = e["payload"];
@@ -1330,16 +1374,19 @@ bool WhisperboxCoreImpl::wanted(const json& e) {
     if (t == whisperbox::FORM_COOWNER && lc(p.value("owner", "")) == me) {   // a key shared with me: an invitation
         // only the form's creator can share its key (audit R3-1); a form I don't know the creator of
         // yet: kept as a pending invitation whose author becomes the creator I trust if I accept it
-        if (!creator.empty()) return author == creator && (m_coAccepted.count(fid) || m_coDeclined.count(fid) || coInvites().size() < 20);
-        return coInvites().size() < 20;   // pending invitation events, all forms together
+        if (!creator.empty()) return author == creator && (m_coAccepted.count(fid) || m_coDeclined.count(fid) || pendingGrants() < 20);
+        return pendingGrants() < 20;   // pending invitation events, all forms together
     }
-    if (!(baseWants(fid) || m_myForms.count(fid) || m_coAccepted.count(fid))) return false;
+    // a form I'm invited to (not declined): its publishes, so the fold learns its creator - only then is
+    // the invitation shown or acceptable (R5-1)
+    const bool invitedTo = t == FORM_PUBLISH && !m_coDeclined.count(fid) && grantNamesMe(fid);
+    if (!(baseWants(fid) || m_myForms.count(fid) || m_coAccepted.count(fid) || invitedTo)) return false;
     // Who may write what (audit R2-2: any signed event for a form I keep used to be kept, junk included).
     if (t == FORM_PUBLISH) {
         // the link's creator always; for a form I accepted an invitation to (no link), the inviter's
         // copy too (R4-1: fakes can't crowd it out); anyone else's only while a few are held
         if (auto pin = m_pinned.find(fid); pin != m_pinned.end() && !pin->second.empty() && author == lc(pin->second)) return true;
-        if (m_coAccepted.count(fid)) { bool conflict = false; if (author == inviterOf(fid, &conflict) && !conflict) return true; }
+        if (m_coAccepted.count(fid) && !creator.empty() && author == creator) return true;   // the creator of a form I co-own
         return m_publishAlts[fid] < 4;
     }
     if (creator.empty()) return false;   // no creator known yet: only its publishes and invitations (audit R3-5)
@@ -1355,18 +1402,46 @@ bool WhisperboxCoreImpl::grantFromCreator(const std::string& fid, const std::str
     else if (auto c = m_formCreator.find(fid); c != m_formCreator.end()) creator = c->second;
     return creator.empty() || creator == lc(grantAuthor);
 }
-// The author of the grant(s) naming me for fid, in log order; *conflict when grants by different
-// authors name me (then nobody's invitation is trusted). C++ and JS take the same one (R4-1).
-std::string WhisperboxCoreImpl::inviterOf(const std::string& fid, bool* conflict) {
-    std::string who; if (conflict) *conflict = false;
+// Who invited me to fid: the form's KNOWN creator (link pin, else the fold), if a grant of theirs
+// names me; else nobody. A form with no publish yet has no inviter (R5-1: accepting one let an
+// attacker's backdated publish become the form), and a stranger's grant is ignored, not a
+// "conflict" that hid the real invitation (R5-2). C++ and JS agree.
+std::string WhisperboxCoreImpl::inviterOf(const std::string& fid) {
+    refreshInterest();
+    std::string creator;
+    if (auto pin = m_pinned.find(fid); pin != m_pinned.end() && !pin->second.empty()) creator = lc(pin->second);
+    else if (auto c = m_formCreator.find(fid); c != m_formCreator.end()) creator = c->second;
+    if (creator.empty()) return "";
     const std::string me = m_signId.valid ? lc(m_signId.address) : "";
     for (const auto& e : m_log) {
         if (!e.is_object() || e.value("type", "") != whisperbox::FORM_COOWNER || formIdOf(e) != fid || !e.contains("payload")) continue;
-        if (lc(e["payload"].value("owner", "")) != me) continue;
-        const std::string a = lc(e["payload"].value("author", ""));
-        if (who.empty()) who = a; else if (a != who && conflict) *conflict = true;
+        if (lc(e["payload"].value("owner", "")) == me && lc(e["payload"].value("author", "")) == creator) return creator;
     }
-    return who;
+    return "";
+}
+bool WhisperboxCoreImpl::grantNamesMe(const std::string& fid) {
+    const std::string me = m_signId.valid ? lc(m_signId.address) : "";
+    for (const auto& e : m_log)
+        if (e.is_object() && e.value("type", "") == whisperbox::FORM_COOWNER && formIdOf(e) == fid && e.contains("payload") && e["payload"].is_object()
+            && lc(e["payload"].value("owner", "")) == me) return true;
+    return false;
+}
+// grants naming me for forms I haven't accepted or declined, shown or not (the bound on held invitations)
+size_t WhisperboxCoreImpl::pendingGrants() {
+    std::set<std::string> forms;   // per form, as the invitation list was
+    const std::string me = m_signId.valid ? lc(m_signId.address) : "";
+    for (const auto& e : m_log) {
+        if (!e.is_object() || e.value("type", "") != whisperbox::FORM_COOWNER || !e.contains("payload") || !e["payload"].is_object()) continue;
+        const std::string fid = formIdOf(e);
+        if (lc(e["payload"].value("owner", "")) == me && !m_coAccepted.count(fid) && !m_coDeclined.count(fid)) forms.insert(fid);
+    }
+    return forms.size();
+}
+// published by more than one key and no link chose the creator: an invitation can't tell which is real
+bool WhisperboxCoreImpl::contestedUnpinned(const std::string& fid) {
+    refreshInterest();
+    if (auto pin = m_pinned.find(fid); pin != m_pinned.end() && !pin->second.empty()) return false;
+    return m_formContested.count(fid) > 0;
 }
 bool WhisperboxCoreImpl::coOwnerGranted(const std::string& fid, const std::string& who) {
     for (const auto& e : m_log) {
@@ -1386,10 +1461,13 @@ json WhisperboxCoreImpl::coInvites() {
         const json& p = e["payload"];
         const std::string fid = lc(p.value("formId", ""));
         if (lc(p.value("owner", "")) != me || m_coAccepted.count(fid) || m_coDeclined.count(fid)) continue;
-        if (!grantFromCreator(fid, p.value("author", "")) || !seen.insert(fid).second) continue;   // R3-1
-        bool conflict = false; (void)inviterOf(fid, &conflict);
-        if (conflict) continue;   // grants from more than one author: no invitation shown (R4-1)
-        out.push_back({{"formId", fid}, {"from", lc(p.value("author", ""))}, {"at", e["hlc"].value("wall", 0LL)}});
+        if (seen.count(fid)) continue;
+        const std::string from = inviterOf(fid);   // the known creator's grant only (R3-1, R5-1, R5-2)
+        if (from.empty() || lc(p.value("author", "")) != from) continue;
+        seen.insert(fid);
+        json inv = {{"formId", fid}, {"from", from}, {"at", e["hlc"].value("wall", 0LL)}};
+        if (contestedUnpinned(fid)) inv["contested"] = true;   // shown, but accepting needs the creator's link
+        out.push_back(inv);
     }
     return out;
 }
@@ -1424,15 +1502,14 @@ std::string WhisperboxCoreImpl::acceptCoOwner(std::string formId) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     formId = lc(trim(formId));
     // an invitation (or one I declined): a grant naming me, from the form's creator (R3-1/R3-7)
-    bool conflict = false;
-    const std::string from = inviterOf(formId, &conflict);
-    if (from.empty() || !grantFromCreator(formId, from)) return json({{"ok", false}, {"error", "no co-owner invitation for this form"}}).dump();
-    if (conflict) return json({{"ok", false}, {"error", "invitations to this form come from more than one sender - open the creator's link instead"}}).dump();
+    const std::string from = inviterOf(formId);   // only from the form's known creator (R5-1/R5-2)
+    if (from.empty()) return json({{"ok", false}, {"error", "no co-owner invitation for this form (yet) - if one was sent, its form hasn't arrived"}}).dump();
+    if (contestedUnpinned(formId)) return json({{"ok", false}, {"error", "more than one person published this form - open the creator's link to accept"}}).dump();
     // No pin (R4-1: accepting must never make the inviter "the creator"): the fold decides who created
     // the form, and the grant only counts if its author is that creator. The inviter's publish is kept.
     m_coAccepted.insert(formId); m_coDeclined.erase(formId);
     saveCoOwnerPrefs();
-    m_interestGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear();
+    m_interestGen = -1; m_rintGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear();
     // the form and the answers sent so far: its bucket over the whole Store window
     if (m_nodeReady) { syncTopics(); const std::string t = formTopic(formId); m_lastPullMs.erase(t); storePull(t); }
     publishState();
@@ -1450,7 +1527,7 @@ std::string WhisperboxCoreImpl::leaveCoOwner(std::string formId) try {
     if (!invited) return json({{"ok", false}, {"error", "no co-owner invitation for this form"}}).dump();   // R3-7
     m_coAccepted.erase(formId); m_coDeclined.insert(formId);
     saveCoOwnerPrefs();
-    m_interestGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear();
+    m_interestGen = -1; m_rintGen = -1; m_foldValid = false; m_cvValid = false; m_openCache.clear();
     pruneUnwanted();
     dropUnusedBuckets();
     publishState();
@@ -1472,15 +1549,17 @@ void WhisperboxCoreImpl::pruneUnwanted() {
     size_t dropped = 0;
     m_respPerForm.clear();
     m_pruning = true;
-    long unsureKept = 0;
+    // Unsure answers with no first-seen time: the NEWEST 2,000 at most (R5-4: with firstseen.json lost,
+    // every unplaceable answer had none and the whole bucket was kept). Mine are among the newest.
+    long unsureTotal = 0, unsureSeen = 0;
+    if (ownUnsure) for (const auto& e : m_log) if (e.value("type", "") == RESPONSE_SUBMIT && !m_firstSeen.count(e.value("id", ""))) unsureTotal++;
     for (auto& e : m_log) {
         const bool isResp = e.value("type", "") == RESPONSE_SUBMIT;
         // copied, not moved: wanted() may look at the whole log (pending invitations) while we go.
-        // Unplaceable answers while my record is behind: at most 2,000, not the whole bucket (R3-9).
         bool keep = wanted(e);
         // an answer I made was never received from the network, so it has no first-seen time; a
-        // stranger's always has one (R4-5: 2,000 strangers used to crowd mine out)
-        if (!keep && isResp && ownUnsure && !m_firstSeen.count(e.value("id", ""))) { keep = true; unsureKept++; }
+        // stranger's normally has one (R4-5: 2,000 strangers used to crowd mine out)
+        if (isResp && ownUnsure && !m_firstSeen.count(e.value("id", "")) && unsureSeen++ >= unsureTotal - 2000 && !keep) keep = true;
         if (keep) { if (isResp && !m_wantedForm.empty()) m_respPerForm[m_wantedForm]++; kept.push_back(e); }
         else dropped++;
     }
@@ -2036,18 +2115,20 @@ bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
     if (netMs <= 0 || e.value("type", "") != RESPONSE_SUBMIT) return false;
     const std::string id = e.value("id", "");
     auto it = m_netTimes.find(id);
-    if (m_storeIngest) {
-        // A Store's word (audit R2-5): never over a time seen live; never before the window we asked
-        // for; and the LATEST any Store reports - we ask two, so one dishonest Store can't backdate.
-        if (m_netLive.count(id)) return false;
-        if (m_storeWindowMs > 0 && netMs < m_storeWindowMs) netMs = m_storeWindowMs;
-        if (it != m_netTimes.end() && it->second >= netMs) return false;
-    } else {
-        // live: relay only carries fresh messages. The first evidence is final: a live copy never
-        // re-dates an answer a Store already dated, nor an earlier live one (audit R3-3, R4-3)
-        if (it != m_netTimes.end()) return false;
-        m_netLive.insert(id);
-    }
+    // The first LIVE time is final: relay only carries fresh copies, and a replayer may stamp one a few
+    // minutes earlier, so a later copy - live or Store - never moves it (audit R2-5, R3-3).
+    if (m_netLive.count(id)) return false;
+    // A network time must agree with the answer's own (public) HLC: a Store or relay claiming a time far
+    // from it is ignored (R5-3: a dishonest Store dated an honest answer after the close, and nothing
+    // could correct it). Over Store times, the EARLIEST agreeing one wins - so an honest second Store or
+    // a live copy corrects a later claim, and a replay (always later) never re-dates one (R4-3).
+    const long long hw = e.contains("hlc") && e["hlc"].is_object() && e["hlc"].contains("wall") && e["hlc"]["wall"].is_number_integer()
+                         ? e["hlc"]["wall"].get<long long>() : -1;
+    if (hw < 0 || std::llabs(netMs - hw) > kNetHlcTolMs) { m_netDisagree++; return false; }
+    // never before the Store window we asked for (audit R2-5)
+    if (m_storeIngest && m_storeWindowMs > 0 && netMs < m_storeWindowMs) netMs = m_storeWindowMs;
+    if (it != m_netTimes.end() && it->second <= netMs) return false;
+    if (!m_storeIngest) m_netLive.insert(id);
     m_netTimes[id] = netMs;
     m_netTs++;
     m_netGen++;
@@ -2096,6 +2177,7 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
         if (!whisperbox::verifyEventJson(e)) { m_admDropSig++; return false; }
         return true;   // not-creator is also dropped at fold time (engine, counted there)
     }
+    if (type == whisperbox::RESPONSE_RECEIPT) return true;   // blinded (ADR 0026): the shape check refused any signature
     if (type == RESPONSE_SUBMIT) {
         // OPAQUE: an event-level pub/sig here would leak the respondent's identity —
         // reject such events outright (privacy invariant).
@@ -2237,7 +2319,9 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
         f["hasMyAnswers"] = m_myAnswers.count(fid) > 0;
         if (submitted && m_myConfirmIds.count(fid) && f.contains("replies") && !f["replies"].empty()) {
             const std::vector<std::string> cids = myCidsFor(fid);
-            long long n = 0; for (const auto& r : f["replies"]) if (std::find(cids.begin(), cids.end(), r.value("to", "")) != cids.end()) n++;
+            std::set<std::string> tos(cids.begin(), cids.end());   // by receipt id (older) or tag (ADR 0026)
+            for (const auto& c : cids) tos.insert(whisperbox::replyTag(fid, c));
+            long long n = 0; for (const auto& r : f["replies"]) if (tos.count(r.value("to", ""))) n++;
             f["myReplyCount"] = n;   // the replies themselves: formDetail
         }
         f["myConfirmed"] = confirmed;
@@ -2286,7 +2370,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["diagnostics"] = json({
         {"transport", m_via == Via::Loam ? "loam_core" : m_via == Via::Direct ? "delivery_module" : "probing"}, {"nodeMode", m_nodeMode},
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
-        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"serveSkipped", m_serveSkipped},
+        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs}, {"netDisagree", m_netDisagree}, {"serveSkipped", m_serveSkipped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
         {"admDropBudget", m_admDropBudget}, {"admDropUnwanted", m_admDropUnwanted}, {"txErr", m_txErr}, {"txDropped", m_txDropped}, {"storeDropTopic", m_storeDropTopic}, {"storeDropCap", m_storeDropCap}, {"admDropFull", m_admDropFull}, {"ctlDropBudget", m_ctlDropBudget}, {"startFailures", m_startFailures}, {"logBytes", (long long)m_logBytes}, {"logResponses", (long long)m_logResponses},
     });
@@ -2337,35 +2421,65 @@ std::map<std::string, const whisperbox::SignId*> WhisperboxCoreImpl::formKeysFor
     return keys;
 }
 
+// One answer opened with my form keys, cached by event id (it hashes the sealed bytes); null if it
+// isn't for a form of mine. The key that opens it must be the sealing key of the form it names.
+json WhisperboxCoreImpl::openAnswer(const OrderedJson& state, const std::map<std::string, const whisperbox::SignId*>& keys, const std::string& id, const std::string& hexBlob) {
+    const std::string& key = id.empty() ? hexBlob : id;
+    auto c = m_openCache.find(key);
+    if (c != m_openCache.end() && (!c->second.dec.is_null() || c->second.nKeys == keys.size())) return c->second.dec;
+    json dec;
+    const whisperbox::Bytes blob = whisperbox::fromHex(hexBlob);
+    for (const auto& kv : keys) {
+        whisperbox::Bytes pt;
+        try { pt = whisperbox::eciesOpen(kv.second->priv, blob); } catch (...) { continue; }
+        try { dec = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { dec = json(); break; }
+        const std::string fid = dec.is_object() && dec.contains("formId") && dec["formId"].is_string() ? lc(dec["formId"].get<std::string>()) : "";
+        if (fid.empty() || !state["forms"].contains(fid) || state["forms"][fid].value("publicKey", "") != kv.first) dec = json();
+        break;
+    }
+    // bounded (FR-3): the log holds at most 50,000 answers, so this keeps one entry each
+    if (m_openCache.size() >= 60000) m_openCache.clear();
+    m_openCache[key] = Opened{dec, keys.size()};
+    return dec;
+}
+// [formId, confirmationId] of every answer this device can name: its own, and those it opens as the
+// form's creator or co-owner (ADR 0026). Only these can be matched to a blinded receipt's tags.
+std::vector<std::pair<std::string, std::string>> WhisperboxCoreImpl::receiptPairs(const OrderedJson& state) {
+    std::vector<std::pair<std::string, std::string>> out;
+    std::set<std::string> fids(m_mySubmissions.begin(), m_mySubmissions.end());
+    for (const auto& kv : m_myAnswers) fids.insert(kv.first);
+    for (const auto& fid : fids) for (const auto& c : myCidsFor(fid)) out.push_back({fid, c});
+    if (!m_signId.valid) return out;
+    const auto keys = formKeysFor(state);
+    if (keys.empty()) return out;
+    for (const auto& e : m_log) {
+        if (!e.is_object() || e.value("type", "") != RESPONSE_SUBMIT || !e.contains("payload") || !e["payload"].is_object()) continue;
+        const json dec = openAnswer(state, keys, e.value("id", ""), e["payload"].value("encryptedPayload", ""));
+        if (dec.is_object() && dec.contains("confirmationId") && dec["confirmationId"].is_string() && !dec["confirmationId"].get<std::string>().empty()
+            && dec.contains("formId") && dec["formId"].is_string())
+            out.push_back({lc(dec["formId"].get<std::string>()), dec["confirmationId"].get<std::string>()});
+    }
+    return out;
+}
+// a blinded receipt is kept only if one of its tags is for an answer I can name (ADR 0026)
+bool WhisperboxCoreImpl::receiptWanted(const json& e) {
+    if (m_rintGen != (long long)m_logGen) {
+        m_rintGen = (long long)m_logGen;
+        m_rintTags.clear();
+        for (const auto& pr : receiptPairs(foldedState())) m_rintTags.insert(whisperbox::receiptTag(pr.first, pr.second));
+    }
+    if (!e.contains("payload") || !e["payload"].is_object() || !e["payload"].contains("tags") || !e["payload"]["tags"].is_array()) return false;
+    for (const auto& t : e["payload"]["tags"]) if (t.is_string() && m_rintTags.count(t.get<std::string>())) return true;
+    return false;
+}
+
 OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
     // cached with the fold: same log, pins, identity and network times give the same view
     const std::string me = m_signId.valid ? m_signId.address : "";
     if (m_cvValid && m_cvLogGen == m_logGen && m_cvPinsGen == m_pinsGen && m_cvNetGen == m_netGen && m_cvIdent == me) return m_cvCache;
     const auto keys = formKeysFor(state);
     const std::set<std::string> also = coOwnedForms(state);
-    std::unordered_map<std::string, const OrderedJson*> formIdx;
-    for (auto it = state["forms"].begin(); it != state["forms"].end(); ++it) formIdx[it.key()] = &it.value();
-    // keyed by event id (it hashes the sealed bytes): the whole hex blob used to be the key
-    auto open = [&](const std::string& id, const std::string& hexBlob) -> json {
-        const std::string& key = id.empty() ? hexBlob : id;
-        auto c = m_openCache.find(key);
-        if (c != m_openCache.end() && (!c->second.dec.is_null() || c->second.nKeys == keys.size())) return c->second.dec;
-        json dec;
-        const whisperbox::Bytes blob = whisperbox::fromHex(hexBlob);
-        for (const auto& kv : keys) {
-            whisperbox::Bytes pt;
-            try { pt = whisperbox::eciesOpen(kv.second->priv, blob); } catch (...) { continue; }
-            try { dec = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { dec = json(); break; }
-            const std::string fid = dec.is_object() && dec.contains("formId") && dec["formId"].is_string() ? lc(dec["formId"].get<std::string>()) : "";
-            auto fi = formIdx.find(fid);
-            if (fid.empty() || fi == formIdx.end() || fi->second->value("publicKey", "") != kv.first) dec = json();
-            break;
-        }
-        // bounded (FR-3): the log holds at most 50,000 answers, so this keeps one entry each
-        if (m_openCache.size() >= 60000) m_openCache.clear();
-        m_openCache[key] = Opened{dec, keys.size()};
-        return dec;
-    };
+    auto open = [&](const std::string& id, const std::string& hexBlob) -> json { return openAnswer(state, keys, id, hexBlob); };
     auto netTime = [this](const std::string& id) -> long long { auto n = m_netTimes.find(id); return n == m_netTimes.end() ? 0 : n->second; };
     auto localTime = [this](const std::string& id) -> long long { auto n = m_firstSeen.find(id); return n == m_firstSeen.end() ? 0 : n->second; };
     // the pool straight from the log: the fold no longer copies it (FR-5)
@@ -2381,6 +2495,8 @@ const OrderedJson& WhisperboxCoreImpl::foldedState() {
     const std::string me = m_signId.valid ? m_signId.address : "";
     if (m_foldValid && m_foldLogGen == m_logGen && m_foldPinsGen == m_pinsGen && m_foldIdent == me) return m_foldCache;
     m_foldCache = whisperbox::computeState(m_log, me, nullptr, m_pinned, /*withPool=*/false);
+    // blinded receipts for the answers I can name (ADR 0026): from here on they read as named ones
+    if (m_foldCache.contains("receiptTags")) whisperbox::resolveReceipts(m_foldCache, receiptPairs(m_foldCache));
     m_foldIds.clear();
     for (auto it = m_foldCache["forms"].begin(); it != m_foldCache["forms"].end(); ++it) m_foldIds.insert(it.key());
     m_foldValid = true; m_foldLogGen = m_logGen; m_foldPinsGen = m_pinsGen; m_foldIdent = me;
@@ -2420,7 +2536,7 @@ void WhisperboxCoreImpl::enrichResponses(const OrderedJson& state, const std::st
         if (!r.is_object()) continue;
         const std::string cid = confirmIdOf(r, formId);
         r["confirmed"] = confs.count(cid) > 0;
-        r["replies"] = replies.count(cid) ? replies[cid] : 0;
+        r["replies"] = cid.empty() ? 0 : (replies.count(cid) ? replies[cid] : 0) + (replies.count(whisperbox::replyTag(formId, cid)) ? replies[whisperbox::replyTag(formId, cid)] : 0);   // ADR 0026
         if (quiz.is_object()) {
             const std::string key = formVer + r.value("respondent", "") + "|" + (r.contains("hlc") ? r["hlc"].dump() : "") + "|" + (r.contains("edits") ? r["edits"].dump() : "");
             auto c = m_scoreCache.find(key);
@@ -2441,8 +2557,10 @@ std::string WhisperboxCoreImpl::sendReply(const std::string& formId, const std::
     try { sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(replyPub), whisperbox::Bytes(pt.begin(), pt.end()))); }
     catch (...) { return ""; }
     OrderedJson p = OrderedJson::object();
-    p["formId"] = formId; p["author"] = m_signId.address; p["to"] = cid; p["sealed"] = sealed;
-    json ev = buildEvent(whisperbox::RESPONSE_REPLY, "reply:" + formId + ":" + cid + ":" + randomHex(6), p, /*sign=*/true);
+    // addressed by a tag, not the answer's receipt id (ADR 0026): only the respondent can recognise it
+    const std::string to = whisperbox::replyTag(formId, cid);
+    p["formId"] = formId; p["author"] = m_signId.address; p["to"] = to; p["sealed"] = sealed;
+    json ev = buildEvent(whisperbox::RESPONSE_REPLY, "reply:" + formId + ":" + to + ":" + randomHex(6), p, /*sign=*/true);
     if (!adoptChecked(ev)) return "";   // too long, or a receipt id peers refuse (FR-9)
     adoptLocal(ev); broadcastEvent(ev);
     return sealed;
@@ -2728,13 +2846,7 @@ std::string WhisperboxCoreImpl::confirmResponse(std::string formId, std::string 
     if (confirmationId.empty() && unverifiedOnly) { out["ok"] = false; out["error"] = "that answer isn't signed by the address it names, so it can't get a receipt"; return out.dump(); }
     if (confirmationId.empty()) { out["ok"] = false; out["error"] = "no decrypted response from that respondent"; return out.dump(); }
 
-    OrderedJson p = OrderedJson::object();
-    p["formId"] = formId;
-    p["confirmationId"] = confirmationId;
-    p["author"] = m_signId.address;
-    json e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmId(formId, confirmationId), p, /*sign=*/true);
-    adoptLocal(e);
-    broadcastEvent(e);
+    if (!emitReceipts(formId, {confirmationId})) { out["ok"] = false; out["error"] = "the receipt couldn't be made"; return out.dump(); }   // blinded (ADR 0026)
     publishState();
     out["ok"] = true; out["formId"] = formId; out["confirmationId"] = confirmationId;
     return out.dump();
@@ -2772,13 +2884,7 @@ std::string WhisperboxCoreImpl::confirmAnswer(std::string formId, std::string co
             found = true; break;
         }
     if (!found) { out["ok"] = false; out["error"] = unverified ? "that answer isn't signed by the address it names, so it can't get a receipt" : "no decrypted answer with that receipt id"; return out.dump(); }
-    OrderedJson p = OrderedJson::object();
-    p["formId"] = formId;
-    p["confirmationId"] = confirmationId;
-    p["author"] = m_signId.address;
-    json e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmId(formId, confirmationId), p, /*sign=*/true);
-    adoptLocal(e);
-    broadcastEvent(e);
+    if (!emitReceipts(formId, {confirmationId})) { out["ok"] = false; out["error"] = "the receipt couldn't be made"; return out.dump(); }   // blinded (ADR 0026)
     publishState();
     out["ok"] = true; out["formId"] = formId; out["confirmationId"] = confirmationId;
     return out.dump();
@@ -2982,10 +3088,13 @@ std::string WhisperboxCoreImpl::formDetail(std::string formId) try {
         const std::vector<std::string> cids = myCidsFor(fid);
         json mine2 = json::array();
         std::map<std::string, whisperbox::SignId> rks;
+        std::map<std::string, std::string> byTo;   // older replies name the receipt id, newer a tag (ADR 0026)
+        for (const auto& c : cids) { byTo[c] = c; byTo[whisperbox::replyTag(fid, c)] = c; }
         for (const auto& r : f["replies"]) {
             const std::string to = r.value("to", "");
-            if (std::find(cids.begin(), cids.end(), to) == cids.end()) continue;
-            const std::string cid = to;
+            auto bt = byTo.find(to);
+            if (bt == byTo.end()) continue;
+            const std::string cid = bt->second;
             const std::string sealed = r.value("sealed", "");
             auto c = m_replyCache.find(sealed);
             if (c == m_replyCache.end()) {
@@ -2995,7 +3104,7 @@ std::string WhisperboxCoreImpl::formDetail(std::string formId) try {
                 try { whisperbox::Bytes pt = whisperbox::eciesOpen(rk.priv, whisperbox::fromHex(sealed)); body = parseUntrusted(std::string(pt.begin(), pt.end())); } catch (...) { body = json(); }
                 c = m_replyCache.emplace(sealed, body.is_object() ? body : json()).first;
             }
-            if (c->second.is_object()) { json b = c->second; if (cids.size() > 1) b["to"] = to; mine2.push_back(b); }
+            if (c->second.is_object()) { json b = c->second; if (cids.size() > 1) b["to"] = cid; mine2.push_back(b); }
         }
         if (!mine2.empty()) out["myReplies"] = mine2;
     }
@@ -3113,14 +3222,7 @@ std::string WhisperboxCoreImpl::confirmAll(std::string formId) try {
             std::string cid = confirmIdOf(json::parse(r.dump()), formId);
             if (!cid.empty() && !containsStr(confs, cid)) todo.push_back(cid);
         }
-    int events = 0;
-    for (size_t i = 0; i < todo.size(); i += 100) {
-        std::vector<std::string> chunk(todo.begin() + i, todo.begin() + std::min(todo.size(), i + 100));
-        OrderedJson p = OrderedJson::object();
-        p["formId"] = formId; p["confirmationIds"] = chunk; p["author"] = m_signId.address;
-        json e = buildEvent(RESPONSE_CONFIRM, whisperbox::responseConfirmBatchId(formId, chunk), p, /*sign=*/true);
-        adoptLocal(e); broadcastEvent(e); events++;
-    }
+    const int events = emitReceipts(formId, todo);   // blinded, 100 a message (ADR 0026)
     if (events) publishState();
     out["ok"] = true; out["formId"] = formId; out["confirmed"] = (int)todo.size(); out["events"] = events;
     return out.dump();

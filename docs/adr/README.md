@@ -25,5 +25,6 @@
 | [0022](0022-several-answers-per-respondent.md) | Several answers per respondent (feedback channel) | accepted, 0.7.0 |
 | [0023](0023-form-files-and-the-respond-intent.md) | Form files; other Basecamp apps ask WhisperBox for feedback by intent | accepted, 0.8.0 |
 | [0024](0024-store-first-creator-served-protocol.md) | Store first, creator served: protocol v2 (no global topic, no chatter, RLN budget) | accepted, 1.0 |
+| [0026](0026-blinded-receipts.md) | Blinded receipts and reply addresses (no form, author or signature on a receipt) | accepted, 1.1.3 |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.
