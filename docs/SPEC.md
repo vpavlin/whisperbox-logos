@@ -224,7 +224,8 @@ anybody.
     then every 6 h, for 14 days, each gap ±30% at random. Anonymous forms stop after 5 retries
     (ADR 0028 F4).
   - An answer's HLC is the 10-minute mark it was sent in, with a counter that keeps one window's
-    answers in order (ADR 0028 F3). The network time must be within [−10, +20] min of it.
+    answers in order, continuing after a restart (ADR 0028 F3). A network time must be within
+    [−5, +15] min of it.
   - A form opened from a link that isn't in Store arrives with the next Store pull (every 15 min)
     or the creator's hourly re-publish. There is no ASK.
 - **RLN budget.**
@@ -486,7 +487,7 @@ ADR 0019).
 
 **Which network time counts (1.1.3, audit R5-3).** A live time must be within 5 minutes of the
 receiver's clock; a Store time is clamped to [the window asked for, now]. Either must also be within
-10 minutes of the answer's own (public) `hlc.wall`, or it is ignored (`netDisagree`). The first live
+[−5, +15] min of the answer's own (public, 10-minute) `hlc.wall`, or it is ignored (`netDisagree`). The first live
 time is final. Otherwise the earliest agreeing time wins, so a second Store or a live copy can lower a
 Store's claim and nothing can raise it. A dishonest Store can't date an honest answer after a close.
 Together with a late sender, it can still backdate an answer by up to 10 minutes from its HLC.

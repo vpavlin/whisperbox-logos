@@ -312,6 +312,8 @@ private:
     void noteNewAnswer(const whisperbox::json& e);
     long long receiptDelayMs();
     void saveOutbox();
+    void saveOutboxNow();
+    void purgeOutbox();
     int flushReceipts(const std::string& topic);
     long long proofAt(const whisperbox::OrderedJson& state, const RPair& pr, const std::string& proof);
     std::vector<whisperbox::VerifiedReceipt> verifiedReceipts(const whisperbox::OrderedJson& state);
@@ -439,4 +441,5 @@ private:
     std::map<std::string, long long> m_formNextMs;                            // next re-publish (±25%, F5)
     long long m_ansWall = 0, m_ansCtr = 0;                                    // answers' 10-minute HLC (F3)
     long m_askIgnored = 0;                                                    // older peers' ASKs (never answered)
+    bool m_outboxDirty = false;                                               // rcpt_outbox.json to save (R8-5)
 };

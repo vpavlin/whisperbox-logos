@@ -27,9 +27,14 @@ help without it. Each is small and needs no protocol break unless noted.
    the next Store pull or the creator's hourly re-publish. The re-publish interval is drawn at random
    per send (±25%), where it was a fixed per-form offset predictable from the public form id. A clean
    break on the test repos.
+   The cost (audit R8-4): a form that missed Store, or whose id a squatter took, reaches a
+   respondent with the next Store pull (≤ 15 min) or the creator's re-publish (≤ 75 min) rather than
+   in seconds. The link's `by=` still picks the real creator once its publish arrives.
 3. **F3, the sender's clock (done for answers, 1.1.4).** An answer's HLC is the 10-minute mark it was
-   sent in, plus a counter that keeps one window's answers (edits) in order. Its network time must
-   be within [−10, +20] min of it. Without a network time (BLE), close and expiry checks judge the
+   sent in, plus a counter that keeps one window's answers (edits) in order. The counter continues
+   from this device's own answers in that window, so a restart can't reuse one (audit R8-2). An
+   answer is sent within the 10 minutes after its mark, so with the 5-min clock lead its network time
+   must be within [−5, +15] min of it (R8-3; +20 let a dishonest Store date it 10 min later). Without a network time (BLE), close and expiry checks judge the
    answer by that mark, so it can count up to 10 min late. Signed events keep their HLC: anoncomms
    advised against flooring them, since closes compare against them and two of a creator's devices
    would race.

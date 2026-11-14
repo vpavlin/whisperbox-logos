@@ -26,6 +26,11 @@
   - a proof can't confirm a second answer that reuses a reply key (R7-1);
   - receipt handling is incremental (R7-2);
   - receipt times are fixed-length (R7-4).
+- **Audit round 8:**
+  - receipts waiting for a form you left are dropped (R8-1);
+  - the answer clock survives a restart (R8-2);
+  - a tighter network-time window (R8-3);
+  - the outbox is saved in batches and sealed with a passphrase (R8-5/R8-6).
 - **No ASK any more (ADR 0028, F1/F5).** A missing form arrives with the Store pull or the creator's
   hourly re-publish, which now has a random ±25% interval. Answers carry only a 10-minute clock (F3).
 - **Answer retries (ADR 0028, F4).** Retries happen at random times (±30%), and on anonymous forms

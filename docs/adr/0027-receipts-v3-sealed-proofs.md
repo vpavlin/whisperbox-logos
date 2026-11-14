@@ -114,3 +114,11 @@ fixed:
    Tests set `WHISPERBOX_RECEIPT_DELAY_MS` / `receiptDelayMs` to 0.
 5. Answers' fine clocks are handled in ADR 0028 (F3).
 
+## Amendment 2026-11-14 (3): audit round 8 (still 1.1.4)
+
+- **R8-1:** the outbox is purged of forms this node no longer creates or co-owns (on prune, so on
+  forget and leave, and before every flush), so a receipt is never sent for a form it left.
+- **R8-5:** the outbox is saved with the next flush (every 250 ms at most), not once per confirmation.
+- **R8-6:** on the desktop the outbox is a private file (`rcpt_outbox.json`), sealed when a passphrase
+  is set. The phone keeps it in the app's storage like its other state.
+

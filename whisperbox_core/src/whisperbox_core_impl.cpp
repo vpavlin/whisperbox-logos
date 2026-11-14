@@ -73,8 +73,6 @@ static long long nowMs() {
 // it is only taken within kMaxClockLeadMs of when we receive the copy, either way: an older one (a
 // store copy, or a node stamping 2001) proves nothing and is treated as absent (open-review
 // 2026-11-01, FR-6; mirror client.mjs netMsOf).
-// how far a network time may be from the answer's own HLC and still count (R5-3)
-static constexpr long long kNetHlcTolMs = 10LL * 60 * 1000;
 static long long netMsOf(long long tsNs, long long now, bool fromStore = false) {
     if (tsNs <= 1000000000000000LL) return 0;
     const long long ms = tsNs / 1000000LL;
@@ -225,6 +223,7 @@ WhisperboxCoreImpl::~WhisperboxCoreImpl() {
     if (m_netDirty) saveNetTimes();
     if (m_firstDirty) saveFirstSeen();
     if (m_draftsDirty) saveDrafts();
+    if (m_outboxDirty) saveOutboxNow();
     if (m_hubTimer) { m_hubTimer->stop(); delete m_hubTimer; m_hubTimer = nullptr; }
 }
 
@@ -245,6 +244,7 @@ void WhisperboxCoreImpl::flushNow() {
     if (m_netDirty) { m_netDirty = false; saveNetTimes(); }
     if (m_firstDirty) { m_firstDirty = false; saveFirstSeen(); }
     if (m_draftsDirty) saveDrafts();
+    if (m_outboxDirty) saveOutboxNow();
     if (m_publishDirty) { m_publishDirty = false; publishState(); }
 }
 
@@ -671,7 +671,6 @@ void WhisperboxCoreImpl::loadLocalPrefs() {
                  if (a.is_array()) for (auto& x : a) if (x.is_string()) m_hidden.insert(lc(x.get<std::string>())); }
     } catch (...) { /* ignore */ }
     loadPrivateFiles();
-    try { std::ifstream ob(m_dataDir + "/rcpt_outbox.json"); if (ob) { json o = parseFile(ob); m_rcptOutbox = o.is_object() ? o : json::object(); } } catch (...) {}   // receipts not sent yet
 }
 // my_answers.json and drafts.json: plaintext, or sealed under the identity when a passphrase is set
 // (open-review 2026-11-03, FR-13). Sealed + locked = not read yet (unlock() reads them).
@@ -690,6 +689,11 @@ void WhisperboxCoreImpl::writePrivate(const std::string& name, const std::string
     else writeAtomic(m_dataDir + "/" + name, text);
 }
 void WhisperboxCoreImpl::loadPrivateFiles() {
+    try {   // receipts not sent yet (ADR 0027 D; sealed with a passphrase, R8-6)
+        bool okb = true;
+        const std::string t = readPrivate("rcpt_outbox.json", okb);
+        if (!t.empty()) { json o = whisperbox::parseLimited(t, whisperbox::kMaxJsonDepth + 2, size_t(64) << 20); if (o.is_object()) m_rcptOutbox = o; }
+    } catch (...) { /* ignore */ }
     m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_draftTrash.clear();
     bool ok = true;
     try {
@@ -1334,9 +1338,28 @@ long long WhisperboxCoreImpl::receiptDelayMs() {
     unsigned char rb[2] = {0, 0}; RAND_bytes(rb, 2);
     return (long long)(envLL("WHISPERBOX_MINUTE_MS", 60000LL) * (1.0 + 4.0 * (((rb[0] << 8) | rb[1]) / 65535.0)));   // 1-5 min
 }
-void WhisperboxCoreImpl::saveOutbox() { writeAtomic(m_dataDir + "/rcpt_outbox.json", m_rcptOutbox.dump()); }
+// saved with the next flush, not per confirmation (audit R8-5), and sealed like my other private files
+// when a passphrase is set (R8-6)
+void WhisperboxCoreImpl::saveOutbox() { m_outboxDirty = true; scheduleFlush(); }
+void WhisperboxCoreImpl::saveOutboxNow() { m_outboxDirty = false; if (!m_locked) writePrivate("rcpt_outbox.json", m_rcptOutbox.dump()); }
+// receipts for forms I no longer create or co-own are never sent (audit R8-1: forget / leave)
+void WhisperboxCoreImpl::purgeOutbox() {
+    refreshInterest();
+    bool changed = false;
+    std::vector<std::string> empty;
+    for (auto it = m_rcptOutbox.begin(); it != m_rcptOutbox.end(); ++it) {
+        json keep = json::array();
+        for (const auto& x : it.value().value("items", json::array())) {
+            if (m_myForms.count(x.value("formId", ""))) keep.push_back(x); else changed = true;
+        }
+        if (keep.empty()) empty.push_back(it.key()); else it.value()["items"] = keep;
+    }
+    for (const auto& t : empty) m_rcptOutbox.erase(t);
+    if (changed || !empty.empty()) { saveOutbox(); m_foldValid = false; m_cvValid = false; }
+}
 // One event per 32 receipts in the bucket, decoys to a power of two (at least 8), sorted by tag
 int WhisperboxCoreImpl::flushReceipts(const std::string& topic) {
+    purgeOutbox();   // R8-1
     if (!m_rcptOutbox.contains(topic)) return 0;
     const json items = m_rcptOutbox[topic].value("items", json::array());
     m_rcptOutbox.erase(topic);
@@ -1646,6 +1669,7 @@ std::string WhisperboxCoreImpl::leaveCoOwner(std::string formId) try {
 }
 // Drop from the log what this node no longer keeps (on start, after unlock, after a form is removed)
 void WhisperboxCoreImpl::pruneUnwanted() {
+    if (m_signId.valid) purgeOutbox();   // a forgotten / left form's receipts are never sent (R8-1)
     if (!m_signId.valid || m_log.empty()) return;
     refreshInterest();   // from the whole log, before anything goes: my own events always stay
     // My own answers are known by the ids in my_answers.json. If that is missing or behind (an old
@@ -2232,8 +2256,9 @@ bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
     // a live copy corrects a later claim, and a replay (always later) never re-dates one (R4-3).
     const long long hw = e.contains("hlc") && e["hlc"].is_object() && e["hlc"].contains("wall") && e["hlc"]["wall"].is_number_integer()
                          ? e["hlc"]["wall"].get<long long>() : -1;
-    // an answer's HLC is floored to 10 min (ADR 0028 F3): the network time is up to 10 min after it
-    if (hw < 0 || netMs < hw - kNetHlcTolMs || netMs > hw + kNetHlcTolMs + 600000) { m_netDisagree++; return false; }
+    // an answer is sent inside the 10 minutes after its (floored) HLC; with the 5-min clock lead a true
+    // network time is in [hw - 5, hw + 15] min (ADR 0028 F3; audit R8-3: +20 let a Store push it later)
+    if (hw < 0 || netMs < hw - 5 * 60000 || netMs > hw + 15 * 60000) { m_netDisagree++; return false; }
     // never before the Store window we asked for (audit R2-5)
     if (m_storeIngest && m_storeWindowMs > 0 && netMs < m_storeWindowMs) netMs = m_storeWindowMs;
     if (it != m_netTimes.end() && it->second <= netMs) return false;
@@ -3205,7 +3230,22 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         // its clock to the 10 minutes, not the device's millisecond HLC (privacy review F3); a counter keeps
         // edits in one window in order
         const long long W = nowMs() / 600000 * 600000;
-        if (W == m_ansWall) m_ansCtr++; else { m_ansWall = W; m_ansCtr = 0; }
+        // the counter continues from my answers already in this window - also after a restart (R8-2)
+        {
+            std::set<std::string> mine;
+            for (const auto& kv : m_myAnswers) {
+                if (!kv.second.is_object()) continue;
+                mine.insert(kv.second.value("eventId", ""));
+                if (kv.second.contains("earlier") && kv.second["earlier"].is_array())
+                    for (const auto& x : kv.second["earlier"]) if (x.is_object()) mine.insert(x.value("eventId", ""));
+            }
+            long long top = -1;
+            for (const auto& ev : m_log)
+                if (ev.value("type", "") == RESPONSE_SUBMIT && mine.count(ev.value("id", "")) && ev.contains("hlc") && ev["hlc"].value("wall", 0LL) == W)
+                    top = std::max(top, ev["hlc"].value("ctr", 0LL));
+            if (W != m_ansWall) { m_ansWall = W; m_ansCtr = -1; }
+            m_ansCtr = std::max(m_ansCtr, top) + 1;
+        }
         e["dev"] = tag; e["hlc"] = {{"wall", W}, {"ctr", m_ansCtr}, {"dev", tag}};
         // peers refuse an event over 256 KiB: say so instead of keeping an answer nobody gets (FR-10)
         if (!adoptChecked(e)) { out["ok"] = false; out["error"] = "these answers are too long to send - shorten the longest ones"; return out.dump(); }
