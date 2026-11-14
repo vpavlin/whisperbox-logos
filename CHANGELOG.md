@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.6 desktop core + studio + respond, Android vc30 (2026-11-14) - padded answers (ADR 0030)
+
+- **Answers are padded to a few fixed sizes** (1, 4, 16 or 36 KiB), so an answer's size no longer
+  hints at which form it is for.
+- Requests for a missing form go out at random times instead of a fixed schedule.
+
 ## 1.1.5 desktop core + studio + respond, Android vc29 (2026-11-14) - respondent privacy first (ADR 0029)
 
 - **A form that missed the network's Store arrives in seconds again.** The respondent asks for its

@@ -442,4 +442,5 @@ private:
     long long m_ansWall = 0, m_ansCtr = 0;                                    // answers' 10-minute HLC (F3)
     long m_askIgnored = 0;                                                    // older peers' ASKs (never answered)
     bool m_outboxDirty = false;                                               // rcpt_outbox.json to save (R8-5)
+    std::map<std::string, long long> m_askNextMs;                             // next ASK per form (jittered)
 };

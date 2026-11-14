@@ -1938,7 +1938,7 @@ int main(int argc, char** argv) {
             R->call(R->core->importForm("whisperbox://form?id=form-5a5a5a5a&by=" + addrP));
             CHECK(Dd->call(Dd->core->createForm(qx.dump())).value("ok", false), "a squatter publishes the same id");
             CHECK(waitUntil([&] { return foldOf(*R)["forms"].contains("form-5a5a5a5a"); }, 8000), "the respondent sees only the squatter's form");
-            { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); R->core->m_askSentMs["form-5a5a5a5a"] = 0; }
+            { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); R->core->m_askSentMs["form-5a5a5a5a"] = 0; R->core->m_askNextMs["form-5a5a5a5a"] = 0; }
             P->node->online = true;
             CHECK(waitUntil([&] { return formOf(*R, "form-5a5a5a5a").value("creator", "") == addrP && formOf(*R, "form-5a5a5a5a").value("canRespond", false); }, 20000),
                   "...it keeps asking, and the real creator's form arrives (W2-7)");
@@ -2306,6 +2306,7 @@ int main(int argc, char** argv) {
                 CHECK(waitUntil([&] { return responsesOf(*P, f6).size() == 1; }, 8000), "P has it");
                 json ans; { std::lock_guard<std::recursive_mutex> lk(R->core->m_mtx); for (auto& e : R->core->m_log) if (e.value("type", "") == "response.submit") ans = e; }
                 CHECK(ans.is_object() && ans["hlc"].value("wall", 1LL) % 600000 == 0, "an answer's HLC is a 10-minute mark (F3, ADR 0028)");
+                CHECK(ans["payload"].value("encryptedPayload", "").size() == (1024 + 62) * 2, "a sealed answer is padded to its size class (ADR 0030)");
                 auto receiptsOf = [&](Peer& p) { int n = 0; std::lock_guard<std::recursive_mutex> lk(p.core->m_mtx); for (auto& e : p.core->m_log) if (e.value("type", "") == "response.receipt") n++; return n; };
                 const int r0 = receiptsOf(*P);
                 setenv("WHISPERBOX_RECEIPT_DELAY_MS", "2500", 1);

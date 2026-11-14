@@ -229,7 +229,8 @@ anybody.
     answers in order, continuing after a restart (ADR 0028 F3). A network time must be within
     [−5, +15] min of it.
   - A form opened from a link that isn't in Store: `ASK` its bucket after 20 s, 10 min and 30 min,
-    then hourly (at most 26 times; one ASK per bucket).
+    then hourly (at most 26 times; one ASK per bucket); the first after 10-30 s, later gaps ±30%
+    (ADR 0030).
 - **RLN budget.**
   - Everything sent goes through one queue: at most 10 messages per 600 s epoch by default
     (`$WHISPERBOX_MSGS_PER_EPOCH`), of the node's 100.
@@ -670,10 +671,14 @@ with each (only a members list stops that). Close, expiry, the cap and the edit 
 network's timestamp of the answer; before RLN is on, a sender running a modified node can still
 choose that timestamp, and an answer arriving without one (BLE) is judged by its own clock.
 
-Answer retries are jittered (±30%) and stop after about an hour on anonymous forms (ADR 0028).
+Answer retries are jittered (±30%) and continue until the receipt, anonymous forms included (ADR 0028,
+0029). Sealed answers are padded to 1, 4, 16 or 36 KiB of plaintext, so their length doesn't name the
+form (ADR 0030). A respondent's ASK names a bucket (1 of 16), never the form, at jittered times.
 
 Not protected: timing/network-level correlation (Mix is not deployable yet); the bucket a form is
-in (its id is public in links); answer length (answers aren't padded); the clear-text HLC of signed
+in (its id is public in links), so an answer's or an ASK's bucket is visible, and a creator answering
+an ASK at once can tie the asking address to the forms of that bucket, even if the person never answers;
+an answer's retries are identical copies, so they link the networks a respondent sends from; answer length (answers aren't padded); the clear-text HLC of signed
 events; the
 creator (and co-owners) see everything in an answer; a co-owner keeps access forever; there is
 no forward secrecy (a leaked form key opens all of that form's answers).

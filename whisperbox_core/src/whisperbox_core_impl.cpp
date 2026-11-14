@@ -2074,11 +2074,13 @@ void WhisperboxCoreImpl::wireSchedule() {
         const auto pin = m_pinned.find(fid);
         const bool have = st["forms"].contains(fid) && (pin == m_pinned.end() || pin->second.empty() || lc(st["forms"][fid].value("creator", "")) == lc(pin->second));
         if (have) { m_askCount.erase(fid); continue; }
-        if (!m_askSentMs.count(fid)) m_askSentMs[fid] = now;   // first seen: give Store a moment (20 s)
+        // jittered (anoncomms: fixed gaps pinned the link-open time): 10-30 s, then 10, 20, 60 min +/-30%
+        auto rnd = [] { unsigned char rb[2] = {0, 0}; RAND_bytes(rb, 2); return ((rb[0] << 8) | rb[1]) / 65535.0; };
+        if (!m_askSentMs.count(fid)) { m_askSentMs[fid] = now; m_askNextMs[fid] = now + (long long)(minute / 6 + (minute / 3) * rnd()); }
         const int n = m_askCount[fid];
-        const long long gap = n == 0 ? minute / 3 : n == 1 ? 10 * minute : n == 2 ? 20 * minute : 60 * minute;
-        if (n >= 26 || now - m_askSentMs[fid] < gap) continue;
+        if (n >= 26 || now < m_askNextMs[fid]) continue;
         m_askSentMs[fid] = now; m_askCount[fid] = n + 1;
+        m_askNextMs[fid] = now + (long long)((n == 0 ? 10 : n == 1 ? 20 : 60) * minute * (0.7 + 0.6 * rnd()));
         askBuckets.insert(formTopic(fid));
     }
     for (const auto& t : askBuckets) {
@@ -3248,6 +3250,14 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
 
     std::string creatorPubHex = f["publicKey"].get<std::string>();
     try {
+        // padded to a size class (1, 4, 16 or 36 KiB of plaintext): the sealed length used to tell which
+        // form a blob answers (privacy review F2; ADR 0030). `pad` is outside the inner signature; every
+        // creator ignores it.
+        {
+            const size_t len = resp.dump().size();
+            for (size_t cls : {size_t(1024), size_t(4096), size_t(16384), size_t(36864)})
+                if (len + 9 <= cls) { resp["pad"] = std::string(cls - len - 9, '0'); break; }
+        }
         const std::string ptText = resp.dump();   // ONE dump — two temporaries would mix iterators
         whisperbox::Bytes pt(ptText.begin(), ptText.end());
         whisperbox::Bytes sealed = whisperbox::eciesSeal(whisperbox::fromHex(creatorPubHex), pt);
@@ -4114,7 +4124,7 @@ std::string WhisperboxCoreImpl::resync() {
     m_joinedTopics.clear();
     syncTopics();
     storePullAll();
-    for (const auto& fid : m_watched) m_askSentMs[fid] = 0;
+    for (const auto& fid : m_watched) { m_askSentMs[fid] = 0; m_askNextMs[fid] = 0; }
     publishState();
     json out = {{"ok", true}, {"logSize", (int)m_log.size()}};
     return out.dump();

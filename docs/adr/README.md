@@ -29,5 +29,6 @@
 | [0027](0027-receipts-v3-sealed-proofs.md) | Receipts v3: tags from a per-answer secret, sealed signed proofs, decoys, coarse HLC | accepted, 1.1.4 |
 | [0028](0028-privacy-hardening-without-mix.md) | Privacy hardening without Mix (retry jitter; then ASK by bucket, ASK on schedule, decoy buckets) | in progress, 1.1.4 |
 | [0029](0029-respondent-privacy-first.md) | Respondent privacy first; creator privacy never at the cost of UX (ASK by bucket, receipts in seconds) | accepted, 1.1.5 |
+| [0030](0030-padded-answers-jittered-ask.md) | Padded answers (1/4/16/36 KiB), jittered ASK | accepted, 1.1.6 |
 
 Format: context, decision, consequences. Supersede an ADR with a new one; don't rewrite history.
