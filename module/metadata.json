@@ -1,26 +1,141 @@
 {
-  "name": "whisperbox",
-  "display_name": "WhisperBox - Encrypted Forms",
-  "version": "1.1.6",
-  "type": "ui_qml",
-  "category": "social",
-  "description": "Privacy-first encrypted forms over Waku. Create forms, share a URI/QR, respondents answer end-to-end sealed to the creator only; the creator decrypts, confirms and exports CSV. Pure-QML view over the whisperbox_core module.",
-  "view": "qml/Main.qml",
-  "icon": "icon.png",
-  "dependencies": [
-    "whisperbox_core"
-  ],
-  "nix": {
-    "packages": {
-      "build": [],
-      "runtime": []
-    },
-    "external_libraries": [],
-    "cmake": {
-      "find_packages": [],
-      "extra_sources": [],
-      "extra_include_dirs": [],
-      "extra_link_libraries": []
-    }
+ "name": "whisperbox",
+ "display_name": "WhisperBox - Encrypted Forms",
+ "version": "1.1.7",
+ "type": "ui_qml",
+ "category": "social",
+ "description": "Privacy-first encrypted forms over Waku. Create forms, share a URI/QR, respondents answer end-to-end sealed to the creator only; the creator decrypts, confirms and exports CSV. Pure-QML view over the whisperbox_core module.",
+ "view": "qml/Main.qml",
+ "icon": "icon.png",
+ "dependencies": [
+  "whisperbox_core"
+ ],
+ "nix": {
+  "packages": {
+   "build": [],
+   "runtime": []
+  },
+  "external_libraries": [],
+  "cmake": {
+   "find_packages": [],
+   "extra_sources": [],
+   "extra_include_dirs": [],
+   "extra_link_libraries": []
   }
+ },
+ "provides": [
+  {
+   "intent": "whisperbox.forms.list",
+   "readOnly": true,
+   "description": "List my forms (and co-owned ones) with their status and how many answers each has, plus my drafts",
+   "params": []
+  },
+  {
+   "intent": "whisperbox.forms.create",
+   "handoff": true,
+   "description": "Create a form from a template or from questions. By default it becomes a draft opened in WhisperBox for the user to check and publish; publish:true publishes it at once and returns its link",
+   "params": [
+    {
+     "name": "template",
+     "type": "string",
+     "required": false,
+     "description": "Start from a template: rsvp, feedback, poll, signup or nps"
+    },
+    {
+     "name": "title",
+     "type": "string",
+     "required": false,
+     "description": "The form's title (required without a template)"
+    },
+    {
+     "name": "description",
+     "type": "string",
+     "required": false,
+     "description": "Text shown under the title"
+    },
+    {
+     "name": "questions",
+     "type": "array",
+     "required": false,
+     "description": "Questions, replacing the template's: [{type: text|textarea|choice|multi|dropdown|yesno|scale|number|email|date, text, options?: [..] (for choice/multi/dropdown), required?: bool}]"
+    },
+    {
+     "name": "publish",
+     "type": "bool",
+     "required": false,
+     "description": "true = publish now and return the link; default false = a draft to review"
+    }
+   ]
+  },
+  {
+   "intent": "whisperbox.forms.summary",
+   "readOnly": true,
+   "description": "A summary of a form's answers: per question the counts and percentages (choices, yes/no, scales with average, numbers) and how many written answers there are. Written answers themselves only with includeText, and only if the user agrees in WhisperBox; never who answered",
+   "params": [
+    {
+     "name": "form",
+     "type": "string",
+     "required": true,
+     "description": "The form: its title (or a part of it) or its id"
+    },
+    {
+     "name": "includeText",
+     "type": "bool",
+     "required": false,
+     "description": "Also ask for the written answers (WhisperBox asks the user first)"
+    }
+   ]
+  },
+  {
+   "intent": "whisperbox.forms.share",
+   "readOnly": true,
+   "description": "The link to send people so they can answer the form",
+   "params": [
+    {
+     "name": "form",
+     "type": "string",
+     "required": true,
+     "description": "The form: its title (or a part of it) or its id"
+    }
+   ]
+  },
+  {
+   "intent": "whisperbox.forms.close",
+   "description": "Stop accepting answers to a form",
+   "params": [
+    {
+     "name": "form",
+     "type": "string",
+     "required": true,
+     "description": "The form: its title (or a part of it) or its id"
+    }
+   ]
+  },
+  {
+   "intent": "whisperbox.forms.reopen",
+   "description": "Accept answers to a closed form again",
+   "params": [
+    {
+     "name": "form",
+     "type": "string",
+     "required": true,
+     "description": "The form: its title (or a part of it) or its id"
+    }
+   ]
+  },
+  {
+   "intent": "whisperbox.forms.open",
+   "handoff": true,
+   "readOnly": true,
+   "description": "Show a form (and its answers, if it is yours) in WhisperBox",
+   "params": [
+    {
+     "name": "form",
+     "type": "string",
+     "required": true,
+     "description": "The form: its title (or a part of it) or its id"
+    }
+   ]
+  }
+ ]
 }

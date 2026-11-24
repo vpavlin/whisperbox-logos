@@ -230,8 +230,8 @@ Item {
         return null;
     }
     // Per-question aggregate for the Summary view.
-    function summaryFor(q) {
-        var rs = root.selResponses, t = normType(q.type), i, j;
+    function summaryFor(q, rsIn) {
+        var rs = rsIn || root.selResponses, t = normType(q.type), i, j;
         var bars = function (labels, countFn) {
             var counts = labels.map(function () { return 0; }), answered = 0;
             for (i = 0; i < rs.length; i++) { var hit = countFn(answerOf(rs[i], q.id), counts); if (hit) answered++; }
@@ -737,9 +737,9 @@ Item {
         for (var i = 0; i < root.draftQuestions.length; i++) if (String(root.draftQuestions[i].text || "").trim()) return false;
         return true;
     }
-    function saveCurrentDraft(publishAt, cb) {
+    function saveCurrentDraft(publishAt, cb, errCb) {
         var b = buildDef(publishAt !== undefined && publishAt !== null);
-        if (!b.ok) { toast(b.error); return; }
+        if (!b.ok) { toast(b.error); if (errCb) errCb(b.error); return; }
         var d = { def: b.def };
         if (root.draftId) d.id = root.draftId;
         else {   // the same form opened again (a template, untouched): reuse its draft, don't add another (FR-9)
@@ -752,7 +752,7 @@ Item {
             // save look failed - no toast, no id kept, and autosave minted a new draft each time)
             var r = root.parse(raw);
             if (r && r.ok) { root.draftId = r.draftId; root.draftDirty = false; if (cb) cb(r); }
-            else { root.draftDirty = false; toast("Couldn't save the draft: " + ((r && r.error) || "no answer from the WhisperBox core - is it updated too?")); }
+            else { root.draftDirty = false; var em = (r && r.error) || "no answer from the WhisperBox core - is it updated too?"; toast("Couldn't save the draft: " + em); if (errCb) errCb(em); }
         });
     }
     function saveCurrentDraftNow() { saveCurrentDraft(null, function () { toast("Draft saved"); }); }
@@ -805,11 +805,166 @@ Item {
     Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
     Timer { id: toastTimer; interval: 3500; onTriggered: root.toastMsg = "" }
     Component.onCompleted: root.refresh()
+
+    // ── intents: other apps ask WhisperBox (docs/adr/0031-app-intents.md) ──
+    // Basecamp confirms every request with the user first; this view answers with logos.respond.
+    // Respondents come first (ADR 0029): a summary has counts and percentages only. Written answers
+    // leave WhisperBox only if the app asks (includeText) AND the user agrees here, and never with
+    // who wrote them or when.
+    readonly property var templateKeys: ({ "rsvp": 0, "event": 0, "event-rsvp": 0, "feedback": 1, "poll": 2, "quick-poll": 2, "signup": 3, "sign-up": 3, "nps": 4 })
+    readonly property var intentTypes: ({ "text": "text", "short": "text", "textarea": "textarea", "long": "textarea", "paragraph": "textarea",
+        "choice": "radioButtons", "single": "radioButtons", "radio": "radioButtons", "radiobuttons": "radioButtons",
+        "multi": "checkbox", "multiple": "checkbox", "checkbox": "checkbox", "checkboxes": "checkbox", "dropdown": "dropdown",
+        "yesno": "boolean", "boolean": "boolean", "scale": "scale", "rating": "scale", "number": "number", "email": "email",
+        "date": "date", "time": "time", "url": "url" })
+    property var textShare: null   // {rid, requester, title, count, data, texts}: written answers waiting for the user's OK
+    function intentReply(rid, ok, data, err) {
+        try { logos.respond(rid, ok, data || ({}), err || ""); } catch (e) { console.warn("whisperbox respond", e); }
+    }
+    function intentFail(rid, code, msg) { intentReply(rid, false, { message: String(msg).substring(0, 300) }, code); }
+    function intentList(v) { if (v === undefined || v === null) return []; if (Array.isArray(v)) return v; var o = []; if (typeof v.length === "number") for (var i = 0; i < v.length; i++) o.push(v[i]); return o; }
+    // a form by id or by (part of) its title; only your own and co-owned forms unless anyForm
+    function resolveForm(q, anyForm) {
+        var s = String(q === undefined || q === null ? "" : q).trim(), lo = s.toLowerCase();
+        if (!s) return { error: "name the form (its title or id)" };
+        if (root.forms[lo] && (anyForm || root.forms[lo].mine || root.forms[lo].coOwner)) return { id: lo };
+        var exact = [], part = [];
+        for (var k in root.forms) {
+            var f = root.forms[k];
+            if (!anyForm && !(f.mine || f.coOwner)) continue;
+            if (anyForm && !(f.mine || f.coOwner || f.mySubmitted || root.watchedIds.indexOf(k) >= 0)) continue;
+            var t = String(f.title || "").toLowerCase();
+            if (t === lo) exact.push(k); else if (t.indexOf(lo) >= 0) part.push(k);
+        }
+        var hits = exact.length ? exact : part;
+        if (hits.length === 1) return { id: hits[0] };
+        if (!hits.length) return { error: "no form " + (anyForm ? "" : "of yours ") + "matches \"" + s + "\"" };
+        return { error: "several forms match \"" + s + "\": " + hits.slice(0, 8).map(function (h) { return "“" + root.forms[h].title + "”"; }).join(", ") + ". Say which." };
+    }
+    function intentFormRow(f) {
+        return { id: f.id, title: f.title || "", status: f.status || "open", responses: responsesFor(f.id).length,
+                 newResponses: f.newResponses || 0, createdAt: f.createdAt || 0, role: f.mine ? "mine" : "co-owner" };
+    }
+    function onIntent(rid, intent, params, requester) {
+        params = params || ({});
+        if (intent === "whisperbox.forms.list") {
+            var rows = [];
+            for (var k in root.forms) { var f = root.forms[k]; if ((f.mine || f.coOwner) && !f.hidden) rows.push(intentFormRow(f)); }
+            rows.sort(function (a, b) { return b.createdAt - a.createdAt; });
+            intentReply(rid, true, { forms: rows, drafts: root.drafts.map(function (d) { return { draftId: d.id, title: (d.def && d.def.title) || "" }; }) }, "");
+            return;
+        }
+        if (intent === "whisperbox.forms.create") { intentCreate(rid, params); return; }
+        if (intent === "whisperbox.forms.summary") { intentSummary(rid, params, requester); return; }
+        if (intent === "whisperbox.forms.open") {
+            var ro = resolveForm(params.form, true); if (ro.error) { intentFail(rid, "bad_request", ro.error); return; }
+            root.previewDef = null; root.showCreate = false; selectForm(ro.id);
+            intentReply(rid, true, { formId: ro.id, title: root.forms[ro.id].title || "" }, ""); return;
+        }
+        var r = resolveForm(params.form, false); if (r.error) { intentFail(rid, "bad_request", r.error); return; }
+        var title = root.forms[r.id].title || "";
+        if (intent === "whisperbox.forms.share") {
+            callVia("shareUri", [r.id], function (raw) { var o = parse(raw);
+                if (o && o.ok) intentReply(rid, true, { formId: r.id, title: title, link: o.uri }, ""); else intentFail(rid, "failed", (o && o.error) || "no link"); });
+            return;
+        }
+        if (intent === "whisperbox.forms.close" || intent === "whisperbox.forms.reopen") {
+            var m = intent === "whisperbox.forms.close" ? "closeForm" : "reopenForm";
+            callVia(m, [r.id], function (raw) { var o = parse(raw); refresh();
+                if (o && o.ok) intentReply(rid, true, { formId: r.id, title: title, status: m === "closeForm" ? "closed" : "open" }, ""); else intentFail(rid, "failed", (o && o.error) || "refused"); });
+            return;
+        }
+        intentFail(rid, "bad_request", "unknown intent " + intent);
+    }
+    function intentCreate(rid, params) {
+        var b;
+        if (params.template !== undefined && String(params.template).trim() !== "") {
+            var ti = root.templateKeys[String(params.template).trim().toLowerCase()];
+            if (ti === undefined) { intentFail(rid, "bad_request", "unknown template \"" + params.template + "\": use rsvp, feedback, poll, signup or nps"); return; }
+            b = JSON.parse(JSON.stringify(root.templates[ti].b));
+        } else b = { title: "", description: "", questions: [] };
+        if (params.title !== undefined && String(params.title).trim()) b.title = String(params.title).trim().substring(0, 200);
+        if (params.description !== undefined) b.description = String(params.description).substring(0, 2000);
+        var qs = intentList(params.questions);
+        if (qs.length) {
+            if (qs.length > 50) { intentFail(rid, "bad_request", "at most 50 questions"); return; }
+            b.questions = [];
+            for (var i = 0; i < qs.length; i++) {
+                var q = qs[i] || {}, text = String(q.text || "").trim(); if (!text) continue;
+                var ty = root.intentTypes[String(q.type || "text").toLowerCase()] || "text";
+                var dq = { type: ty, text: text.substring(0, 500), required: q.required === true, optionsText: intentList(q.options).map(function (o) { return String(o).substring(0, 200); }).join("\n") };
+                if (ty === "scale") { dq.min = q.min === 0 ? 0 : 1; dq.max = [3, 4, 5, 7, 10].indexOf(q.max) >= 0 ? q.max : 5; }
+                b.questions.push(dq);
+            }
+        }
+        if (!String(b.title || "").trim()) { intentFail(rid, "bad_request", "give the form a title (or a template)"); return; }
+        if (!b.questions || !b.questions.length) { intentFail(rid, "bad_request", "give at least one question (or a template)"); return; }
+        root.previewDef = null; root.editingFormId = "";
+        loadBuilder(b); root.draftId = ""; rebuildBuilder(); root.draftDirty = true; root.showCreate = true;
+        if (params.publish === true) {
+            var bd = buildDef(true); if (!bd.ok) { intentFail(rid, "bad_request", bd.error); return; }
+            var def = Object.assign({}, bd.def); delete def._builder;
+            callVia("createForm", [JSON.stringify(def)], function (raw) {
+                var o = parse(raw); refresh();
+                if (!o || !o.ok) { intentFail(rid, "failed", (o && o.error) || "the form couldn't be published"); return; }
+                var fid = String(o.formId || "").toLowerCase();
+                root.draftDirty = false; root.showCreate = false; selectForm(fid);
+                callVia("shareUri", [fid], function (raw2) { var u = parse(raw2);
+                    intentReply(rid, true, { formId: fid, title: b.title, status: "open", link: (u && u.ok) ? u.uri : "" }, ""); });
+            });
+            return;
+        }
+        saveCurrentDraft(null, function (o) {
+            toast("Draft from another app: check it, then Publish");
+            intentReply(rid, true, { draftId: o.draftId, title: b.title, status: "draft", note: "Opened in WhisperBox for review; it is sent only when you press Publish." }, "");
+        }, function (em) { intentFail(rid, "failed", em); });
+    }
+    function intentSummary(rid, params, requester) {
+        var r = resolveForm(params.form, false); if (r.error) { intentFail(rid, "bad_request", r.error); return; }
+        var f = root.forms[r.id];
+        callVia("formDetail", [r.id], function (raw) {
+            var d = parse(raw);
+            if (!d || d.ok === false) { intentFail(rid, "failed", (d && d.error) || "no answers"); return; }
+            var rs = d.responses || [], out = { formId: r.id, title: f.title || "", status: f.status || "open", responses: rs.length, questions: [], textIncluded: false }, texts = [], nText = 0;
+            var qsF = f.questions || [];
+            for (var i = 0; i < qsF.length; i++) {
+                var q = qsF[i], t = normType(q.type); if (t === "section") continue;
+                var sm = summaryFor(q, rs), e = { question: q.text || "", type: t, answered: sm.answered };
+                if (sm.bars) e.results = sm.rows.map(function (x) { return { label: x.label, count: x.n, percent: x.pct }; });
+                if (sm.stat) e.stat = sm.stat;
+                // written answers: counted here, the words themselves only with the user's OK
+                var w = [];
+                for (var j = 0; j < rs.length && w.length < 200; j++) {
+                    var v = answerOf(rs[j], q.id), l = (v !== null && typeof v === "object" && !(v.other !== undefined)) ? intentList(v) : [v];
+                    if (t === "text" || t === "textarea" || t === "email" || t === "url") { var tx = answerText(q, v); if (tx) w.push(tx.substring(0, 500)); }
+                    else for (var k2 = 0; k2 < l.length; k2++) if (isOtherVal(l[k2]) && String(l[k2].other).trim()) w.push(("Other: " + l[k2].other).substring(0, 500));
+                }
+                e.written = w.length; nText += w.length; texts.push(w);
+                out.questions.push(e);
+            }
+            if (params.includeText === true && nText > 0) { root.textShare = { rid: rid, requester: requester || "an app", title: f.title || "", count: nText, data: out, texts: texts }; return; }
+            if (nText > 0) out.note = "Written answers are not included; ask with includeText to request them (WhisperBox asks the user).";
+            intentReply(rid, true, out, "");
+        });
+    }
+    function textShareYes() { finishTextShare(true); }    // (harness: invokable without args)
+    function textShareNo() { finishTextShare(false); }
+    function finishTextShare(share) {
+        var t = root.textShare; if (!t) return; root.textShare = null;
+        var out = t.data;
+        if (share) { for (var i = 0; i < out.questions.length; i++) if (t.texts[i] && t.texts[i].length) out.questions[i].answers = t.texts[i]; out.textIncluded = true; }
+        else out.note = "The user chose not to share the written answers.";
+        intentReply(t.rid, true, out, "");
+    }
     Connections {
         target: (typeof logos !== "undefined") ? logos : null
         ignoreUnknownSignals: true
         function onModuleEventReceived(module, event, data) {
             if (module === "whisperbox_core" && event === "stateChanged") root.applySnapshot(root.parse(data));
+        }
+        function onIntentRequested(requestId, intent, params, requesterName) {
+            if (String(intent).indexOf("whisperbox.forms.") !== 0) return;
+            root.onIntent(requestId, intent, params, requesterName);
         }
     }
     // Clipboard bridge (pure QML has no clipboard API; TextEdit.copy() does).
@@ -2376,6 +2531,30 @@ Item {
                 WbButton { visible: !root.editingFormId; label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
                 WbButton { visible: !root.editingFormId; primary: true; label: root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm"); onClicked: root.doCreate() }
                 WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm"); onClicked: root.doUpdate() }
+            }
+        }
+    }
+
+    // ── an app asks for the written answers (intent whisperbox.forms.summary, includeText) ──
+    Rectangle {
+        visible: root.textShare !== null
+        anchors.fill: parent; z: 30; color: "#99000000"
+        MouseArea { anchors.fill: parent }   // modal
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(520, root.width - 48); implicitHeight: tsCol.implicitHeight + 40
+            radius: 14; color: root.wbSurfaceRaised; border.color: root.wbBorder; border.width: 1
+            ColumnLayout {
+                id: tsCol; x: 20; y: 20; width: parent.width - 40; spacing: 12
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 16; font.weight: Font.DemiBold; color: root.wbText
+                       text: root.textShare ? (root.textShare.requester + " asks for the written answers to \u201c" + root.textShare.title + "\u201d") : "" }
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 13; color: root.wbTextSec
+                       text: root.textShare ? (root.plural(root.textShare.count, "written answer", "written answers") + " would be shared, without who wrote them or when. The app may send them to an AI model, which might not run on this computer. Counts and percentages are shared either way.") : "" }
+                RowLayout {
+                    spacing: 8
+                    WbButton { primary: true; label: "Share written answers"; onClicked: root.finishTextShare(true) }
+                    WbButton { label: "Only counts"; onClicked: root.finishTextShare(false) }
+                }
             }
         }
     }

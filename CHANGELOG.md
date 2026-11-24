@@ -1,5 +1,15 @@
 # Changelog
 
+
+## Studio 1.1.7 (2026-11-24): app intents
+
+- Other apps (Basecamp Voice first) can ask WhisperBox to list your forms, create one from a template or from
+  questions (a draft for you to check, or published if asked), summarise the answers, give the share link,
+  close or reopen a form, and open it (ADR 0031).
+- A summary has counts and percentages only. Written answers are shared only when the app asks and you agree
+  in WhisperBox, never with who wrote them.
+- The core is unchanged (1.1.6).
+
 ## 1.1.6 desktop core + studio + respond, Android vc30 (2026-11-14) - padded answers (ADR 0030)
 
 - **Answers are padded to a few fixed sizes** (1, 4, 16 or 36 KiB), so an answer's size no longer

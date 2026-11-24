@@ -133,9 +133,16 @@ public:
         QTimer::singleShot(0, this, [c, r]() mutable { if (c.isCallable()) c.call({QJSValue(r)}); });
     }
     Q_INVOKABLE void onModuleEvent(const QString &mod, const QString &ev) {}
+    // intents: the view answers a request with respond(requestId, ok, data, error)
+    Q_INVOKABLE void respond(const QString &rid, bool ok, const QVariant &data, const QString &err) {
+        const QVariant v = data.canConvert<QJSValue>() && data.userType() == qMetaTypeId<QJSValue>() ? data.value<QJSValue>().toVariant() : data;
+        fprintf(stderr, "RESPOND %s %d %s %s\n", rid.toUtf8().constData(), ok ? 1 : 0,
+                QJsonDocument::fromVariant(v).toJson(QJsonDocument::Compact).constData(), err.toUtf8().constData());
+    }
 
 signals:
     void moduleEventReceived(const QString &mod, const QString &ev, const QString &data);
+    void intentRequested(const QString &requestId, const QString &intent, const QVariantMap &params, const QString &requesterName);
 
 private:
     QString m_fixture;
@@ -200,6 +207,24 @@ int main(int argc, char **argv) {
             if (fn.trimmed().isEmpty()) continue;
             if (!QMetaObject::invokeMethod(r, fn.trimmed().constData()))
                 { fprintf(stderr, "[E] WB_INVOKE: no function %s\n", fn.constData()); g_qmlErrors++; }
+        }
+    });
+
+    // WB_INTENT="intent;{params json}": an app's request arrives (as Basecamp delivers it) at 1.2 s;
+    // WB_LATE_INVOKE="fnA,fnB": root functions called at 2.8 s (e.g. answering a prompt the intent raised)
+    if (!qgetenv("WB_INTENT").isEmpty()) {
+        QTimer::singleShot(1200, [logos] {
+            const QByteArray spec = qgetenv("WB_INTENT"); const int cut = spec.indexOf(';');
+            const QString intent = QString::fromUtf8(cut < 0 ? spec : spec.left(cut));
+            const QVariantMap params = cut < 0 ? QVariantMap() : QJsonDocument::fromJson(spec.mid(cut + 1)).object().toVariantMap();
+            emit logos->intentRequested("req-h1", intent, params, "basecamp_voice");
+        });
+    }
+    QTimer::singleShot(2800, [&view] {
+        QQuickItem *r = view.rootObject(); if (!r) return;
+        for (const QByteArray &fn : qgetenv("WB_LATE_INVOKE").split(',')) {
+            if (fn.trimmed().isEmpty()) continue;
+            if (!QMetaObject::invokeMethod(r, fn.trimmed().constData())) { fprintf(stderr, "[E] WB_LATE_INVOKE: no function %s\n", fn.constData()); g_qmlErrors++; }
         }
     });
 
